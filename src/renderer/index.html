@@ -79,7 +79,9 @@
       <a class="nav-item" data-view="all"><svg><use href="#i-music"/></svg><span>全部音乐</span><b id="cntAll">0</b></a>
       <a class="nav-item" data-view="fav"><svg><use href="#i-heart"/></svg><span>我的收藏</span><b id="cntFav">0</b></a>
       <a class="nav-item" data-view="recent"><svg><use href="#i-clock"/></svg><span>最近播放</span><b id="cntRecent">0</b></a>
+      <a class="nav-item" data-view="most"><svg><use href="#i-sort-down"/></svg><span>最常播放</span><b id="cntMost">0</b></a>
       <a class="nav-item" data-view="albums"><svg><use href="#i-album"/></svg><span>专辑</span><b id="cntAlbums">0</b></a>
+      <a class="nav-item" data-view="folders"><svg><use href="#i-folder"/></svg><span>文件夹</span><b id="cntFolders">0</b></a>
     </nav>
     <nav class="nav-group" id="playlistNav">
       <div class="nav-title">
@@ -260,6 +262,10 @@
     <div class="modal-body">
       <div class="dir-list" id="dirList"></div>
       <div class="dir-tip">支持多个文件夹，会递归扫描子目录。改动后点「保存并扫描」立即生效。</div>
+      <label class="dir-watch">
+        <input type="checkbox" id="chkWatchFolders" />
+        <span>自动监视文件夹变化（往目录里放新歌后自动增量扫描）</span>
+      </label>
     </div>
     <div class="modal-foot">
       <button class="btn" id="btnDirAdd"><svg><use href="#i-plus"/></svg><span>添加文件夹</span></button>

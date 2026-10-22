@@ -22,6 +22,8 @@ const state = {
   exclusive: false,      // 独占输出（mpv 后端）是否生效
   resumePos: {},         // 长音轨断点位置 {trackId: 秒}（v1.6）
   restoringSession: false,// 正在恢复上次会话（此时不要叠加断点续播）
+  selected: new Set(),   // 列表多选（v1.7）
+  selAnchor: null,       // Shift 范围选的起点下标
   sessionTimer: null
 }
 
@@ -163,6 +165,11 @@ async function boot() {
   window.api.onScanProgress(onScanProgress)
   window.api.onScanDone(onScanDone)
   window.api.onShortcut((action) => handleShortcut(action))
+  // 睡眠定时到点：player.pause() 会走正常的淡出，不会突然静音（v1.7）
+  window.api.onSleepTimer(() => {
+    if (player && player.isPlaying) player.pause()
+    toast('睡眠定时已到，播放已暂停', 4000)
+  })
   // 托盘/快捷键改迷你状态时，主进程会推过来，界面跟着切
   window.api.onMiniState((st) => {
     state.mini = !!(st && st.mini !== undefined ? st.mini : st)
@@ -173,6 +180,51 @@ async function boot() {
   setInterval(saveSession, 10000)
 
   document.getElementById('btnMax').innerHTML = icon(window.api.isMaximized ? 'restore' : 'max')
+}
+
+/** 当前曲目的歌词偏移（v1.7）：优先本曲设置，没有则用全局默认 */
+function offsetFor(id) {
+  const map = (state.settings && state.settings.lyricOffsetById) || {}
+  if (id && map[id] != null) return Number(map[id]) || 0
+  return Number(state.settings && state.settings.lyricOffset) || 0
+}
+
+/* ================= 列表多选（v1.7） ================= */
+
+function paintSelection() {
+  document.querySelectorAll('#tableBody .tr').forEach((row) => {
+    row.classList.toggle('selected', state.selected.has(row.dataset.id))
+  })
+}
+
+function clearSelection() {
+  if (!state.selected.size && state.selAnchor == null) return
+  state.selected.clear()
+  state.selAnchor = null
+  paintSelection()
+}
+
+function toggleSelection(id, index) {
+  if (state.selected.has(id)) state.selected.delete(id)
+  else state.selected.add(id)
+  state.selAnchor = index
+  paintSelection()
+}
+
+/** Shift 范围选：从上一次点击处到当前行（含两端） */
+function selectRange(index) {
+  const from = state.selAnchor == null ? index : state.selAnchor
+  const [a, b] = from <= index ? [from, index] : [index, from]
+  for (let i = a; i <= b; i++) {
+    const t = state.visible[i]
+    if (t) state.selected.add(t.id)
+  }
+  paintSelection()
+}
+
+/** 当前选中的曲目（右键批量操作 / 拖拽用） */
+function selectedTracks() {
+  return Array.from(state.selected).map((id) => state.byId.get(id)).filter(Boolean)
 }
 
 function applySettings() {
@@ -392,19 +444,22 @@ function updateLibStat() {
 
 function updateNavCounts() {
   const albumSet = new Set(state.tracks.map((t) => t.album || '未知专辑'))
+  const dirSet = new Set(state.tracks.map((t) => t.dir || '').filter(Boolean))
   UI.renderNavCounts({
     all: state.tracks.length,
     fav: state.favorites.size,
     recent: state.history.length,
+    most: state.tracks.filter((t) => (state.playCounts[t.id] || 0) > 0).length,
+    folders: dirSet.size,
     albums: albumSet.size
   })
 }
 
 function renderPlaylists() {
   UI.renderPlaylists(state.playlists)
-  if (state.view !== 'all' && !['fav', 'recent', 'albums'].includes(state.view)) {
-    UI.setActiveNav(state.view)
-  }
+  const builtin = ['all', 'fav', 'recent', 'most', 'albums', 'folders']
+  if (state.view.startsWith('folder:')) UI.setActiveNav('folders')
+  else if (!builtin.includes(state.view)) UI.setActiveNav(state.view)
 }
 
 /** 批量加入歌单（拖拽、右键都用它），本地状态与界面同步刷新 */
@@ -429,6 +484,16 @@ function computedList() {
   else if (state.view === 'fav') list = Array.from(state.favorites).map((id) => state.byId.get(id)).filter(Boolean)
   else if (state.view === 'recent') {
     list = state.history.map((h) => state.byId.get(h.id)).filter(Boolean)
+  } else if (state.view === 'most') {
+    // 最常播放（v1.7）：只列有播放记录的，按次数降序
+    list = state.tracks
+      .filter((t) => (state.playCounts[t.id] || 0) > 0)
+      .sort((a, b) => (state.playCounts[b.id] || 0) - (state.playCounts[a.id] || 0))
+  } else if (state.view === 'folders') {
+    list = []   // 目录网格自渲染，不走表格
+  } else if (state.view.startsWith('folder:')) {
+    const dir = state.view.slice(7)
+    list = state.tracks.filter((t) => (t.dir || '') === dir)
   } else if (state.view.startsWith('album:')) {
     const name = state.view.slice(6)
     list = state.tracks.filter((t) => (t.album || '未知专辑') === name)
@@ -466,6 +531,7 @@ function switchView(view) {
 }
 
 function renderView() {
+  clearSelection()          // 列表重建后旧选中已失效
   const list = computedList()
   state.visible = list
 
@@ -490,6 +556,37 @@ function renderView() {
     UI.renderTableHeadVisible(false)
     UI.hideEmpty()
     UI.renderAlbumGrid(albums, (name) => switchView('album:' + name))
+    return
+  }
+
+  if (state.view === 'folders') {
+    // 按所在目录分组（v1.7）：本地曲库标签常常不全，按文件夹找歌是最可靠的兜底
+    const map = new Map()
+    for (const t of state.tracks) {
+      const dir = t.dir || ''
+      if (!dir) continue
+      if (!map.has(dir)) map.set(dir, { dir, name: dir.split(/[\\/]/).pop() || dir, count: 0, cover: null })
+      const g = map.get(dir)
+      g.count++
+      if (!g.cover && t.cover) g.cover = t.cover
+    }
+    const groups = Array.from(map.values()).sort((a, b) => a.dir.localeCompare(b.dir, 'zh'))
+    UI.renderHeader({
+      title: '文件夹',
+      sub: groups.length + ' 个目录',
+      cover: null,
+      showPlayAll: false,
+      showRemove: false,
+      isAlbum: true
+    })
+    UI.renderTableHeadVisible(false)
+    if (!groups.length) {
+      UI.renderTable([])
+      UI.showEmpty('曲库为空，先扫描音乐文件夹')
+      return
+    }
+    UI.hideEmpty()
+    UI.renderFolderGrid(groups, (dir) => switchView('folder:' + dir))
     return
   }
 
@@ -520,6 +617,21 @@ function renderView() {
       title: '最近播放', sub: `${list.length} 首歌曲`, cover: null,
       showPlayAll: true, showRemove: false
     })
+  } else if (state.view === 'most') {
+    UI.renderHeader({
+      title: '最常播放', sub: `${list.length} 首歌曲（按播放次数）`, cover: null,
+      showPlayAll: true, showRemove: false
+    })
+  } else if (state.view.startsWith('folder:')) {
+    const dir = state.view.slice(7)
+    UI.renderHeader({
+      title: dir.split(/[\\/]/).pop() || dir,
+      sub: `${list.length} 首歌曲`,
+      cover: list[0] ? list[0].cover : null,
+      showPlayAll: list.length > 0,
+      showRemove: false,
+      isAlbum: true
+    })
   } else {
     const pl = state.playlists.find((p) => p.id === state.view)
     UI.renderHeader({
@@ -536,7 +648,8 @@ function renderView() {
     const msg = state.query ? '没有匹配的歌曲'
       : state.view === 'fav' ? '还没有收藏歌曲'
         : state.view === 'recent' ? '还没有播放记录'
-          : state.tracks.length ? '这里还没有歌曲' : '曲库为空，先扫描音乐文件夹'
+          : state.view === 'most' ? '还没有播放记录'
+            : state.tracks.length ? '这里还没有歌曲' : '曲库为空，先扫描音乐文件夹'
     UI.renderTable([], { currentId: state.currentId })
     UI.showEmpty(msg)
     return
@@ -548,6 +661,7 @@ function renderView() {
     playing: player && player.isPlaying,
     favorites: state.favorites,
     playCounts: state.playCounts,
+    showCounts: state.view === 'most',   // 只在「最常播放」里显示次数，其他视图不挤
     sortKey: state.sortKey,
     sortDir: state.sortDir
   })
@@ -571,6 +685,9 @@ function bindPlayer() {
     updateNavCounts()
     if (state.view === 'recent') renderView()
     UI.renderQueue(player.tracks, player.index, state.currentId)
+    // 换曲后切成这首歌自己的歌词偏移（v1.7）
+    state.lyricOffset = offsetFor(track.id)
+    UI.setLyricOffset(state.lyricOffset)
     // 换曲后音频参数会变（96k / 44.1k 等），清掉旧标签等 mpv 重新上报
     if (state.exclusive) { audio.format = null; updateHifiBadge() }
     restoreResumePos(track)
@@ -601,7 +718,11 @@ function bindPlayer() {
       if (cur >= Math.min(half, dur * 0.9)) {
         state.counted = true
         const id = player.current.id
-        window.api.incPlayCount(id).then((n) => { state.playCounts[id] = n })
+        window.api.incPlayCount(id).then((n) => {
+          state.playCounts[id] = n
+          // 正在看「最常播放」时顺序会变，立即重排
+          if (state.view === 'most') renderView()
+        })
       }
     }
   })
@@ -881,10 +1002,15 @@ function bindUI() {
   // 列表点击
   document.getElementById('tableBody').addEventListener('click', (e) => {
     const row = e.target.closest('.tr')
-    if (!row) return
+    if (!row) { clearSelection(); return }
     const id = row.dataset.id
     const track = state.byId.get(id)
     if (!track) return
+    const index = Number(row.dataset.index)
+    // Ctrl 点选 / Shift 范围选：只改变选中，不触发播放（v1.7）
+    if (e.ctrlKey || e.metaKey) { toggleSelection(id, index); return }
+    if (e.shiftKey) { selectRange(index); return }
+    clearSelection()
     if (state.currentId === id && player) player.toggle()
     else playFromVisible(track)
   })
@@ -955,11 +1081,22 @@ function bindUI() {
   document.getElementById('btnLyricSmaller').addEventListener('click', () => setFs(-2))
   document.getElementById('btnLyricBigger').addEventListener('click', () => setFs(2))
   const setOffset = (delta) => {
-    state.lyricOffset = Math.round((state.lyricOffset + delta) * 10) / 10
-    UI.setLyricOffset(state.lyricOffset)
-    state.settings.lyricOffset = state.lyricOffset
-    saveSettings({ lyricOffset: state.lyricOffset })
-    UI.updateLyricIndex(audio.currentTime + state.lyricOffset)
+    // 偏移按曲目存（v1.7）：不同来源的 LRC 偏差各不相同，共用一个值会互相踩
+    const id = state.currentId
+    const next = Math.round((offsetFor(id) + delta) * 10) / 10
+    if (id) {
+      const map = Object.assign({}, state.settings.lyricOffsetById || {})
+      map[id] = next
+      state.settings.lyricOffsetById = map
+      saveSettings({ lyricOffsetById: map })
+    } else {
+      state.settings.lyricOffset = next
+      saveSettings({ lyricOffset: next })
+    }
+    state.lyricOffset = next
+    UI.setLyricOffset(next)
+    UI.updateLyricIndex(audio.currentTime + next)
+    toast((id ? '本曲歌词偏移 ' : '全局歌词偏移 ') + (next >= 0 ? '+' : '') + next.toFixed(1) + 's')
   }
   document.getElementById('btnLyricEarlier').addEventListener('click', () => setOffset(-0.5))
   document.getElementById('btnLyricLater').addEventListener('click', () => setOffset(0.5))
@@ -1196,39 +1333,62 @@ function bindBar(el, onCommit, onPreview, onReset) {
 /* ================= 右键菜单 ================= */
 
 function showTrackMenu(x, y, track) {
-  const isFav = state.favorites.has(track.id)
-  const inPlaylist = state.view !== 'all' && !['fav', 'recent', 'albums'].includes(state.view) && !state.view.startsWith('album:')
-  const items = [
-    { label: '播放', icon: 'play', act: 'play' },
-    { label: '下一首播放', icon: 'next', act: 'play-next' },
-    { sep: true },
-    { label: isFav ? '取消收藏' : '加入收藏', icon: 'heart', act: 'fav' },
-    {
-      label: '加入歌单', icon: 'plus', act: 'noop',
-      sub: state.playlists.length
-        ? state.playlists.map((p) => ({ label: p.name, act: 'add-pl', arg: p.id }))
-        : [{ label: '（暂无歌单）', act: 'noop' }]
-    }
-  ]
-  if (inPlaylist) {
-    items.push({ label: '从此歌单移除', icon: 'trash', act: 'remove-pl', danger: true })
+  // 右键落在「已选中的行」上 → 菜单作用于整批（v1.7）
+  const multi = state.selected.has(track.id) && state.selected.size > 1
+  const targets = multi
+    ? Array.from(state.selected).map((id) => state.byId.get(id)).filter(Boolean)
+    : [track]
+  const isFav = targets.every((t) => state.favorites.has(t.id))
+  // 只有真正的歌单视图才有「移除」；最近播放/专辑/最常播放都不是歌单
+  const inPlaylist = state.playlists.some((p) => p.id === state.view)
+
+  const addPlItem = {
+    label: '加入歌单', icon: 'plus', act: 'noop',
+    sub: state.playlists.length
+      ? state.playlists.map((p) => ({ label: p.name, act: 'add-pl', arg: p.id }))
+      : [{ label: '（暂无歌单）', act: 'noop' }]
   }
-  items.push({ sep: true })
-  const curGain = trackGainDb(track.id)
-  const gainLabel = (db) => `${db > 0 ? '+' : ''}${db} dB${db === 0 ? '（重置）' : ''}` +
-    (typeof db === 'number' && db === curGain && curGain !== 0 ? ' ✓' : '')
-  items.push({
-    label: `音量增益（当前 ${curGain > 0 ? '+' : ''}${curGain} dB）`, icon: 'volume', act: 'noop',
-    sub: [-6, -3, -1.5, 0, 1.5, 3, 6].map((db) => ({ label: gainLabel(db), act: 'set-gain', arg: String(db) }))
-  })
-  items.push({ label: '在文件夹中显示', icon: 'folder', act: 'reveal' })
-  items.push({ label: '复制歌曲信息', act: 'copy' })
+
+  let items
+  if (multi) {
+    items = [
+      { label: '已选 ' + targets.length + ' 首', act: 'noop' },
+      { sep: true },
+      { label: isFav ? '取消收藏' : '加入收藏', icon: 'heart', act: 'fav' },
+      addPlItem
+    ]
+    if (inPlaylist) items.push({ label: '从此歌单移除', icon: 'trash', act: 'remove-pl', danger: true })
+    items.push({ sep: true })
+    items.push({ label: '在文件夹中显示', icon: 'folder', act: 'reveal' })
+    items.push({ label: '复制歌曲信息', act: 'copy' })
+  } else {
+    items = [
+      { label: '播放', icon: 'play', act: 'play' },
+      { label: '下一首播放', icon: 'next', act: 'play-next' },
+      { sep: true },
+      { label: isFav ? '取消收藏' : '加入收藏', icon: 'heart', act: 'fav' },
+      addPlItem
+    ]
+    if (inPlaylist) items.push({ label: '从此歌单移除', icon: 'trash', act: 'remove-pl', danger: true })
+    items.push({ sep: true })
+    const curGain = trackGainDb(track.id)
+    const gainLabel = (db) => `${db > 0 ? '+' : ''}${db} dB${db === 0 ? '（重置）' : ''}` +
+      (typeof db === 'number' && db === curGain && curGain !== 0 ? ' ✓' : '')
+    items.push({
+      label: `音量增益（当前 ${curGain > 0 ? '+' : ''}${curGain} dB）`, icon: 'volume', act: 'noop',
+      sub: [-6, -3, -1.5, 0, 1.5, 3, 6].map((db) => ({ label: gainLabel(db), act: 'set-gain', arg: String(db) }))
+    })
+    items.push({ label: '在文件夹中显示', icon: 'folder', act: 'reveal' })
+    items.push({ label: '复制歌曲信息', act: 'copy' })
+  }
 
   UI.showContextMenu(x, y, items)
   currentMenuTrack = track
+  currentMenuTracks = targets
 }
 
 let currentMenuTrack = null
+let currentMenuTracks = []
 
 async function handleCtxAction(act, arg) {
   // 全局动作（不依赖右键的曲目）
@@ -1275,32 +1435,44 @@ async function handleCtxAction(act, arg) {
       toast('已加入下一首播放')
       break
     case 'fav': {
-      const favs = await window.api.toggleFavorite(track.id)
-      state.favorites = new Set(favs)
+      const targets = currentMenuTracks.length ? currentMenuTracks : [track]
+      // 全已收藏 → 整批取消；否则只把没收藏的补上（v1.7 支持多选）
+      const allFav = targets.every((t) => state.favorites.has(t.id))
+      for (const t of targets) {
+        if (allFav === state.favorites.has(t.id)) {
+          const favs = await window.api.toggleFavorite(t.id)
+          state.favorites = new Set(favs)
+        }
+      }
       updateNavCounts()
-      if (state.currentId === track.id) UI.setFavorite(state.favorites.has(track.id))
+      if (state.currentId) UI.setFavorite(state.favorites.has(state.currentId))
       if (state.view === 'fav') renderView()
-      toast(state.favorites.has(track.id) ? '已加入收藏' : '已取消收藏')
+      toast(allFav
+        ? '已取消收藏' + (targets.length > 1 ? ' ' + targets.length + ' 首' : '')
+        : '已加入收藏' + (targets.length > 1 ? ' ' + targets.length + ' 首' : ''))
       break
     }
     case 'add-pl': {
-      const pl = await window.api.addToPlaylist(arg, [track.id])
+      const ids = (currentMenuTracks.length ? currentMenuTracks : [track]).map((t) => t.id)
+      const pl = await window.api.addToPlaylist(arg, ids)
       if (pl) {
         const i = state.playlists.findIndex((p) => p.id === pl.id)
         if (i >= 0) state.playlists[i] = pl
         renderPlaylists()
-        toast('已加入「' + pl.name + '」')
+        toast('已加入「' + pl.name + '」' + (ids.length > 1 ? ' ' + ids.length + ' 首' : ''))
       }
       break
     }
     case 'remove-pl': {
-      const pl = await window.api.removeFromPlaylist(state.view, [track.id])
+      const ids = (currentMenuTracks.length ? currentMenuTracks : [track]).map((t) => t.id)
+      const pl = await window.api.removeFromPlaylist(state.view, ids)
       if (pl) {
         const i = state.playlists.findIndex((p) => p.id === pl.id)
         if (i >= 0) state.playlists[i] = pl
         renderPlaylists()
+        clearSelection()
         renderView()
-        toast('已从歌单移除')
+        toast('已从歌单移除' + (ids.length > 1 ? ' ' + ids.length + ' 首' : ''))
       }
       break
     }
@@ -1345,6 +1517,8 @@ let draftDirs = []
 function openDirModal() {
   if (scanning) { toast('正在扫描，请稍候'); return }
   draftDirs = (state.settings.musicDirs || []).slice()
+  const chk = document.getElementById('chkWatchFolders')
+  if (chk) chk.checked = state.settings.watchFolders !== false
   UI.showDirModal(draftDirs)
 }
 
@@ -1371,7 +1545,10 @@ function bindDirModal() {
     if (!draftDirs.length) { toast('请至少添加一个文件夹'); return }
     UI.hideDirModal()
     state.settings.musicDirs = draftDirs.slice()
-    await window.api.patchSettings({ musicDirs: draftDirs.slice() })
+    const chk = document.getElementById('chkWatchFolders')
+    const watchFolders = chk ? chk.checked : true
+    state.settings.watchFolders = watchFolders
+    await window.api.patchSettings({ musicDirs: draftDirs.slice(), watchFolders })
     await doScan()
   })
 }
@@ -1478,6 +1655,17 @@ function bindGlobalKeys() {
       UI.hideContextMenu()
       if (!UI.els.dirModal.hidden) { UI.hideDirModal(); e.preventDefault(); return }
       if (inInput) { document.activeElement.blur(); e.preventDefault() }
+      // 有选中项时 Esc 先清选中（v1.7）
+      if (state.selected.size) { clearSelection(); e.preventDefault() }
+      return
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && !inInput) {
+      // 全选当前视图的可见曲目（v1.7）
+      e.preventDefault()
+      state.selected = new Set(state.visible.map((t) => t.id))
+      state.selAnchor = 0
+      paintSelection()
+      if (state.selected.size) toast('已选中 ' + state.selected.size + ' 首')
       return
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {

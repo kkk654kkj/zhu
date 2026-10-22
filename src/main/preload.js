@@ -77,6 +77,13 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('shortcut', h)
   },
 
+  /** 睡眠定时到点（v1.7），收到后淡出并暂停 */
+  onSleepTimer: (cb) => {
+    const h = (_e, payload) => cb(payload)
+    ipcRenderer.on('sleep-timer', h)
+    return () => ipcRenderer.removeListener('sleep-timer', h)
+  },
+
   // 桌面歌词（主窗口 ↔ 主进程 ↔ 歌词窗口）
   dlyricOpen: () => invoke('dlyric:open'),
   dlyricClose: () => invoke('dlyric:close'),

@@ -7,7 +7,7 @@ const UI = {
   init() {
     const ids = [
       'searchInput', 'searchClear', 'btnScan', 'btnLyricToggle', 'btnMin', 'btnMax', 'btnClose',
-      'cntAll', 'cntFav', 'cntRecent', 'cntAlbums', 'playlistList', 'btnNewPlaylist', 'libStat',
+      'cntAll', 'cntFav', 'cntRecent', 'cntMost', 'cntFolders', 'cntAlbums', 'playlistList', 'btnNewPlaylist', 'libStat',
       'viewHeader', 'vhCover', 'vhTitle', 'vhSub', 'btnPlayAll', 'btnShuffleAll', 'btnPlaylistRemove',
       'tableHead', 'tableBody', 'emptyState', 'emptyText', 'btnEmptyScan',
       'scanOverlay', 'scanTitle', 'scanBar', 'scanSub',
@@ -41,10 +41,12 @@ const UI = {
     })
   },
 
-  renderNavCounts({ all, fav, recent, albums }) {
+  renderNavCounts({ all, fav, recent, most, folders, albums }) {
     this.els.cntAll.textContent = all
     this.els.cntFav.textContent = fav
     this.els.cntRecent.textContent = recent
+    this.els.cntMost.textContent = most
+    this.els.cntFolders.textContent = folders
     this.els.cntAlbums.textContent = albums
   },
 
@@ -108,6 +110,8 @@ const UI = {
           <div class="c-title">
             <span class="tt">${esc(t.title)}</span>
             ${t.hasLyric ? '<span class="tag-lyric">词</span>' : ''}
+            ${ctx.showCounts && ctx.playCounts && ctx.playCounts[t.id]
+              ? `<span class="pc" title="播放 ${ctx.playCounts[t.id]} 次">${ctx.playCounts[t.id]}</span>` : ''}
           </div>
           <div class="c-artist">${esc(t.artist || '未知歌手')}</div>
           <div class="c-album">${esc(t.album || '—')}</div>
@@ -479,6 +483,26 @@ const UI = {
     const el = this.els.queuePanel
     const next = show == null ? el.hidden : show
     el.hidden = !next
+  },
+
+  /* ---------------- 文件夹网格（v1.7） ---------------- */
+
+  renderFolderGrid(groups, onClick) {
+    const body = this.els.tableBody
+    body.innerHTML = ''
+    const grid = document.createElement('div')
+    grid.className = 'album-grid'
+    grid.innerHTML = groups.map((g) => `
+      <div class="album-card" data-dir="${esc(g.dir)}" title="${esc(g.dir)}">
+        <div class="ac-cover">${g.cover ? `<img src="${esc(g.cover)}" alt="" onerror="this.remove()" />` : icon('folder')}</div>
+        <div class="ac-name">${esc(g.name)}</div>
+        <div class="ac-sub">${g.count} 首${g.sub ? ' · ' + esc(g.sub) : ''}</div>
+      </div>`).join('')
+    body.appendChild(grid)
+    grid.addEventListener('click', (e) => {
+      const card = e.target.closest('.album-card')
+      if (card) onClick(card.dataset.dir)
+    })
   },
 
   /* ---------------- 专辑网格 ---------------- */

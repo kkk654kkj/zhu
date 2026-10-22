@@ -231,10 +231,12 @@ const DEFAULT_SETTINGS = {
   fadeMs: 350,
   lyricFontSize: 20,
   lyricOffset: 0,
+  lyricOffsetById: {},         // 每曲歌词偏移（v1.7）：{ trackId: 秒 }，优先于 lyricOffset
   theme: 'dark',
   accent: '#31c27c',
   showLyricPanel: true,
   autoScanOnStart: false,
+  watchFolders: true,          // 监视音乐文件夹变化并自动增量扫描（v1.7）
   closeToTray: false,
   // 音量均衡
   normalizeVolume: false,
@@ -464,6 +466,29 @@ function debounce(fn, ms) {
 /* ---------------- 托盘 ---------------- */
 
 /** 托盘菜单重建（迷你开关的勾选态会变，不能只建一次） */
+/* ---------------- 睡眠定时（v1.7） ---------------- */
+
+let sleepTimerId = null
+let sleepMinutes = 0
+
+/** minutes=0 表示关闭。到点只做一件事：让渲染层淡出并暂停。 */
+function setSleepTimer(minutes) {
+  if (sleepTimerId) { clearTimeout(sleepTimerId); sleepTimerId = null }
+  sleepMinutes = Number(minutes) || 0
+  if (sleepMinutes > 0) {
+    logLine('[sleep] 定时 ' + sleepMinutes + ' 分钟')
+    sleepTimerId = setTimeout(() => {
+      sleepTimerId = null
+      sleepMinutes = 0
+      sendToRenderer('sleep-timer', { fired: true })
+      refreshTrayMenu()
+    }, sleepMinutes * 60 * 1000)
+  } else {
+    logLine('[sleep] 已关闭')
+  }
+  refreshTrayMenu()
+}
+
 function refreshTrayMenu() {
   if (!tray) return
   try {
@@ -476,6 +501,15 @@ function refreshTrayMenu() {
         click: () => applyMini(!miniActive)
       },
       { label: '桌面歌词', click: () => sendToRenderer('shortcut', 'dlyric') },
+      {
+        label: '睡眠定时' + (sleepMinutes ? '（' + sleepMinutes + ' 分钟后）' : ''),
+        submenu: [0, 15, 30, 60, 90].map((m) => ({
+          label: m ? m + ' 分钟' : '关闭',
+          type: 'radio',
+          checked: sleepMinutes === m,
+          click: () => setSleepTimer(m)
+        }))
+      },
       {
         label: '关闭时最小化到托盘',
         type: 'checkbox',
@@ -521,6 +555,83 @@ function updateThumbar(playing) {
     ])
   } catch (err) {
     logLine('WARN thumbar 设置失败', err.message)
+  }
+}
+
+/* ---------------- 音乐文件夹监视（v1.7） ---------------- */
+
+/** 只关心这些扩展名：音源、歌词、同级封面。其他文件变动忽略，避免无意义的重扫。 */
+const WATCH_EXTS = new Set([
+  '.flac', '.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.ape', '.wma',
+  '.aiff', '.aif', '.dsf', '.dff', '.mka', '.lrc', '.jpg', '.jpeg', '.png', '.webp', '.bmp'
+])
+let watchers = []
+let watchTimer = null
+
+function stopWatching() {
+  for (const w of watchers) { try { w.close() } catch {} }
+  watchers = []
+  if (watchTimer) { clearTimeout(watchTimer); watchTimer = null }
+}
+
+/**
+ * 监听音乐目录（递归）。Windows 支持 recursive，大目录也没问题。
+ * 变化后等 8 秒再扫：拷一张专辑会触发几十个事件，防抖能合成一次
+ * （增量扫描本来只解析变了的文件，所以这一次很便宜）。
+ */
+function startWatching() {
+  stopWatching()
+  const s = store.get().settings
+  if (s.watchFolders === false) { logLine('[watch] 已关闭'); return }
+  const dirs = Array.isArray(s.musicDirs) ? s.musicDirs.filter(Boolean) : []
+  for (const dir of dirs) {
+    try {
+      const w = fs.watch(dir, { recursive: true }, (evt, filename) => {
+        if (!filename) return
+        if (!WATCH_EXTS.has(path.extname(String(filename)).toLowerCase())) return
+        scheduleWatchScan()
+      })
+      w.on('error', (err) => logLine('WARN watch 错误', dir, err.message))
+      watchers.push(w)
+    } catch (err) {
+      logLine('WARN watch 启动失败（目录不存在或无权限）', dir, err.message)
+    }
+  }
+  logLine('[watch] 监视 ' + watchers.length + ' 个目录')
+}
+
+function scheduleWatchScan() {
+  if (watchTimer) clearTimeout(watchTimer)
+  watchTimer = setTimeout(runWatchScan, 8000)
+}
+
+async function runWatchScan() {
+  watchTimer = null
+  if (library.scanning || activeScan) {
+    // 正在扫（可能用户手动点了），等它结束再来
+    scheduleWatchScan()
+    return
+  }
+  const s = store.get().settings
+  if (s.watchFolders === false) return
+  logLine('[watch] 检测到文件变化，开始增量扫描')
+  try {
+    const run = library.scan(s.musicDirs, (p) => {
+      sendToRenderer('lib:scan-progress', {
+        phase: p.phase, done: p.done, total: p.total,
+        track: p.track ? toClientTrack(p.track) : null
+      })
+    })
+    activeScan = run
+    const res = await run
+    logLine('[watch] 完成 ' + JSON.stringify({
+      added: res.added, updated: res.updated, removed: res.removed, total: res.total, failed: res.failed
+    }))
+    sendToRenderer('lib:scan-done', res)
+  } catch (err) {
+    logLine('[watch] 扫描失败 ' + err.message)
+  } finally {
+    activeScan = null
   }
 }
 
@@ -787,7 +898,17 @@ function registerIpc() {
 
   // —— 设置 ——
   ipcMain.handle('settings:get', () => store.get().settings)
-  ipcMain.handle('settings:patch', (e, patch) => store.patch({ settings: patch }).settings)
+  ipcMain.handle('settings:patch', (e, patch) => {
+    const before = store.get().settings || {}
+    const prevDirs = JSON.stringify(before.musicDirs || [])
+    const prevWatch = before.watchFolders
+    const next = store.patch({ settings: patch }).settings
+    // 目录列表或监视开关变了 → 重新挂 watcher（v1.7）
+    if (JSON.stringify(next.musicDirs || []) !== prevDirs || next.watchFolders !== prevWatch) {
+      startWatching()
+    }
+    return next
+  })
 
   // —— 歌单 ——
   ipcMain.handle('playlists:get', () => store.get().playlists || [])
@@ -1107,6 +1228,8 @@ function toClientTrack(t) {
   return {
     id: t.id,
     path: t.path,
+    // 所属目录（v1.7）：文件夹视图按它分组，渲染层不好自己切路径
+    dir: t.path ? path.dirname(t.path) : '',
     fileName: t.fileName,
     title: t.title,
     artist: t.artist,
@@ -1207,6 +1330,7 @@ if (gotLock) cleanChromiumCache()
 
     createWindow()
     createTray()
+    startWatching()
     const failed = registerShortcuts()
     if (failed.length) console.warn('[shortcut] 注册失败:', failed.join(', '))
 
@@ -1223,6 +1347,7 @@ if (gotLock) cleanChromiumCache()
 
   app.on('before-quit', () => {
     quitting = true
+    stopWatching()
     stopMpv()
     if (store) store.flush()
   })

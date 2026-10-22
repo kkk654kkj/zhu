@@ -15,7 +15,7 @@ function bindDragAndDrop() {
   if (!queueBody || !tableBody || !sidebar) return
 
   let dragQi = null          // 正在拖的队列索引
-  let dragTrackId = null     // 正在拖的曲目 id
+  let dragTrackIds = null    // 正在拖的曲目 id（多选时是整批）
   let dropEl = null          // 当前高亮的放置目标
 
   const clearDropMark = () => {
@@ -30,7 +30,7 @@ function bindDragAndDrop() {
   }
   const endDrag = () => {
     dragQi = null
-    dragTrackId = null
+    dragTrackIds = null
     clearDropMark()
     document.querySelectorAll('.qp-item.dragging').forEach((el) => el.classList.remove('dragging'))
   }
@@ -40,7 +40,7 @@ function bindDragAndDrop() {
     const item = e.target.closest('.qp-item')
     if (!item || item.dataset.qi == null) return
     dragQi = Number(item.dataset.qi)
-    dragTrackId = null
+    dragTrackIds = null
     item.classList.add('dragging')
     e.dataTransfer.effectAllowed = 'move'
     // 必须 setData，否则部分 Chromium 版本不会真正启动拖拽
@@ -73,16 +73,20 @@ function bindDragAndDrop() {
     if (!num) return
     const row = num.closest('.tr')
     if (!row) return
-    dragTrackId = row.dataset.id
+    const id = row.dataset.id
+    // 拖的是多选里的一项 → 整批带走（v1.7）
+    dragTrackIds = state.selected.has(id) && state.selected.size > 1
+      ? Array.from(state.selected)
+      : [id]
     dragQi = null
     e.dataTransfer.effectAllowed = 'copy'
-    e.dataTransfer.setData('text/plain', dragTrackId)
+    e.dataTransfer.setData('text/plain', dragTrackIds.join(','))
   })
   tableBody.addEventListener('dragend', endDrag)
 
   /* ---- 侧边栏歌单作为放置目标 ---- */
   sidebar.addEventListener('dragover', (e) => {
-    if (!dragTrackId) return
+    if (!dragTrackIds) return
     const nav = e.target.closest('.nav-item[data-playlist]')
     if (!nav) return
     e.preventDefault()
@@ -93,13 +97,13 @@ function bindDragAndDrop() {
     if (!e.relatedTarget || !sidebar.contains(e.relatedTarget)) clearDropMark()
   })
   sidebar.addEventListener('drop', async (e) => {
-    if (!dragTrackId) return
+    if (!dragTrackIds) return
     const nav = e.target.closest('.nav-item[data-playlist]')
     const plId = nav ? nav.dataset.playlist : null
-    const tid = dragTrackId
+    const ids = dragTrackIds
     endDrag()
     if (!plId) return
     e.preventDefault()
-    await addTracksToPlaylist(plId, [tid])
+    await addTracksToPlaylist(plId, ids)
   })
 }

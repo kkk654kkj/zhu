@@ -107,10 +107,16 @@ const CASES = [
     (v) => v && (v.skip === true || v.ok === true)],
 
   ['淡出定时器可被取消（连点播放不自停）',
-    `(() => { player._fadeOut(() => {})
+    // 注意：音量被置 0 时 _fadeOut 会直接早退（from <= 0.01），所以先临时抬到 0.5
+    `(() => { const keep = player.audio.volume
+       player.audio.volume = 0.5
+       player._fadeOut(() => {})
        const scheduled = !!player._fadeTimeout
        player._fadeIn()
-       return { scheduled, afterPlay: player._fadeTimeout } })()`,
+       const afterPlay = player._fadeTimeout
+       player._clearFade()
+       player.audio.volume = keep
+       return { scheduled, afterPlay } })()`,
     (v) => v && v.scheduled === true && v.afterPlay === null],
 
   ['拖拽已绑定 / 断点续播已加载',
@@ -138,8 +144,56 @@ const CASES = [
        if (!a) return { skip: true }
        const br = box.getBoundingClientRect(), ar = a.getBoundingClientRect()
        return { skip: false, delta: Math.round((ar.top - br.top) - (br.height - ar.height) / 2) } })()`,
-    (v) => v && (v.skip === true || Math.abs(v.delta) <= 40)]
+    (v) => v && (v.skip === true || Math.abs(v.delta) <= 40)],
+
+  /* ---- v1.7 ---- */
+  ['每曲歌词偏移已接入（改一首不影响全局）',
+    `(() => {
+       if (!state.tracks.length) return { skip: true }
+       const id = state.tracks[0].id
+       const before = state.settings.lyricOffsetById || {}
+       const map = Object.assign({}, before); map['__probe__'] = 0.5
+       state.settings.lyricOffsetById = map
+       const hit = offsetFor('__probe__') === 0.5
+       const fallback = offsetFor('__nope__') === (Number(state.settings.lyricOffset) || 0)
+       state.settings.lyricOffsetById = before
+       return { hit, fallback } })()`,
+    (v) => v && (v.skip === true || (v.hit === true && v.fallback === true))],
+
+  ['最常播放视图按次数降序',
+    `(() => {
+       const prev = state.view
+       switchView('most')
+       const counts = state.visible.map((t) => state.playCounts[t.id] || 0)
+       const sorted = counts.every((c, i) => i === 0 || counts[i - 1] >= c)
+       const head = document.getElementById('vhTitle').textContent
+       switchView(prev)
+       return { rows: counts.length, sorted, head } })()`,
+    (v) => v && v.sorted === true && v.head === '最常播放'],
+
+  ['拖拽多选（选中集合参与批量加入）',
+    `(() => {
+       if (state.visible.length < 3) return { skip: true }
+       clearSelection()
+       toggleSelection(state.visible[0].id, 0)
+       toggleSelection(state.visible[2].id, 2)
+       const n = selectedTracks().length
+       clearSelection()
+       return { n, after: state.selected.size } })()`,
+    (v) => v && (v.skip === true || (v.n === 2 && v.after === 0))],
+
+  ['文件夹视图能分组',
+    `(() => {
+       if (!state.tracks.length) return { skip: true }
+       const prev = state.view
+       switchView('folders')
+       const cards = document.querySelectorAll('#tableBody .album-card').length
+       const head = document.getElementById('vhTitle').textContent
+       switchView(prev)
+       return { cards, head, dirs: new Set(state.tracks.map((t) => t.dir).filter(Boolean)).size } })()`,
+    (v) => v && (v.skip === true || (v.cards > 0 && v.cards === v.dirs && v.head === '文件夹'))]
 ]
+
 
 function fmt(v) {
   if (v === true) return 'true'
