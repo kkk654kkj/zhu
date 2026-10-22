@@ -88,7 +88,25 @@ input { font: inherit; color: inherit; }
 
 .tb-center { flex: 1; display: flex; justify-content: center; }
 
+/* 拖动窗口的三条硬规则（v1.6.1）：
+   1) 可拖区域只设 drag，真正的交互控件（输入框、按钮）才 no-drag；
+      以前整个 .tb-center 都是 no-drag，而它 flex:1 占满中间，
+      结果标题栏只有左侧十几像素能拖 —— 表现就是「窗口拖不动」。
+   2) <img> 默认 draggable=true，会吃掉所在 drag 区域的拖动（拖 logo/封面没反应），
+      必须显式关掉 user-drag。
+   3) drag 区域里的文字要禁选，否则按下拖动变成框选文本。 */
+#titlebar, .tb-left, .tb-center { -webkit-app-region: drag; }
+/* -webkit-app-region 不继承到子元素（子元素默认是 none，既不是 drag 也不是 no-drag），
+   所以 logo 图片、标题文字这些装饰元素要显式给 drag，否则在它们上面按下仍然拖不动。
+   .tb-left / .mv-brand 里没有任何交互控件，可以整块给。 */
+.tb-left, .tb-left *, .mv-brand, .mv-brand * { -webkit-app-region: drag; }
+#titlebar { -webkit-user-select: none; }
+#titlebar img, .mv-cover img, .mv-brand img { -webkit-user-drag: none; }
+
 .search-box {
+  /* 输入框自己必须是 no-drag，否则点不进去；它只占中间一小块，
+     两侧的留白仍然可以拖窗口 */
+  -webkit-app-region: no-drag;
   width: 100%;
   max-width: 420px;
   height: 24px;
