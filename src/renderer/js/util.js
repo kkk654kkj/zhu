@@ -47,9 +47,14 @@ function fmtKHz(sr) {
   return (Math.round(k * 10) / 10).toString()
 }
 
-/** 表格里的紧凑写法：24/96 表示 24bit/96kHz；有损格式显示码率 320k */
+/** 表格里的紧凑写法：24/96 表示 24bit/96kHz；有损显示码率；DSD 显示 DSD64/128/256 */
 function fmtQuality(t) {
   if (!t) return '—'
+  // DSD（v2.0）：位深恒为 1、采样率是 2.8224MHz 的整数倍，按"倍数"叫法更清楚
+  if (t.isDsd) {
+    const mult = t.sampleRate ? Math.round(t.sampleRate / 44100) : 0
+    return mult ? 'DSD' + mult : 'DSD'
+  }
   // 有损优先给码率：MP3 的"44.1k"对判断音质没用，128k 才有意义
   if (!t.lossless && t.bitrate) return Math.round(t.bitrate / 1000) + 'k'
   if (t.bitsPerSample && t.sampleRate) return t.bitsPerSample + '/' + fmtKHz(t.sampleRate)
@@ -62,17 +67,28 @@ function fmtQuality(t) {
 function qualityTitle(t) {
   if (!t) return ''
   const bits = []
-  if (t.bitsPerSample) bits.push(t.bitsPerSample + ' bit')
-  if (t.sampleRate) bits.push(fmtKHz(t.sampleRate) + ' kHz')
-  if (t.codec) bits.push(String(t.codec).toUpperCase())
-  if (t.bitrate) bits.push(Math.round(t.bitrate / 1000) + ' kbps')
-  if (t.lossless) bits.push('无损')
+  if (t.isDsd) {
+    const mult = t.sampleRate ? Math.round(t.sampleRate / 44100) : 0
+    bits.push('DSD' + (mult || '') + (t.sampleRate ? ' · ' + (t.sampleRate / 1000000).toFixed(4) + ' MHz' : ''))
+    bits.push('普通输出无法解码，需独占输出')
+  } else {
+    if (t.bitsPerSample) bits.push(t.bitsPerSample + ' bit')
+    if (t.sampleRate) bits.push(fmtKHz(t.sampleRate) + ' kHz')
+    if (t.codec) bits.push(String(t.codec).toUpperCase())
+    if (t.bitrate) bits.push(Math.round(t.bitrate / 1000) + ' kbps')
+    if (t.lossless) bits.push('无损')
+  }
+  // ReplayGain 标签（v2.0）：有标签就不需要整库分析，顺手在这里标出来
+  if (typeof t.rgTrackDb === 'number') {
+    bits.push('ReplayGain ' + (t.rgTrackDb >= 0 ? '+' : '') + t.rgTrackDb + ' dB')
+  }
   return bits.join(' · ') || '未知'
 }
 
 /** 高解析（hires）：24bit 以上或采样率高于 48k —— 用来在列表里把真高清挑出来 */
 function isHires(t) {
   if (!t) return false
+  if (t.isDsd) return true
   return (t.bitsPerSample >= 24) || (t.sampleRate > 48000)
 }
 

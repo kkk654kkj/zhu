@@ -11,7 +11,7 @@ const { pathToFileURL } = require('url')
 const { Readable } = require('stream')
 
 const { Store } = require('./store')
-const { Library, fileId, MIME_BY_EXT, resolveCoverPath } = require('./library')
+const { Library, fileId, MIME_BY_EXT, resolveCoverPath, COVER_EMBEDDED } = require('./library')
 const { MpvEngine } = require('./mpv')
 
 const isDev = process.argv.includes('--dev')
@@ -113,6 +113,11 @@ try {
     {
       scheme: 'lxfile',
       privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true }
+    },
+    {
+      // v2.0：内嵌封面按需从音频文件里解出来，不再往 data\covers 写文件
+      scheme: 'lxcover',
+      privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true }
     }
   ])
   logLine('stage: schemes-ok')
@@ -212,8 +217,34 @@ function registerFileProtocol() {
   })
 }
 
-function toLxUrl(filePath) {
-  if (!filePath) return null
+/**
+ * v2.0：内嵌封面协议。`lxcover://local/<trackId>` → 从音频文件里取封面。
+ * 为什么不用 data: URL —— 每张封面几十到几百 KB，塞进 library.json 会让 5k 首的缓存
+ * 涨到几十 MB；也不用磁盘文件，那正是"5k 首 = 5k 个小文件"的来源。
+ * 内存 LRU 在扫描时就预热好了，正常情况这里不碰磁盘。
+ */
+function registerCoverProtocol() {
+  protocol.handle('lxcover', async (request) => {
+    try {
+      const url = new URL(request.url)
+      const id = decodeURIComponent(url.pathname).replace(/^\/+/, '') || url.hostname
+      const cov = library ? await library.getCover(id) : null
+      if (!cov) return new Response('no cover', { status: 404 })
+      return new Response(cov.buf, {
+        status: 200,
+        headers: {
+          'Content-Type': cov.mime,
+          'Content-Length': String(cov.buf.length),
+          'Cache-Control': 'no-store'
+        }
+      })
+    } catch (err) {
+      return new Response('cover error: ' + err.message, { status: 500 })
+    }
+  })
+}
+
+function toLxUrl(filePath) {  if (!filePath) return null
   const norm = path.resolve(filePath).replace(/\\/g, '/')
   // 固定用 local 当 host，完整路径（含盘符）放在 path 里：
   // 若把盘符塞进 authority（lxfile:///D:/…），Chromium 会把它规范成 host，盘符就丢了。
@@ -1384,11 +1415,18 @@ function toClientTrack(t) {
     size: t.size,
     // 入库时间（v1.9）：「最近添加」视图与 addedAt 排序用
     addedAt: t.addedAt || t.mtime || 0,
+    // v2.0：DSD 标记（普通输出放不了，界面要标注）与 ReplayGain 标签
+    isDsd: !!t.isDsd,
+    rgTrackDb: t.rgTrackDb == null ? null : t.rgTrackDb,
+    rgAlbumDb: t.rgAlbumDb == null ? null : t.rgAlbumDb,
     hasLyric: !!t.lyric,
     // 拼音检索字段（v1.6）：主进程预先算好，渲染层只做 includes
     py: t.py || '',
     pyf: t.pyf || '',
-    cover: toLxUrl(resolveCoverPath(t.cover, library.coverDir)),
+    // 内嵌封面走 lxcover://（内存 LRU），同目录的封面图仍走 lxfile://
+    cover: t.cover === COVER_EMBEDDED
+      ? 'lxcover://local/' + encodeURIComponent(t.id)
+      : toLxUrl(resolveCoverPath(t.cover, library.coverDir)),
     audio: toLxUrl(t.path)
   }
 }
@@ -1440,10 +1478,12 @@ if (gotLock) cleanChromiumCache()
 
     library = new Library({
       cacheFile: path.join(userData, 'library.json'),
-      coverDir: path.join(userData, 'covers')
+      coverDir: path.join(userData, 'covers'),
+      lyricDir: path.join(userData, 'lyrics')
     })
 
     registerFileProtocol()
+    registerCoverProtocol()
     await library.init()
     registerIpc()
 

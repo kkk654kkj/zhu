@@ -256,6 +256,11 @@ function trackGainDb(id) {
   if (s.normalizeVolume) {
     const g = s.trackGains && s.trackGains[id]
     if (typeof g === 'number') return Math.max(-20, Math.min(20, g))
+    // v2.0：没有分析数据就用文件自带的 ReplayGain 标签。
+    // 分析结果优先于标签——分析是按你这套目标响度（targetLufs）算的，更贴合，
+    // 标签是别人写的、目标响度不一定和这里一致
+    const t = state.byId.get(id)
+    if (t && typeof t.rgTrackDb === 'number') return Math.max(-20, Math.min(20, t.rgTrackDb))
   }
   return 0
 }
@@ -321,9 +326,16 @@ function hasAnalyzedGains() {
 async function analyzeLibraryLoudness() {
   if (state.analyzing) { toast('正在分析中…'); return }
   const all = state.tracks
-  const list = all.filter((t) => LOUDNESS_OK_EXT.has((t.ext || '').toLowerCase()))
+  const byExt = all.filter((t) => LOUDNESS_OK_EXT.has((t.ext || '').toLowerCase()))
+  // v2.0：带 ReplayGain 标签的直接跳过——标签就是别人算好的响度，
+  // 再花几分钟解一遍纯属浪费（用户想覆盖时可以先用「清除分析数据」）
+  const tagCount = byExt.filter((t) => typeof t.rgTrackDb === 'number').length
+  const list = byExt.filter((t) => typeof t.rgTrackDb !== 'number')
   const skipped = all.length - list.length
-  if (!list.length) { toast('曲库里没有可分析的格式'); return }
+  if (!list.length) {
+    toast(tagCount ? `所有可分析曲目都自带 ReplayGain 标签（${tagCount} 首），无需分析` : '曲库里没有可分析的格式', 3000)
+    return
+  }
 
   state.analyzing = true
   state.abortAnalysis = false
@@ -351,7 +363,10 @@ async function analyzeLibraryLoudness() {
     await window.api.patchSettings({ trackGains: gains })
     applyTrackGain(state.currentId)
     if (state.abortAnalysis) toast('响度分析已中断（已完成部分已保存）')
-    else toast(`响度分析完成：${done} 首` + (skipped ? `，跳过 ${skipped} 首不支持的格式` : '') + (failed ? `，${failed} 首失败` : ''))
+    else toast(`响度分析完成：${done} 首` +
+      (skipped ? `，跳过 ${skipped} 首（无解码器 / 自带 ReplayGain）` : '') +
+      (failed ? `，${failed} 首失败` : '') +
+      (tagCount ? `，${tagCount} 首直接用标签` : ''), 4000)
   } catch (err) {
     console.error('[loudness]', err)
     toast('响度分析失败：' + (err && err.message))
@@ -785,12 +800,22 @@ function bindPlayer() {
       player.pause()
       return
     }
-    toast('该歌曲无法播放，已跳过')
+    // DSD（v2.0）：普通输出（Chromium）没有 DSD 解码器，报错信息必须说清楚原因，
+    // 否则用户只会以为文件坏了
+    const cur = player.current
+    toast(cur && cur.isDsd
+      ? 'DSD 文件需要独占输出才能播放：点标题栏波形按钮开启（已跳过）'
+      : '该歌曲无法播放，已跳过', cur && cur.isDsd ? 4000 : 1800)
     setTimeout(() => player.next(true), 400)
   })
 }
 
 function playFromVisible(track) {
+  // DSD 在普通输出下必然失败，直接拦下来给明确提示，别让它先播报错再跳曲
+  if (track && track.isDsd && !state.exclusive) {
+    toast('DSD（' + fmtQuality(track) + '）需要独占输出：点标题栏波形按钮开启后再放', 4000)
+    return
+  }
   const idx = state.visible.findIndex((t) => t.id === track.id)
   player.setQueue(state.visible, idx >= 0 ? idx : 0, true)
 }
