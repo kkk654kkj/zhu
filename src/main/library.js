@@ -324,6 +324,9 @@ async function parseTrack(filePath, mm, coverDir) {
     fileName: path.basename(filePath),
     size: st.size,
     mtime: st.mtimeMs,
+    // 入库时间（v1.9）：「最近添加」视图按它倒序。首次解析记当前时间，
+    // 之后无论重建缓存还是重新解析都由 scan() 沿用旧值（见 scan 内的 addedAt 处理）
+    addedAt: Date.now(),
     title,
     artist,
     artists: (meta && meta.artists) || (nameArtist ? [nameArtist] : []),
@@ -455,6 +458,12 @@ class Library {
     } catch {
       /* 首次运行无缓存 */
     }
+    // v1.9：老缓存没有 addedAt。用文件 mtime 兜底——同一个文件夹拷进来的歌
+    // mtime 通常就接近入库那一刻，比一律填 now() 更接近事实（否则全库都成"刚刚添加"）
+    for (const t of this.tracks.values()) {
+      if (!t.addedAt) t.addedAt = Math.round(t.mtime || Date.now())
+      else t.addedAt = Math.round(t.addedAt)   // fs 的 mtimeMs 带小数，统一取整
+    }
   }
 
   list() {
@@ -538,9 +547,13 @@ class Library {
           const absCover = resolveCoverPath(cover, this.coverDir)
           if (!absCover || !fs.existsSync(absCover)) cover = await findCover(filePath, cached)
           track = { ...cached, lyric, cover }
+          if (!track.addedAt) track.addedAt = cached.mtime || Date.now()
         } else {
           try {
             track = await parseTrack(filePath, this.mm, this.coverDir)
+            // 入库时间只认第一次：重新解析（改了标签、换了封面、PARSE_VERSION 升级）
+            // 不等于"新添加"，否则整库都会跳到"最近添加"最前面
+            track.addedAt = (cached && cached.addedAt) || track.addedAt
             if (cached) updated++
             else added++
           } catch (err) {

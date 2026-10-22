@@ -39,6 +39,43 @@ function fmtSize(bytes) {
   return n.toFixed(n >= 100 || i === 0 ? 0 : 1) + ' ' + u[i]
 }
 
+/* ---- 音质显示（v1.9）：无损看位深/采样率，有损看码率 ---- */
+
+/** 44.1 / 96 / 192 —— 去掉多余的 .0 */
+function fmtKHz(sr) {
+  const k = sr / 1000
+  return (Math.round(k * 10) / 10).toString()
+}
+
+/** 表格里的紧凑写法：24/96 表示 24bit/96kHz；有损格式显示码率 320k */
+function fmtQuality(t) {
+  if (!t) return '—'
+  // 有损优先给码率：MP3 的"44.1k"对判断音质没用，128k 才有意义
+  if (!t.lossless && t.bitrate) return Math.round(t.bitrate / 1000) + 'k'
+  if (t.bitsPerSample && t.sampleRate) return t.bitsPerSample + '/' + fmtKHz(t.sampleRate)
+  if (t.sampleRate) return fmtKHz(t.sampleRate) + 'k'
+  if (t.bitrate) return Math.round(t.bitrate / 1000) + 'k'
+  return '—'
+}
+
+/** 悬停提示：把能拿到的参数都摊开，避免"24/96 是什么"这种疑问 */
+function qualityTitle(t) {
+  if (!t) return ''
+  const bits = []
+  if (t.bitsPerSample) bits.push(t.bitsPerSample + ' bit')
+  if (t.sampleRate) bits.push(fmtKHz(t.sampleRate) + ' kHz')
+  if (t.codec) bits.push(String(t.codec).toUpperCase())
+  if (t.bitrate) bits.push(Math.round(t.bitrate / 1000) + ' kbps')
+  if (t.lossless) bits.push('无损')
+  return bits.join(' · ') || '未知'
+}
+
+/** 高解析（hires）：24bit 以上或采样率高于 48k —— 用来在列表里把真高清挑出来 */
+function isHires(t) {
+  if (!t) return false
+  return (t.bitsPerSample >= 24) || (t.sampleRate > 48000)
+}
+
 function debounce(fn, ms) {
   let t = null
   return function (...args) {

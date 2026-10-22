@@ -1382,6 +1382,8 @@ function toClientTrack(t) {
     lossless: t.lossless,
     ext: t.ext,
     size: t.size,
+    // 入库时间（v1.9）：「最近添加」视图与 addedAt 排序用
+    addedAt: t.addedAt || t.mtime || 0,
     hasLyric: !!t.lyric,
     // 拼音检索字段（v1.6）：主进程预先算好，渲染层只做 includes
     py: t.py || '',

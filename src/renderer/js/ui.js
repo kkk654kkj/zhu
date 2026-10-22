@@ -7,7 +7,7 @@ const UI = {
   init() {
     const ids = [
       'searchInput', 'searchClear', 'btnScan', 'btnLyricToggle', 'btnMin', 'btnMax', 'btnClose',
-      'cntAll', 'cntFav', 'cntRecent', 'cntMost', 'cntFolders', 'cntAlbums', 'playlistList', 'btnNewPlaylist', 'libStat',
+      'cntAll', 'cntFav', 'cntRecent', 'cntMost', 'cntFolders', 'cntAlbums', 'cntAdded', 'playlistList', 'btnNewPlaylist', 'libStat',
       'viewHeader', 'vhCover', 'vhTitle', 'vhSub', 'btnPlayAll', 'btnShuffleAll', 'btnPlaylistRemove',
       'tableHead', 'tableBody', 'emptyState', 'emptyText', 'btnEmptyScan',
       'scanOverlay', 'scanTitle', 'scanBar', 'scanSub',
@@ -41,13 +41,14 @@ const UI = {
     })
   },
 
-  renderNavCounts({ all, fav, recent, most, folders, albums }) {
+  renderNavCounts({ all, fav, recent, most, folders, albums, added }) {
     this.els.cntAll.textContent = all
     this.els.cntFav.textContent = fav
     this.els.cntRecent.textContent = recent
     this.els.cntMost.textContent = most
     this.els.cntFolders.textContent = folders
     this.els.cntAlbums.textContent = albums
+    if (this.els.cntAdded) this.els.cntAdded.textContent = added == null ? 0 : added
   },
 
   renderPlaylists(playlists) {
@@ -116,6 +117,7 @@ const UI = {
           <div class="c-artist">${esc(t.artist || '未知歌手')}</div>
           <div class="c-album">${esc(t.album || '—')}</div>
           <div class="c-fmt"><span class="badge${t.lossless ? ' lossless' : ''}">${esc(t.ext || '')}</span></div>
+          <div class="c-q${isHires(t) ? ' hires' : ''}" title="${esc(qualityTitle(t))}">${esc(fmtQuality(t))}</div>
           <div class="c-dur">${fmtDuration(t.duration)}</div>
         </div>`
     }
@@ -127,7 +129,7 @@ const UI = {
   _markSortHeader(key, dir) {
     $$('#tableHead [data-sort]').forEach((el) => {
       el.textContent = {
-        artist: '歌手', album: '专辑', ext: '格式', duration: '时长'
+        artist: '歌手', album: '专辑', ext: '格式', duration: '时长', quality: '音质'
       }[el.dataset.sort] || el.dataset.sort
       if (el.dataset.sort === key) {
         el.textContent += dir === 'asc' ? ' ↑' : ' ↓'

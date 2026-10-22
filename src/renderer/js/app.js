@@ -450,15 +450,30 @@ function updateNavCounts() {
     all: state.tracks.length,
     fav: state.favorites.size,
     recent: state.history.length,
+    added: countRecentlyAdded(),
     most: state.tracks.filter((t) => (state.playCounts[t.id] || 0) > 0).length,
     folders: dirSet.size,
     albums: albumSet.size
   })
 }
 
+/** 最近 7 天入库的数量（v1.9）：侧栏徽章用，和「最近添加」视图里的总数不是一回事 */
+const RECENT_ADDED_DAYS = 7
+function countRecentlyAdded(days = RECENT_ADDED_DAYS) {
+  const since = Date.now() - days * 86400000
+  let n = 0
+  for (const t of state.tracks) if ((t.addedAt || 0) >= since) n++
+  return n
+}
+
+/** 数值型排序键（v1.9 起统一判断，别再用 if (key === 'duration') 一个个加） */
+const NUMERIC_SORT_KEYS = new Set(['duration', 'quality', 'sampleRate', 'bitsPerSample', 'bitrate', 'addedAt', 'year'])
+/** 首次点击就用降序的列 */
+const SORT_DESC_FIRST = new Set(['quality', 'addedAt'])
+
 function renderPlaylists() {
   UI.renderPlaylists(state.playlists)
-  const builtin = ['all', 'fav', 'recent', 'most', 'albums', 'folders']
+  const builtin = ['all', 'fav', 'recent', 'added', 'most', 'albums', 'folders']
   if (state.view.startsWith('folder:')) UI.setActiveNav('folders')
   else if (!builtin.includes(state.view)) UI.setActiveNav(state.view)
 }
@@ -485,6 +500,10 @@ function computedList() {
   else if (state.view === 'fav') list = Array.from(state.favorites).map((id) => state.byId.get(id)).filter(Boolean)
   else if (state.view === 'recent') {
     list = state.history.map((h) => state.byId.get(h.id)).filter(Boolean)
+  } else if (state.view === 'added') {
+    // 最近添加（v1.9）：全部曲目按入库时间倒序，新歌永远在最上面。
+    // 不设时间窗口——窗口会让"上个月整理的那批歌"凭空消失，用户只会觉得是 bug
+    list = state.tracks.slice().sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
   } else if (state.view === 'most') {
     // 最常播放（v1.7）：只列有播放记录的，按次数降序
     list = state.tracks
@@ -508,10 +527,16 @@ function computedList() {
   if (state.sortKey !== 'default') {
     const key = state.sortKey
     const dir = state.sortDir === 'asc' ? 1 : -1
+    // 音质排序（v1.9）：先采样率、再位深。同一采样率下 24bit 排在 16bit 前面，
+    // 这样"按音质排"= 直接把真高清顶到最上面，不用在两列之间来回点
+    const pick = (t) => (key === 'quality'
+      ? (t.sampleRate || 0) * 100 + (t.bitsPerSample || 0)
+      : t[key])
+    const numeric = NUMERIC_SORT_KEYS.has(key)
     list.sort((a, b) => {
-      let va = a[key]
-      let vb = b[key]
-      if (key === 'duration') { va = va || 0; vb = vb || 0 }
+      let va = pick(a)
+      let vb = pick(b)
+      if (numeric) { va = Number(va) || 0; vb = Number(vb) || 0 }
       else {
         va = String(va || '').toLowerCase()
         vb = String(vb || '').toLowerCase()
@@ -618,6 +643,13 @@ function renderView() {
       title: '最近播放', sub: `${list.length} 首歌曲`, cover: null,
       showPlayAll: true, showRemove: false
     })
+  } else if (state.view === 'added') {
+    const recent = countRecentlyAdded()
+    UI.renderHeader({
+      title: '最近添加',
+      sub: `共 ${list.length} 首 · 最近 ${RECENT_ADDED_DAYS} 天新增 ${recent} 首（按入库时间倒序）`,
+      cover: null, showPlayAll: true, showRemove: false
+    })
   } else if (state.view === 'most') {
     UI.renderHeader({
       title: '最常播放', sub: `${list.length} 首歌曲（按播放次数）`, cover: null,
@@ -649,8 +681,9 @@ function renderView() {
     const msg = state.query ? '没有匹配的歌曲'
       : state.view === 'fav' ? '还没有收藏歌曲'
         : state.view === 'recent' ? '还没有播放记录'
-          : state.view === 'most' ? '还没有播放记录'
-            : state.tracks.length ? '这里还没有歌曲' : '曲库为空，先扫描音乐文件夹'
+          : state.view === 'added' ? '曲库为空，先扫描音乐文件夹'
+            : state.view === 'most' ? '还没有播放记录'
+              : state.tracks.length ? '这里还没有歌曲' : '曲库为空，先扫描音乐文件夹'
     UI.renderTable([], { currentId: state.currentId })
     UI.showEmpty(msg)
     return
@@ -1031,13 +1064,16 @@ function bindUI() {
     if (!cell) return
     const key = cell.dataset.sort
     if (state.sortKey === key) {
-      state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc'
-      if (state.sortDir === 'asc' && state.sortKey === key) {
-        // 再次点击第三次 → 恢复默认
-      }
+      // 三态循环（v1.9）：默认方向 → 反向 → 恢复默认（旧代码第三个分支是空的，
+      // 只能靠双击表头回默认，等于"点两下就没路可走"）。
+      // 方向顺序按列而定：音质/入库时间首点是降序，其余列首点是升序
+      const descFirst = SORT_DESC_FIRST.has(key)
+      if (state.sortDir === (descFirst ? 'desc' : 'asc')) state.sortDir = descFirst ? 'asc' : 'desc'
+      else { state.sortKey = 'default'; state.sortDir = 'asc' }
     } else {
       state.sortKey = key
-      state.sortDir = 'asc'
+      // 音质和入库时间默认降序：想看的是"最好的/最新的"，不是最差的
+      state.sortDir = SORT_DESC_FIRST.has(key) ? 'desc' : 'asc'
     }
     renderView()
   })
