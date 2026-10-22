@@ -83,9 +83,14 @@ function cleanChromiumCache() {
  */
 function killOrphanMpv() {
   if (process.platform !== 'win32') return
+  // 命名管道是 lxmpv-<主进程PID>-<时间戳>，所以只杀「管道名里不是当前 PID」的那些。
+  // 不能无条件扫所有 lxmpv-*：启动后渲染层会在 1~2 秒内拉起自己的 mpv，
+  // 而这一步恰好也是异步的，会把刚起的引擎当孤儿杀掉。
+  // （v1.6.0 实测踩到：日志里 killed-orphan-mpv 之后紧跟 mpv IPC 连接失败）
+  const selfTag = 'lxmpv-' + process.pid + '-'
   const script =
     'Get-CimInstance Win32_Process -Filter "Name=\'mpv.exe\'" | ' +
-    'Where-Object { $_.CommandLine -like \'*lxmpv-*\' } | ' +
+    'Where-Object { $_.CommandLine -like \'*lxmpv-*\' -and $_.CommandLine -notlike \'*' + selfTag + '*\' } | ' +
     'Select-Object -ExpandProperty ProcessId'
   execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
     { windowsHide: true, timeout: 8000 },
