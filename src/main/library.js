@@ -367,14 +367,71 @@ class Library {
   constructor({ cacheFile, coverDir }) {
     this.cacheFile = cacheFile
     this.coverDir = coverDir
+    // 解析失败清单（v1.8）：独立于 library.json 存，因为「连元数据都读不出来」的文件
+    // 根本进不了曲库，以前只在扫描返回值里留前 10 个文件名，重启即丢。
+    this.failuresFile = path.join(path.dirname(cacheFile), 'parse-failures.json')
+    this.failures = new Map()
     this.tracks = new Map()
     this.mm = null
     this.scanning = false
   }
 
+  /** 记一条失败（幂等）：同一文件重复失败只刷新时间与原因，保留首次出现时间 */
+  recordFailure(filePath, error, stage = 'parse', size = 0) {
+    const id = fileId(filePath)
+    const prev = this.failures.get(id)
+    this.failures.set(id, {
+      id,
+      path: filePath,
+      fileName: path.basename(filePath),
+      ext: extOf(filePath).slice(1),
+      size: size || (prev && prev.size) || 0,
+      stage,                                   // stat | parse（完全读不出） | metadata（能播但无标签）
+      error: String(error || '未知错误').slice(0, 300),
+      firstAt: (prev && prev.firstAt) || Date.now(),
+      at: Date.now()
+    })
+    return this.failures.get(id)
+  }
+
+  clearFailure(filePathOrId) {
+    const id = this.failures.has(filePathOrId) ? filePathOrId : fileId(String(filePathOrId || ''))
+    return this.failures.delete(id)
+  }
+
+  clearAllFailures() {
+    const n = this.failures.size
+    this.failures.clear()
+    return n
+  }
+
+  listFailures() {
+    return Array.from(this.failures.values()).sort((a, b) => b.at - a.at)
+  }
+
+  async persistFailures() {
+    try {
+      await fsp.mkdir(path.dirname(this.failuresFile), { recursive: true })
+      const tmp = this.failuresFile + '.tmp'
+      await fsp.writeFile(tmp, JSON.stringify({ v: 1, failures: this.listFailures() }), 'utf8')
+      await fsp.rename(tmp, this.failuresFile)
+    } catch (err) {
+      console.error('[library] 失败清单写入失败:', err.message)
+    }
+  }
+
   async init() {
     // music-metadata v11 是纯 ESM，CJS 里用动态 import
     this.mm = await import('music-metadata')
+    try {
+      const rawF = await fsp.readFile(this.failuresFile, 'utf8')
+      const parsedF = JSON.parse(rawF)
+      for (const f of parsedF.failures || []) {
+        if (f && f.path) this.failures.set(f.id || fileId(f.path), f)
+      }
+    } catch {
+      /* 首次运行没有失败清单 */
+    }
     try {
       const raw = await fsp.readFile(this.cacheFile, 'utf8')
       const parsed = JSON.parse(raw)
@@ -466,7 +523,9 @@ class Library {
         let st
         try {
           st = await fsp.stat(filePath)
-        } catch {
+        } catch (err) {
+          // 收集阶段还在、解析时读不到（被占用 / 权限 / 刚被删）
+          if (err.code !== 'ENOENT') this.recordFailure(filePath, '读取文件信息失败：' + err.message, 'stat')
           done++
           return
         }
@@ -489,11 +548,20 @@ class Library {
             // 保留旧缓存（若存在），只记名字让上层提示；直接丢弃会让用户
             // 完全不知道「为什么少了几首歌」
             failedFiles.push(path.basename(filePath))
+            // v1.8：失败明细单独落盘，诊断面板要能看到完整路径与原因
+            this.recordFailure(filePath, err.message, 'parse', st.size)
             done++
             onProgress({ phase: 'parse', done, total, track: null })
             return
           }
         }
+        // 元数据能解析但标签读不出来（music-metadata 抛错但有文件名兜底）也算失败，
+        // 区别是它仍能播放，所以 stage 记 metadata；解析正常则清掉历史失败记录
+        if (track.parseError) this.recordFailure(filePath, track.parseError, 'metadata', st.size)
+        // 连时长都读不出来，基本就是这个文件坏了 / 格式不受支持（能"解析成功"但 duration=0）
+        else if (!(track.duration > 0)) {
+          this.recordFailure(filePath, '无法读取音频时长（文件可能损坏或格式不受支持）', 'duration', st.size)
+        } else this.failures.delete(id)
         this.tracks.set(id, track)
         done++
         onProgress({ phase: 'parse', done, total, track })
@@ -512,13 +580,20 @@ class Library {
             removed++
           }
         }
+        // 失败记录同样要清理：文件已被删掉的条目留着就是脏数据（目录不可达时一并跳过）
+        for (const [id, f] of Array.from(this.failures)) {
+          if (!seen.has(id) && !fs.existsSync(f.path)) this.failures.delete(id)
+        }
       }
 
       await this.persist()
+      await this.persistFailures()
       return {
         added, updated, removed, total: this.tracks.size,
         failed: failedFiles.length,
         failedFiles: failedFiles.slice(0, 10),
+        // v1.8：失败清单完整条数（failedFiles 只给前 10 个名字，诊断面板另有完整数据）
+        failures: this.failures.size,
         missingRoots,
         elapsed: Date.now() - started
       }

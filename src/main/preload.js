@@ -128,5 +128,19 @@ contextBridge.exposeInMainWorld('api', {
     const h = (_e, evt) => cb(evt)
     ipcRenderer.on('mpv:event', h)
     return () => ipcRenderer.removeListener('mpv:event', h)
-  }
+  },
+
+  /* ---- 诊断面板（v1.8） ---- */
+  /** 环境快照：版本 / 路径 / 引擎状态 / 曲库规模 */
+  diagInfo: () => invoke('diag:info'),
+  /** 解析失败清单 → {ok, failures:[{path,fileName,ext,stage,error,at,exists}], counts} */
+  diagFailures: () => invoke('diag:failures'),
+  /** mpv 实时日志（按 seq 增量） → {ok, seq, entries:[{seq,at,level,text}], running, exclusive} */
+  diagMpvLog: (sinceSeq) => invoke('diag:mpvLog', sinceSeq),
+  /** 日志文件尾部 → {ok, lines[], file, size, truncated} */
+  diagLogTail: (maxLines) => invoke('diag:logTail', maxLines),
+  diagOpenLog: () => invoke('diag:openLog'),
+  diagClearFailures: () => invoke('diag:clearFailures'),
+  /** 走主进程剪贴板（file:// 下 navigator.clipboard 不可用） */
+  diagCopy: (text) => invoke('diag:copy', text)
 })

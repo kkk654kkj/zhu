@@ -116,6 +116,7 @@ async function boot() {
   bindUI()
   bindDirModal()
   bindGlobalKeys()
+  if (typeof Diag !== 'undefined') Diag.init()   // v1.8 诊断面板
 
   UI.setVolume(player.volume, player.muted)
   UI.setMode(player.mode)
@@ -1576,7 +1577,7 @@ async function doScan() {
     if (res.added) bits.push('新增 ' + res.added)
     if (res.updated) bits.push('更新 ' + res.updated)
     if (res.removed) bits.push('移除 ' + res.removed)
-    if (res.failed) bits.push(res.failed + ' 个解析失败')
+    if (res.failed) bits.push(res.failed + ' 个解析失败（标题栏诊断按钮可看明细）')
     // 目录不可访问时主进程会跳过清理，必须告诉用户「不是曲库没了，是盘没连上」
     if (res.missingRoots && res.missingRoots.length) {
       bits.push(res.missingRoots.length + ' 个目录不可访问，已跳过清理')
@@ -1589,6 +1590,8 @@ async function doScan() {
   } finally {
     scanning = false
     UI.hideScan()
+    // 诊断面板开着时同步刷新失败清单（扫描往往就是用户打开面板的原因）
+    if (typeof Diag !== 'undefined' && Diag.isOpen()) Diag.loadFailures()
   }
 }
 
@@ -1623,6 +1626,7 @@ async function onScanDone() {
     }
     updateNavCounts()
     renderView()
+    if (typeof Diag !== 'undefined' && Diag.isOpen()) Diag.loadFailures()
   } catch (err) {
     console.error('[scan-done]', err)
   }
@@ -1653,6 +1657,7 @@ function bindGlobalKeys() {
         return
       }
       UI.hideContextMenu()
+      if (typeof Diag !== 'undefined' && Diag.isOpen()) { Diag.close(); e.preventDefault(); return }
       if (!UI.els.dirModal.hidden) { UI.hideDirModal(); e.preventDefault(); return }
       if (inInput) { document.activeElement.blur(); e.preventDefault() }
       // 有选中项时 Esc 先清选中（v1.7）

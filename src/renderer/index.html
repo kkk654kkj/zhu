@@ -42,6 +42,7 @@
   <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h9v2H4zM17 5h2v5h-2zM4 16h4v2H4zM12 15h2v5h-2zM4 11h13v2H4zM19 11h2v2h-2zM16 6h5v2h-5zM8 16h9v2H8z"/></symbol>
   <symbol id="i-mini" viewBox="0 0 24 24"><path d="M4 4h16v16H4zm2 2v12h12V6z"/><path d="M11 12h6v6h-6z"/></symbol>
   <symbol id="i-hifi" viewBox="0 0 24 24"><path d="M4 6h2v12H4zM8 9h2v6H8zM12 4h2v16h-2zM16 8h2v8h-2zM20 11h2v2h-2z"/></symbol>
+  <symbol id="i-bug" viewBox="0 0 24 24"><path d="M9 3.2a3 3 0 016 0V4h1.5A3.5 3.5 0 0120 7.5V13a8 8 0 01-16 0V7.5A3.5 3.5 0 017.5 4H9zM11 5h2v-.8a1 1 0 10-2 0z"/><path d="M2 9l2.6 1.4L4 13H2zM22 9l-2.6 1.4L20 13h2zM1.5 15h3v1.6h-3zM19.5 15h3v1.6h-3zM3.5 19.2l2.7-1.5 1 1.6-2.5 1.4zM20.5 19.2l-2.7-1.5-1 1.6 2.5 1.4z"/></symbol>
 </svg>
 
 <!-- ============ 标题栏 ============ -->
@@ -63,6 +64,7 @@
     <button class="wbtn" id="btnDLyric" title="桌面歌词（Ctrl+Alt+D）"><svg><use href="#i-dlyric"/></svg></button>
     <button class="wbtn" id="btnHifi" title="独占输出（位完美）"><svg><use href="#i-hifi"/></svg></button>
     <button class="wbtn" id="btnMini" title="迷你模式（Ctrl+Alt+M）"><svg><use href="#i-mini"/></svg></button>
+    <button class="wbtn" id="btnDiag" title="诊断信息（解析失败 / mpv 日志）"><svg><use href="#i-bug"/></svg></button>
     <span class="tb-sep"></span>
     <button class="wbtn" id="btnMin" title="最小化"><svg><use href="#i-min"/></svg></button>
     <button class="wbtn" id="btnMax" title="最大化"><svg><use href="#i-max"/></svg></button>
@@ -274,6 +276,53 @@
   </div>
 </div>
 
+<!-- ============ 诊断面板（解析失败 / mpv 日志 / 环境） ============ -->
+<div id="diagModal" class="modal-mask" hidden>
+  <div class="modal diag-modal">
+    <div class="modal-head">
+      <span>诊断信息</span>
+      <button class="mini-btn" id="btnDiagClose"><svg><use href="#i-close"/></svg></button>
+    </div>
+    <div class="diag-tabs" id="diagTabs">
+      <button class="diag-tab active" data-tab="failures">解析失败 <b id="diagFailBadge">0</b></button>
+      <button class="diag-tab" data-tab="mpv">mpv 日志</button>
+      <button class="diag-tab" data-tab="env">环境</button>
+    </div>
+    <div class="diag-body">
+      <div class="diag-pane" data-pane="failures">
+        <div class="diag-bar">
+          <span class="diag-sum" id="diagFailSum">正在读取…</span>
+          <span class="grow"></span>
+          <button class="mini-btn" id="btnDiagClear" title="清空失败记录（下次扫描会重新记录）">清空记录</button>
+        </div>
+        <div class="diag-list" id="diagFailList"></div>
+      </div>
+      <div class="diag-pane" data-pane="mpv" hidden>
+        <div class="diag-bar">
+          <span class="diag-dot" id="diagMpvDot"></span>
+          <span id="diagMpvState">引擎未运行</span>
+          <span class="grow"></span>
+          <button class="mini-btn active" data-mpv="live" title="本次运行期间的 mpv 事件">实时</button>
+          <button class="mini-btn" data-mpv="file" title="data\lx-player.log 尾部">日志文件</button>
+          <button class="mini-btn" id="btnDiagMpvRefresh" title="刷新">刷新</button>
+        </div>
+        <pre class="diag-log" id="diagLog"></pre>
+      </div>
+      <div class="diag-pane" data-pane="env" hidden>
+        <div class="diag-kv" id="diagEnv"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span class="diag-foot-tip" id="diagFootTip">失败明细存在 data\parse-failures.json，mpv 日志同时写入 data\lx-player.log</span>
+      <div class="diag-foot-btns">
+        <button class="btn" id="btnDiagCopy"><svg><use href="#i-list"/></svg><span>复制</span></button>
+        <button class="btn" id="btnDiagOpenLog"><svg><use href="#i-folder"/></svg><span>打开日志文件</span></button>
+        <button class="btn primary" id="btnDiagRescan"><svg><use href="#i-refresh"/></svg><span>重新扫描</span></button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- 右键菜单 -->
 <div id="ctxMenu" class="ctx-menu" hidden></div>
 
@@ -290,6 +339,7 @@
 <script src="js/m3u.js"></script>
 <script src="js/resume.js"></script>
 <script src="js/dragdrop.js"></script>
+<script src="js/diag.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

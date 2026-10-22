@@ -2,7 +2,7 @@
 /**
  * 主进程：窗口、自定义文件协议、音乐库、持久化、全局快捷键。
  */
-const { app, BrowserWindow, ipcMain, protocol, net, dialog, shell, globalShortcut, Tray, Menu, nativeImage, screen } = require('electron')
+const { app, BrowserWindow, ipcMain, protocol, net, dialog, shell, globalShortcut, Tray, Menu, nativeImage, screen, clipboard } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const fsp = require('fs/promises')
@@ -805,6 +805,22 @@ function closeLyricWindow() {
 let mpvEngine = null
 
 /**
+ * mpv 诊断日志环形缓冲（v1.8）。
+ * 渲染层收到 mpv:event 时只关心"要不要更新界面"，排查问题需要的上下文
+ * （启动参数、audio-out-params、回退共享、引擎退出码）散在各处，面板统一从这里取。
+ * 只收低频、有信息量的事件：time/volume/pause 这类 1~2Hz 的不要，会瞬间冲满。
+ */
+const MPV_LOG_MAX = 800
+const mpvLogs = []
+let mpvLogSeq = 0
+function pushMpvLog(level, text) {
+  const s = String(text == null ? '' : text)
+  if (!s) return
+  mpvLogs.push({ seq: ++mpvLogSeq, at: Date.now(), level: level || 'info', text: s.slice(0, 2000) })
+  if (mpvLogs.length > MPV_LOG_MAX) mpvLogs.splice(0, mpvLogs.length - MPV_LOG_MAX)
+}
+
+/**
  * 引擎路径查找顺序：LX_MPV 环境变量（调试） → exe 同级 engine\mpv.exe（成品）
  * → 项目根 engine\mpv.exe（开发）。
  */
@@ -827,7 +843,9 @@ function onMpvEvent(evt) {
   if (evt.type === 'file-error' && mpvEngine && mpvEngine.exclusive && !mpvEngine.fellBack) {
     mpvEngine.fellBack = true
     logLine('[mpv] 独占输出失败，回退共享：' + (evt.message || ''))
+    pushMpvLog('warn', '独占输出失败，回退共享：' + (evt.message || ''))
     mpvEngine.restart({ exclusive: false }).then((r) => {
+      pushMpvLog(r.ok ? 'warn' : 'error', r.ok ? '已重启引擎为共享输出' : '回退共享也失败：' + (r.error || ''))
       sendToRenderer('mpv:event', r.ok
         ? { type: 'fallback', message: (evt.message || '') }
         : { type: 'error', message: r.error || '独占失败且回退共享也失败' })
@@ -835,9 +853,23 @@ function onMpvEvent(evt) {
     return
   }
   // 输出参数是"是否位完美"的第一手证据，落日志便于事后核对
-  if (evt.type === 'format') logLine('[mpv] audio-out-params=' + JSON.stringify(evt.params))
-  if (evt.type === 'file-error') logLine('[mpv] file-error: ' + (evt.message || ''))
-  if (evt.type === 'log' && (evt.level === 'error' || evt.level === 'fatal')) logLine('[mpv][log] ' + evt.text)
+  if (evt.type === 'format') {
+    logLine('[mpv] audio-out-params=' + JSON.stringify(evt.params))
+    pushMpvLog('info', 'audio-out-params=' + JSON.stringify(evt.params))
+  }
+  if (evt.type === 'file-error') {
+    logLine('[mpv] file-error: ' + (evt.message || ''))
+    pushMpvLog('error', 'file-error: ' + (evt.message || ''))
+  }
+  if (evt.type === 'log' && (evt.level === 'error' || evt.level === 'fatal')) {
+    logLine('[mpv][log] ' + evt.text)
+    pushMpvLog(evt.level === 'fatal' ? 'error' : 'warn', '[' + evt.level + '] ' + evt.text)
+  }
+  if (evt.type === 'engine-exit') {
+    pushMpvLog('error', '引擎退出 code=' + evt.code + (evt.stderr ? ' stderr=' + evt.stderr : ''))
+  }
+  if (evt.type === 'error') pushMpvLog('error', evt.message || '引擎错误')
+  if (evt.type === 'loaded') pushMpvLog('info', 'file-loaded')
   sendToRenderer('mpv:event', evt)
 }
 
@@ -849,13 +881,17 @@ async function ensureMpv(exclusive) {
   const wantExclusive = exclusive !== false
   // 输出设备来自设置；空字符串 = 跟随系统默认
   const audioDevice = String(store.get().settings.audioDevice || '').trim()
+  pushMpvLog('info', '启动引擎：exclusive=' + wantExclusive + ' device=' + (audioDevice || '(系统默认)'))
   const r = await mpvEngine.start({ exclusive: wantExclusive, audioDevice })
   logLine('[mpv] start exclusive=' + wantExclusive + ' ' + JSON.stringify(r) + ' exe=' + mpvExePath())
+  pushMpvLog(r.ok ? 'info' : 'error',
+    '启动结果：' + (r.ok ? 'ok' : '失败 ' + (r.error || '')) + ' exe=' + mpvExePath())
   return r
 }
 
 function stopMpv() {
   if (mpvEngine) {
+    pushMpvLog('info', '关闭引擎')
     mpvEngine.kill()
     mpvEngine = null
   }
@@ -1206,6 +1242,105 @@ function registerIpc() {
     if (!store.get().settings.exclusiveOutput) return { ok: true, applied: false }
     const r = await mpvEngine.restart({ exclusive: true, audioDevice: name })
     return { ok: !!r.ok, applied: true, error: r.error }
+  })
+
+  /* ---------------- 诊断面板（v1.8） ---------------- */
+
+  // 环境快照：版本、路径、引擎状态、曲库规模
+  ipcMain.handle('diag:info', () => {
+    const s = store.get().settings || {}
+    return {
+      version: app.getVersion(),
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      node: process.versions.node,
+      packaged: app.isPackaged,
+      dataDir: DATA_DIR,
+      logFile: LOG_FILE,
+      musicDirs: s.musicDirs || [],
+      exclusiveOutput: s.exclusiveOutput === true,
+      audioDevice: s.audioDevice || '',
+      watchFolders: s.watchFolders !== false,
+      mpvExe: mpvExePath(),
+      mpvExeExists: (() => { try { return fs.existsSync(mpvExePath()) } catch { return false } })(),
+      mpvRunning: !!(mpvEngine && mpvEngine.running),
+      mpvExclusive: mpvEngine ? !!mpvEngine.exclusive : null,
+      mpvFellBack: mpvEngine ? !!mpvEngine.fellBack : false,
+      trackCount: library.list().length,
+      failureCount: library.listFailures().length,
+      scanning: !!activeScan || library.scanning
+    }
+  })
+
+  // 解析失败清单（完整路径 + 原因；文件是否还在另行核对）
+  ipcMain.handle('diag:failures', () => {
+    const list = library.listFailures().map((f) => ({
+      ...f,
+      exists: (() => { try { return fs.existsSync(f.path) } catch { return false } })()
+    }))
+    const counts = { parse: 0, metadata: 0, stat: 0, duration: 0 }
+    for (const f of list) counts[f.stage] = (counts[f.stage] || 0) + 1
+    return { ok: true, failures: list, counts }
+  })
+
+  // mpv 实时日志：按 seq 增量取，避免每次重画整个列表
+  ipcMain.handle('diag:mpvLog', (e, sinceSeq) => {
+    const since = Number(sinceSeq) || 0
+    return {
+      ok: true,
+      seq: mpvLogSeq,
+      entries: mpvLogs.filter((x) => x.seq > since),
+      running: !!(mpvEngine && mpvEngine.running),
+      exclusive: mpvEngine ? !!mpvEngine.exclusive : null
+    }
+  })
+
+  // 日志文件尾部（含启动阶段 stage:* 与外挂进程相关行）
+  ipcMain.handle('diag:logTail', async (e, maxLines) => {
+    const n = Math.max(50, Math.min(4000, Number(maxLines) || 400))
+    try {
+      const st = await fsp.stat(LOG_FILE)
+      const readBytes = Math.min(st.size, 256 * 1024)   // 只读尾部 256 KB，日志再大也不卡
+      const fd = await fsp.open(LOG_FILE, 'r')
+      let text = ''
+      try {
+        const buf = Buffer.alloc(readBytes)
+        await fd.read(buf, 0, readBytes, st.size - readBytes)
+        text = buf.toString('utf8')
+      } finally {
+        await fd.close()
+      }
+      const lines = text.split(/\r?\n/).filter((l) => l.length)
+      return { ok: true, lines: lines.slice(-n), file: LOG_FILE, size: st.size, truncated: lines.length > n }
+    } catch (err) {
+      return { ok: false, error: err.message, lines: [], file: LOG_FILE }
+    }
+  })
+
+  ipcMain.handle('diag:openLog', () => {
+    try {
+      if (fs.existsSync(LOG_FILE)) shell.showItemInFolder(LOG_FILE)
+      else shell.openPath(DATA_DIR)
+    } catch {}
+    return true
+  })
+
+  ipcMain.handle('diag:clearFailures', async () => {
+    const n = library.clearAllFailures()
+    await library.persistFailures()
+    logLine('[diag] 已清空失败清单 ' + n + ' 条')
+    return { ok: true, cleared: n }
+  })
+
+  // 剪贴板：file:// 页面里 navigator.clipboard 与 execCommand('copy') 都不可靠，
+  // 必须走主进程的 clipboard 模块（诊断面板要能一键复制给下一个人看）
+  ipcMain.handle('diag:copy', (e, text) => {
+    try {
+      clipboard.writeText(String(text == null ? '' : text))
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
   })
 }
 
