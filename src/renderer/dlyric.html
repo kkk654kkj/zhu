@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';" />
+<title>桌面歌词</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    background: transparent;
+    overflow: hidden;
+    height: 100%;
+    font-family: "Microsoft YaHei UI", "PingFang SC", sans-serif;
+    user-select: none;
+  }
+  #wrap {
+    position: relative;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 6px 14px;
+    box-sizing: border-box;
+  }
+  /* 背景常亮、不随 hover 变化：整窗半透明图层改 alpha 会触发全窗口重绘，在
+     Windows 上看着就是"鼠标一扫过闪一下"。悬停反馈只靠控制条淡入。 */
+  #wrap:not(.locked) {
+    background: rgba(0, 0, 0, .22);
+    border-radius: 12px;
+  }
+  /* 未锁定时可拖动 */
+  #drag {
+    -webkit-app-region: drag;
+    width: 100%;
+    text-align: center;
+  }
+  /* 控制条脱离文档流（绝对定位），否则它一出现就会把居中的歌词整体推走 16px，
+     hover/离开各来一次 = 肉眼可见的跳动/闪烁 */
+  #ctrl {
+    position: absolute;
+    top: 2px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 4px;
+    padding: 2px 4px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, .5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .14s;
+    will-change: opacity;
+    -webkit-app-region: no-drag;
+  }
+  #wrap:not(.locked):hover #ctrl { opacity: 1; pointer-events: auto; }
+  #ctrl button {
+    -webkit-app-region: no-drag;
+    background: rgba(255, 255, 255, .12);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    min-width: 30px;
+    height: 26px;
+    padding: 0 8px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #ctrl button:hover { background: rgba(255, 255, 255, .28); }
+  #line, #next {
+    text-align: center;
+    width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,.9)) drop-shadow(0 0 10px rgba(0,0,0,.6));
+    transition: opacity .25s;
+  }
+  #line {
+    font-weight: 700;
+    line-height: 1.25;
+  }
+  #next {
+    font-size: .55em;
+    opacity: .55;
+    font-weight: 400;
+  }
+  body.paused #line, body.paused #next { opacity: .45; }
+  /* 用 visibility 而不是 display：没有下一句时占位仍在，歌词不会上下跳 */
+  body.nolyric #next { visibility: hidden; }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="ctrl">
+      <button id="btnLock" title="锁定（鼠标穿透，去主窗口标题栏按钮解锁）">🔒 锁定</button>
+      <button id="btnSmaller" title="减小字号">A-</button>
+      <button id="btnBigger" title="增大字号">A+</button>
+      <button id="btnColor" title="切换颜色">🎨</button>
+      <button id="btnClose" title="关闭桌面歌词">✕</button>
+    </div>
+    <div id="drag">
+      <div id="line">桌面歌词</div>
+      <div id="next"></div>
+    </div>
+  </div>
+  <script src="js/dlyric.js"></script>
+</body>
+</html>
