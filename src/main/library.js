@@ -7,6 +7,7 @@ const fs = require('fs')
 const fsp = require('fs/promises')
 const path = require('path')
 const crypto = require('crypto')
+const { pinyin } = require('pinyin-pro')
 
 const AUDIO_EXT = new Set([
   '.flac', '.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.ape', '.wma', '.aiff', '.aif', '.dsf', '.dff', '.mka'
@@ -14,7 +15,31 @@ const AUDIO_EXT = new Set([
 const IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.webp', '.bmp']
 
 /** 解析规则版本：标题/歌手兜底逻辑变化时递增，旧 library.json 会被视为过期重新解析 */
-const PARSE_VERSION = 3
+// v4：新增拼音检索字段 py/pyf
+const PARSE_VERSION = 4
+
+/**
+ * 为搜索预先算好拼音：全拼（zhoujielun）与首字母（zjl）。
+ * 中文曲库输首字母找歌是刚需，运行时逐首算会卡，所以在解析阶段一次性算好存进 library.json。
+ * pinyin-pro 对非中文原样返回，英文歌名不受影响。
+ */
+function buildPinyinSearch(texts) {
+  const parts = []
+  const firsts = []
+  for (const t of texts) {
+    const s = String(t || '').trim()
+    if (!s) continue
+    try {
+      const arr = pinyin(s, { toneType: 'none', type: 'array' })
+      parts.push(arr.join('').toLowerCase())
+      firsts.push(arr.map((x) => (x ? x[0] : '')).join('').toLowerCase())
+    } catch {
+      parts.push(s.toLowerCase())
+      firsts.push(s.toLowerCase())
+    }
+  }
+  return { py: parts.join(' '), pyf: firsts.join(' ') }
+}
 
 function fileId(filePath) {
   return crypto.createHash('md5').update(filePath.toLowerCase()).digest('hex')
@@ -288,16 +313,21 @@ async function parseTrack(filePath, mm, coverDir) {
     if (!(meta && meta.artist) && lrcMeta.ar) nameArtist = lrcMeta.ar
   }
 
+  const title = (meta && meta.title) || nameTitle
+  const artist = (meta && meta.artist) || nameArtist || '未知歌手'
+  const album = (meta && meta.album) || ''
+  const pys = buildPinyinSearch([title, artist, album])
+
   return {
     id,
     path: filePath,
     fileName: path.basename(filePath),
     size: st.size,
     mtime: st.mtimeMs,
-    title: (meta && meta.title) || nameTitle,
-    artist: (meta && meta.artist) || nameArtist || '未知歌手',
+    title,
+    artist,
     artists: (meta && meta.artists) || (nameArtist ? [nameArtist] : []),
-    album: (meta && meta.album) || '',
+    album,
     albumArtist: (meta && meta.albumArtist) || '',
     year: (meta && meta.year) || null,
     trackNo: (meta && meta.trackNo) || null,
@@ -312,6 +342,8 @@ async function parseTrack(filePath, mm, coverDir) {
     cover,
     lyric,
     ext: extOf(filePath).slice(1),
+    py: pys.py,
+    pyf: pys.pyf,
     parseError: mmError
   }
 }
@@ -352,7 +384,9 @@ class Library {
         return
       }
       for (const t of parsed.tracks || []) {
-        if (!t || !t.id || !fs.existsSync(t.path)) continue
+        // 这里不再校验 path 是否存在：移动硬盘/网络盘离线时启动，会把整库过滤成空。
+        // 真正的增删以 scan() 为准（它会先确认目录可达）。
+        if (!t || !t.id) continue
         // 旧缓存里 cover 是绝对路径，程序文件夹搬过家会全失效；能按文件名在本机 covers 里找到的，就地归一化成相对名。
         // 注意：与音频同目录的封面图也是绝对路径，但它们不在 coverDir 里，必须原样保留。
         if (t.cover && path.isAbsolute(t.cover) && !fs.existsSync(t.cover)) {
@@ -396,22 +430,31 @@ class Library {
     try {
       onProgress({ phase: 'collect', done: 0, total: 0 })
       const all = []
+      const missingRoots = []      // 本次不可访问的根目录（拔盘 / 网络盘离线 / 权限变动）
       for (const dir of dirs) {
         if (!dir) continue
+        let ok = false
         try {
           const st = await fsp.stat(dir)
-          if (!st.isDirectory()) continue
+          ok = st.isDirectory()
         } catch {
+          ok = false
+        }
+        if (!ok) {
+          missingRoots.push(dir)
           continue
         }
         const files = await collectFiles(dir, [])
         all.push(...files)
       }
-      const unique = Array.from(new Set(all.map((f) => f.toLowerCase()))).map((lower) => {
-        return all.find((f) => f.toLowerCase() === lower)
-      })
+      // 大小写去重：一次建 Map，O(n)。旧写法对每个唯一路径都遍历整个数组（O(n²)），
+      // 千首以上会明显拖慢收集阶段。
+      const unique = Array.from(
+        new Map(all.map((f) => [f.toLowerCase(), f])).values()
+      )
 
       const seen = new Set()
+      const failedFiles = []
       let done = 0
       let added = 0
       let updated = 0
@@ -443,7 +486,11 @@ class Library {
             else added++
           } catch (err) {
             console.error('[library] 解析失败:', filePath, err.message)
+            // 保留旧缓存（若存在），只记名字让上层提示；直接丢弃会让用户
+            // 完全不知道「为什么少了几首歌」
+            failedFiles.push(path.basename(filePath))
             done++
+            onProgress({ phase: 'parse', done, total, track: null })
             return
           }
         }
@@ -453,17 +500,26 @@ class Library {
       })
 
       // 清理已不存在的文件
+      // 有根目录本次不可访问时一律跳过：否则拔掉移动硬盘 / 网络盘离线后扫描一次，
+      // 就会把这些目录下的曲目全部删除并写回 library.json（数据丢失）
       let removed = 0
-      for (const id of Array.from(this.tracks.keys())) {
-        if (!seen.has(id)) {
-          this.tracks.delete(id)
-          removed++
+      if (missingRoots.length) {
+        console.warn('[library] 有目录不可访问，跳过清理:', missingRoots.join(' | '))
+      } else {
+        for (const id of Array.from(this.tracks.keys())) {
+          if (!seen.has(id)) {
+            this.tracks.delete(id)
+            removed++
+          }
         }
       }
 
       await this.persist()
       return {
         added, updated, removed, total: this.tracks.size,
+        failed: failedFiles.length,
+        failedFiles: failedFiles.slice(0, 10),
+        missingRoots,
         elapsed: Date.now() - started
       }
     } finally {

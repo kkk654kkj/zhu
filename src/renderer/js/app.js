@@ -20,6 +20,8 @@ const state = {
   counted: false,
   mini: false,           // 迷你模式（窗口尺寸由主进程管，这里管布局）
   exclusive: false,      // 独占输出（mpv 后端）是否生效
+  resumePos: {},         // 长音轨断点位置 {trackId: 秒}（v1.6）
+  restoringSession: false,// 正在恢复上次会话（此时不要叠加断点续播）
   sessionTimer: null
 }
 
@@ -51,6 +53,7 @@ async function boot() {
   UI.hideScan()
 
   state.settings = settings
+  state.resumePos = Object.assign({}, (settings && settings.resumePos) || {})
   state.favorites = new Set(favs || [])
   state.history = hist || []
   state.playlists = playlists || []
@@ -137,7 +140,9 @@ async function boot() {
   if (session && Array.isArray(session.queueIds) && session.queueIds.length) {
     const queue = session.queueIds.map((id) => state.byId.get(id)).filter(Boolean)
     if (queue.length) {
+      state.restoringSession = true
       player.setQueue(queue, session.index || 0, false)
+      state.restoringSession = false
       player.mode = session.mode || 'list'
       UI.setMode(player.mode)
       if (session.currentTime) {
@@ -402,6 +407,19 @@ function renderPlaylists() {
   }
 }
 
+/** 批量加入歌单（拖拽、右键都用它），本地状态与界面同步刷新 */
+async function addTracksToPlaylist(plId, trackIds) {
+  if (!plId || !trackIds || !trackIds.length) return
+  const pl = await window.api.addToPlaylist(plId, trackIds).catch(() => null)
+  if (!pl) return
+  const i = state.playlists.findIndex((p) => p.id === pl.id)
+  if (i >= 0) state.playlists[i] = pl
+  renderPlaylists()
+  toast('已加入「' + pl.name + '」' + (trackIds.length > 1 ? ' ' + trackIds.length + ' 首' : ''))
+}
+
+// m3u 导入导出见 js/m3u.js（importM3uPlaylist / exportM3uPlaylist）
+
 /* ================= 视图 ================= */
 
 function computedList() {
@@ -555,6 +573,12 @@ function bindPlayer() {
     UI.renderQueue(player.tracks, player.index, state.currentId)
     // 换曲后音频参数会变（96k / 44.1k 等），清掉旧标签等 mpv 重新上报
     if (state.exclusive) { audio.format = null; updateHifiBadge() }
+    restoreResumePos(track)
+  })
+
+  // 切走上一首时把位置记下来（比 10 秒一次的定时保存更准）
+  player.on('track-leave', (prev, pos) => {
+    if (prev) rememberResume(prev.id, pos)
   })
 
   player.on('state-change', (playing) => {
@@ -563,6 +587,8 @@ function bindPlayer() {
     UI.renderQueue(player.tracks, player.index, state.currentId)
     pushDesktopLyric()
     if (!playing) saveSession()
+    // 任务栏缩略图的播放/暂停按钮要跟着变
+    window.api.setPlayState(playing)
   })
 
   player.on('time', (cur, dur) => {
@@ -695,8 +721,7 @@ function updateHifiBadge() {
 }
 
 /** 切换引擎：改设置后重载界面（队列/进度/播放模式会从会话恢复） */
-async function toggleExclusiveOutput() {
-  if (state.settings.exclusiveOutput) {
+async function toggleExclusiveOutput() {  if (state.settings.exclusiveOutput) {
     state.settings.exclusiveOutput = false
     await window.api.patchSettings({ exclusiveOutput: false }).catch(() => {})
     saveSession()
@@ -710,6 +735,32 @@ async function toggleExclusiveOutput() {
   await window.api.patchSettings({ exclusiveOutput: true }).catch(() => {})
   saveSession()
   location.reload()
+}
+
+/**
+ * 列出 WASAPI 输出设备并用右键菜单选（仅供独占输出使用）。
+ * 枚举需要引擎在跑，主进程会在用完且当前不是独占时自动关掉临时进程。
+ */
+async function openAudioDeviceMenu(x, y) {
+  toast('正在检测输出设备…', 1500)
+  const res = await window.api.mpvDevices().catch((err) => ({ ok: false, error: err.message }))
+  if (!res || !res.ok) {
+    toast('检测输出设备失败：' + ((res && res.error) || '未知错误'), 3000)
+    return
+  }
+  const cur = state.settings.audioDevice || ''
+  const items = [
+    { label: '跟随系统默认设备' + (cur ? '' : '（当前）'), act: 'set-audio-device', arg: '' },
+    { sep: true }
+  ]
+  for (const d of res.devices) {
+    items.push({
+      label: (d.description || d.name) + (d.name === cur ? '（当前）' : ''),
+      act: 'set-audio-device',
+      arg: d.name
+    })
+  }
+  UI.showContextMenu(x, y, items.length > 2 ? items : items.concat([{ label: '没有检测到可用设备', act: 'noop-audio-device' }]))
 }
 
 /* ================= 迷你模式 ================= */
@@ -811,6 +862,20 @@ function bindUI() {
     renderPlaylists()
     switchView(pl.id)
     toast('已创建「' + pl.name + '」')
+  })
+  document.getElementById('btnImportPlaylist').addEventListener('click', importM3uPlaylist)
+
+  // 歌单右键：导出 m3u / 删除
+  document.getElementById('playlistList').addEventListener('contextmenu', (e) => {
+    const item = e.target.closest('.nav-item[data-playlist]')
+    if (!item) return
+    e.preventDefault()
+    const plId = item.dataset.playlist
+    UI.showContextMenu(e.clientX, e.clientY, [
+      { label: '导出为 m3u…', icon: 'folder', act: 'export-m3u', arg: plId },
+      { sep: true },
+      { label: '删除歌单', icon: 'trash', danger: true, act: 'delete-playlist', arg: plId }
+    ])
   })
 
   // 列表点击
@@ -977,6 +1042,15 @@ function bindUI() {
 
   // 独占输出（位完美）
   document.getElementById('btnHifi').addEventListener('click', toggleExclusiveOutput)
+  // 右键选输出设备：接了 USB DAC 的人基本都要指定，系统默认经常不是它
+  document.getElementById('btnHifi').addEventListener('contextmenu', (e) => {
+    e.preventDefault()
+    openAudioDeviceMenu(e.clientX, e.clientY)
+  })
+  document.getElementById('hifiBadge').addEventListener('contextmenu', (e) => {
+    e.preventDefault()
+    openAudioDeviceMenu(e.clientX, e.clientY)
+  })
 
   // 均衡器面板（独占输出下禁用：任何软件处理都会破坏位完美）
   document.getElementById('btnEq').addEventListener('click', (e) => {
@@ -1029,6 +1103,9 @@ function bindUI() {
       player._loadCurrent(true)
     }
   })
+  // 拖拽交互（队列排序 / 拖歌进歌单）见 js/dragdrop.js
+  bindDragAndDrop()
+
   document.addEventListener('click', (e) => {
     if (!e.target.closest('#queuePanel') && !e.target.closest('#btnQueue')) UI.toggleQueue(false)
     if (!e.target.closest('#ctxMenu')) UI.hideContextMenu()
@@ -1170,6 +1247,22 @@ async function handleCtxAction(act, arg) {
     case 'clear-gains':
       clearAnalyzedGains()
       return
+    case 'noop-audio-device':
+      return
+    case 'export-m3u':
+      await exportM3uPlaylist(arg)
+      return
+    case 'delete-playlist':
+      deletePlaylist(arg)
+      return
+    case 'set-audio-device': {
+      const name = arg || ''
+      state.settings.audioDevice = name
+      const r = await window.api.mpvSetDevice(name).catch((err) => ({ ok: false, error: err.message }))
+      if (!r || !r.ok) toast('切换输出设备失败：' + ((r && r.error) || '未知错误'), 3000)
+      else toast(r.applied ? '输出设备已切换' : '输出设备已保存（开启独占后生效）')
+      return
+    }
   }
   const track = currentMenuTrack
   if (!track) return
@@ -1306,7 +1399,12 @@ async function doScan() {
     if (res.added) bits.push('新增 ' + res.added)
     if (res.updated) bits.push('更新 ' + res.updated)
     if (res.removed) bits.push('移除 ' + res.removed)
-    toast(`扫描完成：${res.total} 首` + (bits.length ? `（${bits.join('，')}）` : ''))
+    if (res.failed) bits.push(res.failed + ' 个解析失败')
+    // 目录不可访问时主进程会跳过清理，必须告诉用户「不是曲库没了，是盘没连上」
+    if (res.missingRoots && res.missingRoots.length) {
+      bits.push(res.missingRoots.length + ' 个目录不可访问，已跳过清理')
+    }
+    toast(`扫描完成：${res.total} 首` + (bits.length ? `（${bits.join('，')}）` : ''), bits.length > 1 ? 4000 : 1800)
   } catch (err) {
     console.error('[scan]', err)
     UI.hideScan()
@@ -1417,10 +1515,15 @@ const saveSettings = debounce((patch) => {
   window.api.patchSettings(patch).then((s) => { state.settings = s }).catch(() => {})
 }, 300)
 
+/* ================= 长音轨断点续播见 js/resume.js ================= */
+
 function saveSession() {
   if (!player) return
   const ids = player.tracks.map((t) => t.id)
   if (!ids.length) return
+  // 长音轨顺便记一下断点位置
+  const cur = player.current
+  if (cur && audio.duration > RESUME_MIN_DURATION) rememberResume(cur.id, audio.currentTime)  
   window.api.setSession({
     queueIds: ids,
     index: player.index,

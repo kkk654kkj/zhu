@@ -93,15 +93,16 @@ const UI = {
       body.innerHTML = ''
       return
     }
-    const frag = document.createDocumentFragment()
-    const tpl = document.createElement('div')
-
-    tracks.forEach((t, i) => {
+    // 一次性拼好整段 HTML 再赋 innerHTML。
+    // 旧实现复用同一个 div 逐行 innerHTML（每行解析一次 HTML），n 行 = n+1 次解析；
+    // 曲库上千首时切视图/搜索有明显掉帧。现在是 1 次解析 + 1 次布局。
+    const rows = new Array(tracks.length)
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i]
       const isCur = t.id === ctx.currentId
-      tpl.innerHTML = `
-        <div class="tr${isCur ? ' playing' : ''}" data-id="${t.id}" data-index="${i}">
+      rows[i] = `<div class="tr${isCur ? ' playing' : ''}" data-id="${t.id}" data-index="${i}">
           <div class="c-idx">
-            <span class="num">${i + 1}</span>
+            <span class="num" draggable="true" title="拖到左侧歌单可加入歌单">${i + 1}</span>
             <span class="btn-play-row">${icon('play')}</span>
           </div>
           <div class="c-title">
@@ -113,11 +114,9 @@ const UI = {
           <div class="c-fmt"><span class="badge${t.lossless ? ' lossless' : ''}">${esc(t.ext || '')}</span></div>
           <div class="c-dur">${fmtDuration(t.duration)}</div>
         </div>`
-      while (tpl.firstElementChild) frag.appendChild(tpl.firstElementChild)
-    })
+    }
 
-    body.innerHTML = ''
-    body.appendChild(frag)
+    body.innerHTML = rows.join('')
     this._markSortHeader(ctx.sortKey, ctx.sortDir)
   },
 
@@ -470,7 +469,7 @@ const UI = {
       return
     }
     box.innerHTML = tracks.map((t, i) => `
-      <div class="qp-item${i === index ? ' active' : ''}" data-qi="${i}" title="${esc(t.title)}">
+      <div class="qp-item${i === index ? ' active' : ''}" data-qi="${i}" title="${esc(t.title)}" draggable="true">
         <span class="qi-t">${i === index && playingId ? '♪ ' : ''}${esc(t.title)}</span>
         <span class="qi-a">${esc(t.artist || '')}</span>
       </div>`).join('')

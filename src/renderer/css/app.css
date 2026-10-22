@@ -1278,3 +1278,11 @@ body.mini .toast {
 }
 /* 迷你卡片里没有这个标签 */
 body.mini .hifi-badge { display: none; }
+
+/* v1.6 拖拽：队列排序 + 拖歌进歌单 */
+.qp-item { cursor: grab; }
+.qp-item.dragging { opacity: .45; }
+.qp-item.drop-target { outline: 1px dashed var(--accent); outline-offset: -2px; }
+.nav-item.nav-drop { background: var(--accent-soft); box-shadow: inset 0 0 0 1px rgba(49, 194, 124, .45); }
+.num[draggable] { cursor: grab; }
+.num[draggable]:active { cursor: grabbing; }

@@ -15,10 +15,13 @@ class Player extends Emitter {
     this.volume = opts.volume ?? 0.8
     this.muted = opts.muted ?? false
     this._fadeTimer = null
+    this._fadeTimeout = null     // 淡出结束后执行 pause 的延时器（必须可取消，否则连点会自停）
+    this._fadeDir = null         // 'in' | 'out'，淡入时目标跟随 this.volume
     this._shuffleHistory = []
     this._shufflePool = []
     this._pendingSeek = null
     this._endingHandled = false
+    this._loadedTrack = null     // 上一次真正 load 进 audio 的曲目（用于切歌时上报播放位置）
 
     audio.preload = 'auto'
     audio.volume = this.muted ? 0 : this.volume
@@ -111,6 +114,23 @@ class Player extends Emitter {
     }
   }
 
+  /** 队列内拖拽排序：移动一项，并让 index 继续指向"正在播的那首" */
+  moveInQueue(from, to) {
+    if (from === to) return
+    const len = this.tracks.length
+    if (from < 0 || to < 0 || from >= len || to >= len) return
+    const curId = this.current ? this.current.id : null
+    const [item] = this.tracks.splice(from, 1)
+    this.tracks.splice(to, 0, item)
+    // 不能用「index 加减 delta」推算：拖过当前项时方向会算反。直接按 id 重新定位。
+    if (curId) {
+      const idx = this.tracks.findIndex((t) => t.id === curId)
+      if (idx >= 0) this.index = idx
+    }
+    this._buildShufflePool()
+    this.emit('queue-change', this.tracks, this.index)
+  }
+
   clearQueue() {
     this.stop()
     this.tracks = []
@@ -154,6 +174,11 @@ class Player extends Emitter {
   _loadCurrent(autoplay = true) {
     const track = this.current
     if (!track) { this.stop(); return }
+    // 切走之前把上一首的播放位置报出去（长音轨断点续播要靠它）
+    if (this._loadedTrack && this._loadedTrack.id !== track.id) {
+      this.emit('track-leave', this._loadedTrack, this.audio.currentTime || 0)
+    }
+    this._loadedTrack = track
     this._endingHandled = false
     this._pendingSeek = null
     this.audio.src = track.audio
@@ -275,7 +300,9 @@ class Player extends Emitter {
 
   setVolume(v, silent = false) {
     this.volume = Math.max(0, Math.min(1, v))
-    if (!this.muted) this.audio.volume = this.volume
+    // 正在淡入时不要直写 audio.volume：渐变 tick 会跟随 this.volume，
+    // 直写反而被下一次 tick 按旧曲线覆盖（表现为拖音量弹回去）
+    if (!this.muted && this._fadeDir !== 'in') this.audio.volume = this.volume
     if (!silent) this.emit('vol-change', this.volume, this.muted)
   }
 
@@ -294,21 +321,30 @@ class Player extends Emitter {
       clearInterval(this._fadeTimer)
       this._fadeTimer = null
     }
+    if (this._fadeTimeout) {
+      clearTimeout(this._fadeTimeout)
+      this._fadeTimeout = null
+    }
+    this._fadeDir = null
   }
 
-  _fadeTo(target) {
+  _fadeTo(target, dir = 'in') {
     this._clearFade()
     const dur = this.fadeMs
     if (!dur) { this.audio.volume = target; return }
-    const start = this.audio.volume
-    if (Math.abs(start - target) < 0.005) { this.audio.volume = target; return }
+    if (Math.abs(this.audio.volume - target) < 0.005) { this.audio.volume = target; return }
+    this._fadeDir = dir
     const stepMs = 20
     const steps = Math.max(1, Math.round(dur / stepMs))
     let i = 0
     this._fadeTimer = setInterval(() => {
       i++
-      const k = i / steps
-      this.audio.volume = Math.max(0, Math.min(1, start + (target - start) * k))
+      // 目标动态取值：淡入时跟随 this.volume，所以拖动音量滑块能即时生效，
+      // 不会被闭包里那份旧 target 覆盖（旧实现会在 350ms 内把滑块拉回去）
+      const goal = this._fadeDir === 'in' && !this.muted ? this.volume : 0
+      const remain = Math.max(1, steps - i + 1)
+      const next = this.audio.volume + (goal - this.audio.volume) / remain
+      this.audio.volume = Math.max(0, Math.min(1, next))
       if (i >= steps) this._clearFade()
     }, stepMs)
   }
@@ -317,15 +353,20 @@ class Player extends Emitter {
     // 独占输出（mpv）：任何软件音量渐变都会破坏位完美，直接跳过
     if (this.audio.noFade || this.muted) return
     this.audio.volume = 0
-    this._fadeTo(this.volume)
+    this._fadeTo(this.volume, 'in')
   }
 
   _fadeOut(done) {
     if (this.audio.noFade || this.muted || !this.fadeMs) { done && done(); return }
     const from = this.audio.volume
     if (from <= 0.01) { done && done(); return }
-    this._fadeTo(0)
-    setTimeout(() => done && done(), this.fadeMs)
+    this._fadeTo(0, 'out')
+    // 延时器必须存下来：用户点暂停后 350ms 内又点播放时，_fadeIn() 会调 _clearFade()
+    // 把它取消掉，否则会出现「点了播放，过一会儿自己停了」
+    this._fadeTimeout = setTimeout(() => {
+      this._fadeTimeout = null
+      done && done()
+    }, this.fadeMs + 30)
   }
 
   setMode(mode) {

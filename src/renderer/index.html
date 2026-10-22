@@ -53,7 +53,7 @@
   <div class="tb-center no-drag">
     <div class="search-box">
       <svg class="s-icon"><use href="#i-search"/></svg>
-      <input id="searchInput" type="text" placeholder="搜索歌曲、歌手、专辑" spellcheck="false" />
+      <input id="searchInput" type="text" placeholder="搜索歌曲、歌手、专辑（支持拼音/首字母 zjl）" spellcheck="false" />
       <button id="searchClear" class="s-clear" title="清空" hidden><svg><use href="#i-close"/></svg></button>
     </div>
   </div>
@@ -84,6 +84,7 @@
     <nav class="nav-group" id="playlistNav">
       <div class="nav-title">
         <span>我的歌单</span>
+        <button class="mini-btn" id="btnImportPlaylist" title="导入 m3u 歌单" style="margin-left:auto"><svg><use href="#i-folder"/></svg></button>
         <button class="mini-btn" id="btnNewPlaylist" title="新建歌单"><svg><use href="#i-plus"/></svg></button>
       </div>
       <div id="playlistList"></div>
@@ -280,6 +281,9 @@
 <script src="js/mpvaudio.js"></script>
 <script src="js/player.js"></script>
 <script src="js/ui.js"></script>
+<script src="js/m3u.js"></script>
+<script src="js/resume.js"></script>
+<script src="js/dragdrop.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

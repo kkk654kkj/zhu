@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld('api', {
   removePlaylist: (id) => invoke('playlists:remove', id),
   addToPlaylist: (id, trackIds) => invoke('playlists:addTracks', { id, trackIds }),
   removeFromPlaylist: (id, trackIds) => invoke('playlists:removeTracks', { id, trackIds }),
+  /** 导出为 m3u/m3u8（主进程按 id 反查真实路径并写文件） */
+  exportM3u: (name, trackIds) => invoke('playlist:exportM3u', { name, trackIds }),
+  /** 导入 m3u/m3u8 → {ok, name, trackIds, unmatched} */
+  importM3u: () => invoke('playlist:importM3u'),
 
   // 收藏 / 历史 / 次数 / 会话
   getFavorites: () => invoke('favorites:get'),
@@ -54,6 +58,8 @@ contextBridge.exposeInMainWorld('api', {
   toggleMaximize: () => invoke('win:toggleMaximize'),
   closeWindow: () => invoke('win:close'),
   isMaximized: () => invoke('win:isMaximized'),
+  /** 通知主进程播放状态，用于更新任务栏缩略图媒体按钮 */
+  setPlayState: (playing) => ipcRenderer.send('win:play-state', !!playing),
   /** 迷你模式：true=进迷你，false=回完整模式；返回实际状态 */
   setMini: (on) => invoke('win:setMini', on),
   isMini: () => invoke('win:isMini'),
@@ -107,6 +113,10 @@ contextBridge.exposeInMainWorld('api', {
   mpvMute: (m) => invoke('mpv:mute', m),
   mpvQuit: () => invoke('mpv:quit'),
   mpvConfirmEnable: () => invoke('mpv:confirmEnable'),
+  /** 枚举 WASAPI 输出设备 → {ok, devices:[{name,description}], error?} */
+  mpvDevices: () => invoke('mpv:devices'),
+  /** 切换独占输出设备（'' = 跟随系统默认） */
+  mpvSetDevice: (device) => invoke('mpv:setDevice', device),
   onMpvEvent: (cb) => {
     const h = (_e, evt) => cb(evt)
     ipcRenderer.on('mpv:event', h)

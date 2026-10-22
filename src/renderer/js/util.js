@@ -109,6 +109,15 @@ function matchQuery(track, q) {
   if ((track.artist || '').toLowerCase().includes(needle)) return true
   if ((track.album || '').toLowerCase().includes(needle)) return true
   if ((track.fileName || '').toLowerCase().includes(needle)) return true
+  // 拼音：全拼（zhoujielun）与首字母（zjl），字段由主进程在扫描时算好。
+  // 按空格分段比较：py/pyf 里 标题、歌手、专辑是分开的，逐段判断能避免
+  // 「上一段结尾 + 下一段开头」拼出假匹配（搜 zj 命中一大片）
+  const compact = needle.replace(/\s+/g, '')
+  if (compact) {
+    const hit = (field) => String(field || '').split(/\s+/).some((seg) => seg.includes(compact))
+    if (hit(track.py)) return true
+    if (hit(track.pyf)) return true
+  }
   return false
 }
 

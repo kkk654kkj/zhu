@@ -6,6 +6,7 @@ const { app, BrowserWindow, ipcMain, protocol, net, dialog, shell, globalShortcu
 const path = require('path')
 const fs = require('fs')
 const fsp = require('fs/promises')
+const { execFile, execFileSync } = require('child_process')
 const { pathToFileURL } = require('url')
 const { Readable } = require('stream')
 
@@ -45,6 +46,60 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (err) => {
   logLine('UNHANDLED_REJECTION', (err && err.stack) || String(err))
 })
+
+/**
+ * 清掉 Chromium 在 data\ 下攒的纯缓存目录。
+ *
+ * 便携程序把 userData 指到了 data\，于是 Cache / Code Cache / GPUCache 全堆在
+ * 用户眼皮底下，几个月能涨到几百 MB，而它们对播放没有任何用处。
+ * 只删白名单里的纯缓存目录，绝不碰 settings.json / library.json / covers\ / Local Storage。
+ */
+const CACHE_DIRS = [
+  'Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'DawnGraphiteCache',
+  'DawnWebGPUCache', 'GraphiteDawnCache', 'GrShaderCache', 'ShaderCache',
+  'Shared Dictionary', 'component_crx_cache'
+]
+function cleanChromiumCache() {
+  let removed = 0
+  for (const name of CACHE_DIRS) {
+    const dir = path.join(DATA_DIR, name)
+    try {
+      if (!fs.existsSync(dir)) continue
+      fs.rmSync(dir, { recursive: true, force: true })
+      removed++
+    } catch (err) {
+      // 文件被占用（例如上一实例还在跑）就跳过，不影响启动
+    }
+  }
+  if (removed) logLine('stage: cache-cleaned=' + removed + ' dirs')
+}
+
+/**
+ * 结束上次被强杀留下的 mpv 进程。
+ *
+ * 主进程被任务管理器 / taskkill /F 干掉时，before-quit 不会执行，
+ * 残留的 mpv 会一直霸占 WASAPI 独占 → 用户看到的是「播放器明明没开，
+ * 别的程序全都没声音」。只杀命令行带我们命名管道前缀（lxmpv-）的 mpv，不误伤用户自己的。
+ */
+function killOrphanMpv() {
+  if (process.platform !== 'win32') return
+  const script =
+    'Get-CimInstance Win32_Process -Filter "Name=\'mpv.exe\'" | ' +
+    'Where-Object { $_.CommandLine -like \'*lxmpv-*\' } | ' +
+    'Select-Object -ExpandProperty ProcessId'
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+    { windowsHide: true, timeout: 8000 },
+    (err, stdout) => {
+      if (err || !stdout) return
+      const pids = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter((s) => /^\d+$/.test(s))
+      for (const pid of pids) {
+        try {
+          execFileSync('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 })
+          logLine('stage: killed-orphan-mpv=' + pid)
+        } catch {}
+      }
+    })
+}
 logLine('=== boot ===', process.argv.join(' '), 'electron', process.versions.electron)
 logLine('stage: require-ok app=' + typeof app + ' protocol=' + typeof protocol)
 
@@ -188,7 +243,9 @@ const DEFAULT_SETTINGS = {
   // 迷你模式：enabled=当前是否迷你；bounds=迷你窗口尺寸位置；fullBounds=进迷你前的完整窗口
   mini: { enabled: false, bounds: null, fullBounds: null },
   // 独占输出（v1.5）：真实 bit-perfect 走 mpv + WASAPI 独占；关闭时用原本的 HTML5/WebAudio 链路
-  exclusiveOutput: false
+  exclusiveOutput: false,      // 独占输出（v1.5）：true 时用 mpv + WASAPI exclusive
+  audioDevice: '',             // 独占输出设备（v1.6）：mpv 的 --audio-device，'' = 系统默认
+  resumePos: {}                // 长音轨断点位置（v1.6）：{ trackId: 秒 }
 }
 
 // 迷你卡片默认尺寸 / 尺寸下限
@@ -386,6 +443,9 @@ function createWindow() {
       event.preventDefault()
     }
   })
+
+  // 任务栏悬停时的那排媒体按钮（初始为"播放"态）
+  updateThumbar(false)
 }
 
 function debounce(fn, ms) {
@@ -422,6 +482,40 @@ function refreshTrayMenu() {
     ]))
   } catch (err) {
     console.error('[tray] 菜单更新失败:', err.message)
+  }
+}
+
+/**
+ * 任务栏缩略图工具栏（悬停任务栏图标时出现的那排媒体按钮）。
+ * Electron 没有暴露 Windows SMTC 接口，这是纯 JS 能做到的最接近的一层。
+ * 图标是 make-thumbar-icons.py 生成的 16x16 单色 PNG。
+ */
+let thumbarPlaying = false
+function updateThumbar(playing) {
+  if (!win || win.isDestroyed() || process.platform !== 'win32') return
+  thumbarPlaying = !!playing
+  const dir = path.join(__dirname, '..', 'assets')
+  const ic = (name) => nativeImage.createFromPath(path.join(dir, name))
+  try {
+    win.setThumbarButtons([
+      {
+        tooltip: '上一首',
+        icon: ic('thumb-prev.png'),
+        click: () => sendToRenderer('shortcut', 'prev')
+      },
+      {
+        tooltip: thumbarPlaying ? '暂停' : '播放',
+        icon: ic(thumbarPlaying ? 'thumb-pause.png' : 'thumb-play.png'),
+        click: () => sendToRenderer('shortcut', 'play-pause')
+      },
+      {
+        tooltip: '下一首',
+        icon: ic('thumb-next.png'),
+        click: () => sendToRenderer('shortcut', 'next')
+      }
+    ])
+  } catch (err) {
+    logLine('WARN thumbar 设置失败', err.message)
   }
 }
 
@@ -637,7 +731,9 @@ async function ensureMpv(exclusive) {
   }
   if (mpvEngine.running) return { ok: true, exclusive: mpvEngine.exclusive }
   const wantExclusive = exclusive !== false
-  const r = await mpvEngine.start({ exclusive: wantExclusive })
+  // 输出设备来自设置；空字符串 = 跟随系统默认
+  const audioDevice = String(store.get().settings.audioDevice || '').trim()
+  const r = await mpvEngine.start({ exclusive: wantExclusive, audioDevice })
   logLine('[mpv] start exclusive=' + wantExclusive + ' ' + JSON.stringify(r) + ' exe=' + mpvExePath())
   return r
 }
@@ -730,6 +826,74 @@ function registerIpc() {
     pl.trackIds = pl.trackIds.filter((t) => !set.has(t))
     store.patch({ playlists: list })
     return pl
+  })
+
+  /**
+   * 导出 m3u 歌单。渲染层只有曲目 id，路径由主进程按 library 反查（渲染层拿不到真实路径）。
+   * 优先写相对路径（m3u 与音乐在同一棵树里时更耐搬动），跨盘时自动退化为绝对路径。
+   */
+  ipcMain.handle('playlist:exportM3u', async (e, { name, trackIds } = {}) => {
+    if (!win) return { ok: false, error: '窗口未就绪' }
+    const tracks = (trackIds || []).map((id) => library.get(id)).filter(Boolean)
+    if (!tracks.length) return { ok: false, error: '歌单是空的' }
+    const safe = String(name || '播放列表').replace(/[\\/:*?"<>|]/g, '_')
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      title: '导出 m3u 歌单',
+      defaultPath: safe + '.m3u8',
+      filters: [{ name: 'M3U 播放列表', extensions: ['m3u8', 'm3u'] }]
+    })
+    if (canceled || !filePath) return { ok: false, canceled: true }
+    const base = path.dirname(filePath)
+    const lines = ['#EXTM3U']
+    for (const t of tracks) {
+      const rel = path.relative(base, t.path)
+      const useRel = rel && !rel.startsWith('..') && !path.isAbsolute(rel)
+      lines.push(useRel ? rel : t.path)
+    }
+    try {
+      fs.writeFileSync(filePath, lines.join('\r\n') + '\r\n', 'utf8')
+      return { ok: true, filePath, count: tracks.length }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  /** 导入 m3u：路径就地映射成 trackId，未在曲库里的条目单独计数（不报错） */
+  ipcMain.handle('playlist:importM3u', async () => {
+    if (!win) return { ok: false, error: '窗口未就绪' }
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      title: '导入 m3u 歌单',
+      filters: [{ name: 'M3U 播放列表', extensions: ['m3u8', 'm3u'] }],
+      properties: ['openFile']
+    })
+    if (canceled || !filePaths.length) return { ok: false, canceled: true }
+    const file = filePaths[0]
+    let entries = []
+    try {
+      entries = decodeText(fs.readFileSync(file)).split(/\r?\n/)
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+    const base = path.dirname(file)
+    const trackIds = []
+    const seen = new Set()
+    let unmatched = 0
+    for (const raw of entries) {
+      const line = raw.trim()
+      if (!line || line.startsWith('#')) continue
+      const abs = path.isAbsolute(line) ? line : path.resolve(base, line)
+      const id = fileId(abs)
+      if (!library.get(id)) { unmatched++; continue }
+      if (seen.has(id)) continue
+      seen.add(id)
+      trackIds.push(id)
+    }
+    return {
+      ok: true,
+      name: path.basename(file, path.extname(file)),
+      trackIds,
+      unmatched
+    }
   })
 
   // —— 收藏 / 历史 / 播放次数 ——
@@ -862,6 +1026,8 @@ function registerIpc() {
   ipcMain.handle('mpv:mute', (e, m) => { if (mpvEngine) mpvEngine.setMute(!!m); return true })
   ipcMain.handle('mpv:quit', () => { stopMpv(); return true })
   // 开启独占前的确认框（把不可逆的副作用说清楚，避免误触）
+  ipcMain.on('win:play-state', (e, playing) => updateThumbar(!!playing))
+
   ipcMain.handle('mpv:confirmEnable', async () => {
     if (!win) return false
     const { response } = await dialog.showMessageBox(win, {
@@ -882,6 +1048,38 @@ function registerIpc() {
       ].join('\n')
     })
     return response === 0
+  })
+
+  /**
+   * 枚举 WASAPI 输出设备。独占需求的人基本都接了 USB DAC，
+   * 而系统默认设备经常不是它 —— 没有这个就无法把独占输出指到指定设备。
+   */
+  ipcMain.handle('mpv:devices', async () => {
+    let startedHere = false
+    try {
+      if (!mpvEngine || !mpvEngine.running) {
+        const r = await ensureMpv(false)
+        if (!r.ok) return { ok: false, devices: [], error: r.error || '引擎未启动' }
+        startedHere = true
+      }
+      const devices = await mpvEngine.listDevices()
+      return { ok: true, devices }
+    } catch (err) {
+      return { ok: false, devices: [], error: err.message }
+    } finally {
+      // 只为枚举而临时拉起的引擎（当前并非独占输出）用完即关，不留空闲进程
+      if (startedHere && !store.get().settings.exclusiveOutput) stopMpv()
+    }
+  })
+
+  /** 切换输出设备：存设置；正在独占播放时重启引擎并回到原位置 */
+  ipcMain.handle('mpv:setDevice', async (e, device) => {
+    const name = String(device || '')
+    store.patch({ settings: { audioDevice: name } })
+    if (!mpvEngine || !mpvEngine.running) return { ok: true, applied: false }
+    if (!store.get().settings.exclusiveOutput) return { ok: true, applied: false }
+    const r = await mpvEngine.restart({ exclusive: true, audioDevice: name })
+    return { ok: !!r.ok, applied: true, error: r.error }
   })
 }
 
@@ -922,6 +1120,9 @@ function toClientTrack(t) {
     ext: t.ext,
     size: t.size,
     hasLyric: !!t.lyric,
+    // 拼音检索字段（v1.6）：主进程预先算好，渲染层只做 includes
+    py: t.py || '',
+    pyf: t.pyf || '',
     cover: toLxUrl(resolveCoverPath(t.cover, library.coverDir)),
     audio: toLxUrl(t.path)
   }
@@ -943,6 +1144,9 @@ logLine('stage: lock=' + gotLock)
 if (!gotLock) {
   logLine('WARN 未获取单实例锁，继续启动')
 }
+
+// 只在确认是唯一实例时清缓存：多实例情况下删的是正在运行实例的文件（多半删不掉）
+if (gotLock) cleanChromiumCache()
 {
   app.on('second-instance', () => {
     if (win) {
@@ -964,7 +1168,10 @@ if (!gotLock) {
       playCounts: {},
       session: null,
       window: {}
-    })
+    }, { onError: (msg) => logLine('STORE_ERROR', msg) })
+
+    // 异步清上次残留的 mpv，不阻塞启动
+    killOrphanMpv()
 
     library = new Library({
       cacheFile: path.join(userData, 'library.json'),

@@ -38,6 +38,8 @@ class MpvEngine {
     this._buf = ''
     this._queue = []               // 拿到管道前的命令队列
     this._obsId = 0
+    this._reqId = 0
+    this._pending = new Map()      // request_id → {resolve, reject, timer}
     this._lastFile = null
     this._lastPos = 0
   }
@@ -47,7 +49,7 @@ class MpvEngine {
   }
 
   /** 启动引擎进程（幂等）。返回 {ok, exclusive, error} */
-  async start({ exclusive = true } = {}) {
+  async start({ exclusive = true, audioDevice = '' } = {}) {
     if (this.running) {
       return { ok: true, exclusive: this.exclusive }
     }
@@ -55,6 +57,7 @@ class MpvEngine {
       return { ok: false, error: '找不到 mpv 引擎：' + (this.exePath || '(未配置)') }
     }
     this.exclusive = !!exclusive
+    this._audioDevice = audioDevice || ''
     this._buf = ''
     this._queue = []
     this.ready = false
@@ -78,6 +81,9 @@ class MpvEngine {
       '--ao=wasapi',
       '--input-ipc-server=' + this.pipeName
     ]
+    // 指定输出设备（如 wasapi/{GUID}）。留空表示跟随系统默认设备。
+    // 有独占需求的人通常接了 USB DAC，默认设备经常不是它。
+    if (audioDevice) args.push('--audio-device=' + audioDevice)
 
     try {
       this.proc = spawn(this.exePath, args, {
@@ -153,10 +159,36 @@ class MpvEngine {
     this._send(['request_log_messages', 'warn'])
   }
 
-  _send(command) {
-    const line = JSON.stringify({ command }) + '\n'
+  _write(line) {
     if (!this.sock || !this.ready) { this._queue.push(line); return }
     try { this.sock.write(line) } catch { this._queue.push(line) }
+  }
+
+  _send(command) {
+    this._write(JSON.stringify({ command }) + '\n')
+  }
+
+  /** 发一条带 request_id 的命令并等回执（用于 get_property 这类需要返回值的调用） */
+  request(command, timeout = 3000) {
+    if (!this.sock || !this.ready) return Promise.reject(new Error('mpv 引擎未就绪'))
+    const id = ++this._reqId
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._pending.delete(id)
+        reject(new Error('mpv 请求超时：' + command[1]))
+      }, timeout)
+      this._pending.set(id, { resolve, reject, timer })
+      this._write(JSON.stringify({ command, request_id: id }) + '\n')
+    })
+  }
+
+  /** 枚举 WASAPI 输出设备：{name, description}。name 可直接喂给 --audio-device */
+  async listDevices() {
+    const list = await this.request(['get_property', 'audio-device-list'], 4000)
+    const arr = Array.isArray(list) ? list : []
+    return arr
+      .map((d) => ({ name: d && d.name ? String(d.name) : '', description: d && d.description ? String(d.description) : '' }))
+      .filter((d) => d.name)
   }
 
   _flush() {
@@ -180,6 +212,15 @@ class MpvEngine {
   }
 
   _handle(msg) {
+    // 命令回执（request_id 关联）：先于事件处理，避免 data 为 null 时被当成事件
+    if (msg.request_id !== undefined && this._pending.has(msg.request_id)) {
+      const p = this._pending.get(msg.request_id)
+      clearTimeout(p.timer)
+      this._pending.delete(msg.request_id)
+      if (msg.error && msg.error !== 'success') p.reject(new Error(msg.error))
+      else p.resolve(msg.data)
+      return
+    }
     if (msg.event === 'property-change') {
       const { name, data } = msg
       switch (name) {
@@ -261,12 +302,12 @@ class MpvEngine {
   }
   setMute(m) { this._send(['set_property', 'mute', !!m]) }
 
-  /** 以另一套 exclusive 设置重启（用于独占失败后回退共享） */
-  async restart({ exclusive }) {
+  /** 以另一套 exclusive / 设备设置重启（用于独占失败后回退共享、或切换输出设备） */
+  async restart({ exclusive, audioDevice = this._audioDevice || '' }) {
     const file = this._lastFile
     const pos = this._lastPos
     this.kill()
-    const r = await this.start({ exclusive })
+    const r = await this.start({ exclusive, audioDevice })
     if (r.ok && file) {
       this.load(file, { paused: true })
       if (pos > 0.3) setTimeout(() => this.seek(pos), 120)
@@ -274,8 +315,17 @@ class MpvEngine {
     return r
   }
 
+  _rejectPending(reason) {
+    for (const [, p] of this._pending) {
+      clearTimeout(p.timer)
+      try { p.reject(new Error(reason)) } catch {}
+    }
+    this._pending.clear()
+  }
+
   kill() {
     this.ready = false
+    this._rejectPending('mpv 已关闭')
     if (this.sock) { try { this.sock.destroy() } catch {} }
     this.sock = null
     if (this.proc) {
@@ -287,6 +337,7 @@ class MpvEngine {
 
   _teardown() {
     this.ready = false
+    this._rejectPending('mpv 进程退出')
     this.sock = null
     this.proc = null
   }
