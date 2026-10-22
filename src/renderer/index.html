@@ -193,6 +193,7 @@
 
   <div class="pb-right">
     <span class="hifi-badge" id="hifiBadge" hidden></span>
+    <button class="icon-btn" id="btnSleep" title="睡眠定时"><svg><use href="#i-clock"/></svg></button>
     <button class="icon-btn" id="btnEq" title="均衡器"><svg><use href="#i-sliders"/></svg></button>
     <button class="icon-btn" id="btnNorm" title="音量均衡"><svg><use href="#i-eq"/></svg></button>
     <button class="icon-btn" id="btnMute" title="静音"><svg><use href="#i-volume"/></svg></button>
@@ -233,6 +234,23 @@
     <button class="mv-ctl" id="mvNext" title="下一首"><svg><use href="#i-next"/></svg></button>
     <button class="mv-ctl mv-fav" id="mvFav" title="收藏"><svg><use href="#i-heart"/></svg></button>
   </div>
+</div>
+
+<!-- 睡眠定时面板（v2.2：入口从托盘移到 app 内播放条） -->
+<div id="sleepPanel" hidden>
+  <div class="sp-head">
+    <span>睡眠定时</span>
+    <button class="mini-btn" id="btnSleepClose"><svg><use href="#i-close"/></svg></button>
+  </div>
+  <div class="sp-count" id="sleepCount">未设置</div>
+  <div class="sp-opts" id="sleepOpts">
+    <button class="sp-chip" data-min="0">关闭</button>
+    <button class="sp-chip" data-min="15">15 分钟</button>
+    <button class="sp-chip" data-min="30">30 分钟</button>
+    <button class="sp-chip" data-min="60">60 分钟</button>
+    <button class="sp-chip" data-min="90">90 分钟</button>
+  </div>
+  <div class="sp-foot">到点后播放淡出并暂停</div>
 </div>
 
 <!-- 播放队列抽屉 -->

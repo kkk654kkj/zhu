@@ -1554,3 +1554,51 @@ body.mini .hifi-badge { display: none; }
   opacity: .9;
 }
 .ab-mark.a { opacity: .55; }
+
+/* ================= 睡眠定时面板（v2.2：入口从托盘移到 app 内播放条） ================= */
+#btnSleep.active { color: var(--accent); }
+#sleepPanel {
+  position: fixed;
+  right: 12px;
+  bottom: calc(var(--pb-h) + 12px);
+  width: 240px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 14px 44px rgba(0,0,0,.55);
+  z-index: 40;
+  overflow: hidden;
+}
+.sp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--txt-2);
+  border-bottom: 1px solid var(--line-soft);
+}
+.sp-count {
+  padding: 14px 12px 4px;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--txt);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.sp-count.off { color: var(--txt-3); font-size: 14px; font-weight: 400; }
+.sp-opts { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px; }
+.sp-chip {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: var(--txt-3);
+  font-size: 12px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.sp-chip:hover { color: var(--txt); border-color: var(--txt-3); }
+.sp-chip.on { color: var(--accent); border-color: rgba(49,194,124,.5); background: var(--accent-soft); }
+.sp-foot { padding: 8px 12px 10px; font-size: 11px; color: var(--txt-3); text-align: center; }

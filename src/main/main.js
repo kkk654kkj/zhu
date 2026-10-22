@@ -498,27 +498,36 @@ function debounce(fn, ms) {
 /* ---------------- 托盘 ---------------- */
 
 /** 托盘菜单重建（迷你开关的勾选态会变，不能只建一次） */
-/* ---------------- 睡眠定时（v1.7） ---------------- */
+/* ---------------- 睡眠定时（v1.7 托盘入口，v2.2 移到 app 内播放条） ---------------- */
 
 let sleepTimerId = null
 let sleepMinutes = 0
+let sleepEndsAt = 0   // 到点时刻的 Date.now()，渲染层用它显示倒计时
+
+/** 广播当前定时状态给渲染层（minutes=0 表示无定时） */
+function pushSleepState() {
+  sendToRenderer('sleep-state', { minutes: sleepMinutes, endsAt: sleepEndsAt || null })
+}
 
 /** minutes=0 表示关闭。到点只做一件事：让渲染层淡出并暂停。 */
 function setSleepTimer(minutes) {
   if (sleepTimerId) { clearTimeout(sleepTimerId); sleepTimerId = null }
   sleepMinutes = Number(minutes) || 0
+  sleepEndsAt = 0
   if (sleepMinutes > 0) {
     logLine('[sleep] 定时 ' + sleepMinutes + ' 分钟')
+    sleepEndsAt = Date.now() + sleepMinutes * 60 * 1000
     sleepTimerId = setTimeout(() => {
       sleepTimerId = null
       sleepMinutes = 0
+      sleepEndsAt = 0
       sendToRenderer('sleep-timer', { fired: true })
-      refreshTrayMenu()
+      pushSleepState()
     }, sleepMinutes * 60 * 1000)
   } else {
     logLine('[sleep] 已关闭')
   }
-  refreshTrayMenu()
+  pushSleepState()
 }
 
 /* ---------------- 播放结束后动作（v2.1） ---------------- */
@@ -585,15 +594,6 @@ function refreshTrayMenu() {
         click: () => applyMini(!miniActive)
       },
       { label: '桌面歌词', click: () => sendToRenderer('shortcut', 'dlyric') },
-      {
-        label: '睡眠定时' + (sleepMinutes ? '（' + sleepMinutes + ' 分钟后）' : ''),
-        submenu: [0, 15, 30, 60, 90].map((m) => ({
-          label: m ? m + ' 分钟' : '关闭',
-          type: 'radio',
-          checked: sleepMinutes === m,
-          click: () => setSleepTimer(m)
-        }))
-      },
       {
         // v2.1：整队播完之后做什么。和「睡眠定时」是两件事——那个是到点暂停，这个看进度
         label: '播放结束后' + (POWER_LABEL[powerAfterQueue] ? '（' + POWER_LABEL[powerAfterQueue] + '）' : ''),
@@ -1504,6 +1504,10 @@ function registerIpc() {
   ipcMain.handle('power:get', () => powerAfterQueue)
   ipcMain.handle('power:set', (e, kind) => { setPowerAfterQueue(kind); return powerAfterQueue })
   ipcMain.handle('power:cancel', () => cancelPowerAction())
+
+  // 睡眠定时（v2.2：入口从托盘移到 app 内播放条）
+  ipcMain.handle('sleep:set', (e, minutes) => { setSleepTimer(minutes); return { minutes: sleepMinutes, endsAt: sleepEndsAt || null } })
+  ipcMain.handle('sleep:get', () => ({ minutes: sleepMinutes, endsAt: sleepEndsAt || null }))
 }
 
 /** 文本解码：优先 UTF-8，失败回退 GBK（Windows 中文 lrc 常见） */

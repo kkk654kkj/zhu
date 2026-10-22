@@ -83,6 +83,16 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('sleep-timer', h)
     return () => ipcRenderer.removeListener('sleep-timer', h)
   },
+  /* ---- 睡眠定时（v2.2：入口从托盘移到 app 内播放条） ---- */
+  /** minutes=0 表示关闭；返回 {minutes, endsAt} */
+  setSleepTimer: (minutes) => invoke('sleep:set', minutes),
+  getSleepState: () => invoke('sleep:get'),
+  /** 定时被设置/到点/清除时，主进程推最新状态 */
+  onSleepState: (cb) => {
+    const h = (_e, payload) => cb(payload)
+    ipcRenderer.on('sleep-state', h)
+    return () => ipcRenderer.removeListener('sleep-state', h)
+  },
 
   // 桌面歌词（主窗口 ↔ 主进程 ↔ 歌词窗口）
   dlyricOpen: () => invoke('dlyric:open'),

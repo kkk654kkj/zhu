@@ -185,6 +185,9 @@ async function boot() {
     if (player && player.isPlaying) player.pause()
     toast('睡眠定时已到，播放已暂停', 4000)
   })
+  // 睡眠定时状态（v2.2：入口从托盘移到 app 内播放条）
+  window.api.getSleepState().then((st) => renderSleepState(st))
+  window.api.onSleepState((st) => renderSleepState(st))
   // 托盘/快捷键改迷你状态时，主进程会推过来，界面跟着切
   window.api.onMiniState((st) => {
     state.mini = !!(st && st.mini !== undefined ? st.mini : st)
@@ -202,6 +205,47 @@ function offsetFor(id) {
   const map = (state.settings && state.settings.lyricOffsetById) || {}
   if (id && map[id] != null) return Number(map[id]) || 0
   return Number(state.settings && state.settings.lyricOffset) || 0
+}
+
+/* ================= 睡眠定时（v2.2：入口从托盘移到 app 内播放条） ================= */
+
+const sleepUi = { minutes: 0, endsAt: null, tick: null }
+
+/** 主进程推来的最新定时状态 → 刷新按钮高亮 / 选项勾选 / 倒计时 */
+function renderSleepState(st) {
+  sleepUi.minutes = (st && Number(st.minutes)) || 0
+  sleepUi.endsAt = (st && st.endsAt) || null
+  document.getElementById('btnSleep').classList.toggle('active', sleepUi.minutes > 0)
+  document.querySelectorAll('#sleepOpts .sp-chip').forEach((chip) => {
+    chip.classList.toggle('on', Number(chip.dataset.min) === sleepUi.minutes)
+  })
+  updateSleepCountdown()
+  clearInterval(sleepUi.tick)
+  if (sleepUi.minutes > 0) sleepUi.tick = setInterval(updateSleepCountdown, 1000)
+}
+
+function updateSleepCountdown() {
+  const el = document.getElementById('sleepCount')
+  if (!sleepUi.minutes || !sleepUi.endsAt) {
+    el.textContent = '未设置'
+    el.classList.add('off')
+    return
+  }
+  el.classList.remove('off')
+  const left = Math.max(0, Math.round((sleepUi.endsAt - Date.now()) / 1000))
+  const h = Math.floor(left / 3600)
+  const m = Math.floor((left % 3600) / 60)
+  const s = left % 60
+  el.textContent = h > 0
+    ? h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0')
+    : m + ':' + String(s).padStart(2, '0')
+}
+
+function toggleSleepPanel(show) {
+  const panel = document.getElementById('sleepPanel')
+  const target = show === undefined ? panel.hidden : !!show
+  panel.hidden = !target
+  if (target) updateSleepCountdown()
 }
 
 /* ================= 列表多选（v1.7） ================= */
@@ -1282,6 +1326,20 @@ function bindUI() {
     if (state.exclusive) { toast('独占输出下均衡器不可用（会破坏位完美）'); return }
     UI.toggleEq()
   })
+
+  // 睡眠定时面板（v2.2：入口从托盘移到 app 内播放条）
+  document.getElementById('btnSleep').addEventListener('click', (e) => {
+    e.stopPropagation()
+    toggleSleepPanel()
+  })
+  document.getElementById('btnSleepClose').addEventListener('click', () => toggleSleepPanel(false))
+  document.getElementById('sleepOpts').addEventListener('click', (e) => {
+    const chip = e.target.closest('.sp-chip')
+    if (!chip) return
+    const min = Number(chip.dataset.min) || 0
+    window.api.setSleepTimer(min).then((st) => renderSleepState(st))
+    toast(min > 0 ? '睡眠定时：' + min + ' 分钟后暂停播放' : '睡眠定时已关闭')
+  })
   document.getElementById('btnEqClose').addEventListener('click', () => UI.toggleEq(false))
   document.getElementById('btnEqPower').addEventListener('click', () => {
     const cfg = eqSettings()
@@ -1339,6 +1397,7 @@ function bindUI() {
     if (!e.target.closest('#queuePanel') && !e.target.closest('#btnQueue')) UI.toggleQueue(false)
     if (!e.target.closest('#ctxMenu')) UI.hideContextMenu()
     if (!e.target.closest('#eqPanel') && !e.target.closest('#btnEq')) UI.toggleEq(false)
+    if (!e.target.closest('#sleepPanel') && !e.target.closest('#btnSleep')) toggleSleepPanel(false)
   })
 
   // 右键菜单动作
