@@ -142,5 +142,31 @@ contextBridge.exposeInMainWorld('api', {
   diagOpenLog: () => invoke('diag:openLog'),
   diagClearFailures: () => invoke('diag:clearFailures'),
   /** 走主进程剪贴板（file:// 下 navigator.clipboard 不可用） */
-  diagCopy: (text) => invoke('diag:copy', text)
+  diagCopy: (text) => invoke('diag:copy', text),
+
+  /* ---- A-B 循环 / 播放结束后动作（v2.1） ---- */
+  /** 独占模式下交给 mpv 做 A-B 循环（a=null 清除） */
+  mpvSetAbLoop: (a, b) => invoke('mpv:setAbLoop', a, b),
+  /** 上报"整队播完"，主进程按设置决定是否关机/休眠 */
+  notifyQueueEnd: () => ipcRenderer.send('player:queue-end'),
+  powerGet: () => invoke('power:get'),
+  powerSet: (kind) => invoke('power:set', kind),
+  powerCancel: () => invoke('power:cancel'),
+  /** 播放结束后动作被触发/取消（界面用它显示倒计时与取消按钮） */
+  onPowerAction: (cb) => {
+    const h = (_e, payload) => cb(payload)
+    ipcRenderer.on('power-action', h)
+    return () => ipcRenderer.removeListener('power-action', h)
+  },
+  onPowerAfterQueue: (cb) => {
+    const h = (_e, kind) => cb(kind)
+    ipcRenderer.on('power-after-queue', h)
+    return () => ipcRenderer.removeListener('power-after-queue', h)
+  },
+  /** 独占输出设备被拔掉 / 插回来 */
+  onDeviceLost: (cb) => {
+    const h = (_e, payload) => cb(payload)
+    ipcRenderer.on('device-lost', h)
+    return () => ipcRenderer.removeListener('device-lost', h)
+  }
 })

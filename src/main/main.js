@@ -283,6 +283,7 @@ const DEFAULT_SETTINGS = {
   // 独占输出（v1.5）：真实 bit-perfect 走 mpv + WASAPI 独占；关闭时用原本的 HTML5/WebAudio 链路
   exclusiveOutput: false,      // 独占输出（v1.5）：true 时用 mpv + WASAPI exclusive
   audioDevice: '',             // 独占输出设备（v1.6）：mpv 的 --audio-device，'' = 系统默认
+  powerAfterQueue: 'off',      // v2.1：整队播完后 off|shutdown|hibernate|quit
   resumePos: {}                // 长音轨断点位置（v1.6）：{ trackId: 秒 }
 }
 
@@ -520,6 +521,58 @@ function setSleepTimer(minutes) {
   refreshTrayMenu()
 }
 
+/* ---------------- 播放结束后动作（v2.1） ---------------- */
+
+const POWER_LABEL = { off: '不处理', shutdown: '关机', hibernate: '休眠', quit: '关闭播放器' }
+/** 'off' | 'shutdown' | 'hibernate' | 'quit' */
+let powerAfterQueue = 'off'
+
+function setPowerAfterQueue(kind) {
+  powerAfterQueue = POWER_LABEL[kind] ? kind : 'off'
+  logLine('[power] 播放结束后：' + powerAfterQueue)
+  store.patch({ settings: { powerAfterQueue } })
+  refreshTrayMenu()
+  sendToRenderer('power-after-queue', powerAfterQueue)
+}
+
+/**
+ * 队列播完（渲染层上报）。只在真的"外面还有歌"时才动手：
+ * 循环模式列表回卷也算一次播完，用户要的就是那个时刻关机。
+ */
+function runPowerAction() {
+  if (powerAfterQueue === 'off') return
+  const kind = powerAfterQueue
+  powerAfterQueue = 'off'
+  store.patch({ settings: { powerAfterQueue: 'off' } })
+  refreshTrayMenu()
+  sendToRenderer('power-after-queue', 'off')
+  sendToRenderer('power-action', { kind, delay: 15 })
+  logLine('[power] 队列结束，执行 ' + kind + '（15 秒内可在托盘取消）')
+
+  // 给用户 15 秒反悔时间：误触关机比少关一次机难受得多
+  powerPending = setTimeout(() => {
+    powerPending = null
+    if (kind === 'quit') { quitting = true; app.quit(); return }
+    try {
+      if (kind === 'shutdown') execFile('shutdown', ['/s', '/t', '30'])
+      else if (kind === 'hibernate') execFile('shutdown', ['/h'])
+    } catch (err) {
+      logLine('[power] 执行失败 ' + err.message)
+    }
+  }, 15000)
+}
+
+let powerPending = null
+function cancelPowerAction() {
+  if (!powerPending) return false
+  clearTimeout(powerPending)
+  powerPending = null
+  try { execFile('shutdown', ['/a']) } catch {}
+  logLine('[power] 已取消')
+  sendToRenderer('power-action', { kind: null })
+  return true
+}
+
 function refreshTrayMenu() {
   if (!tray) return
   try {
@@ -542,12 +595,23 @@ function refreshTrayMenu() {
         }))
       },
       {
+        // v2.1：整队播完之后做什么。和「睡眠定时」是两件事——那个是到点暂停，这个看进度
+        label: '播放结束后' + (POWER_LABEL[powerAfterQueue] ? '（' + POWER_LABEL[powerAfterQueue] + '）' : ''),
+        submenu: ['off', 'shutdown', 'hibernate', 'quit'].map((k) => ({
+          label: POWER_LABEL[k],
+          type: 'radio',
+          checked: powerAfterQueue === k,
+          click: () => setPowerAfterQueue(k)
+        }))
+      },
+      {
         label: '关闭时最小化到托盘',
         type: 'checkbox',
         checked: store.get().settings.closeToTray === true,
         click: (item) => store.patch({ settings: { closeToTray: item.checked } })
       },
       { type: 'separator' },
+      ...(powerPending ? [{ label: '⚠ 取消关机 / 休眠', click: () => cancelPowerAction() }] : []),
       { label: '退出', click: () => { quitting = true; app.quit() } }
     ]))
   } catch (err) {
@@ -917,6 +981,8 @@ async function ensureMpv(exclusive) {
   logLine('[mpv] start exclusive=' + wantExclusive + ' ' + JSON.stringify(r) + ' exe=' + mpvExePath())
   pushMpvLog(r.ok ? 'info' : 'error',
     '启动结果：' + (r.ok ? 'ok' : '失败 ' + (r.error || '')) + ' exe=' + mpvExePath())
+  // 独占流跑起来之后才开始盯设备（共享模式下 mpv 自己会跟系统默认设备走）
+  if (r.ok && wantExclusive) startDeviceWatch()
   return r
 }
 
@@ -926,6 +992,58 @@ function stopMpv() {
     mpvEngine.kill()
     mpvEngine = null
   }
+  stopDeviceWatch()
+}
+
+/* ---------------- 输出设备热插拔（v2.1） ---------------- */
+
+/**
+ * 独占模式最典型的翻车场景：接 USB DAC 听歌，人走开把线拔了 —— mpv 的独占流会直接失效，
+ * 但界面什么都不会说，用户只会觉得"播放器卡住了/没声音"。
+ * 这里每 8 秒对一次 WASAPI 设备列表：选定的设备消失就自动退回系统默认并告知界面；
+ * 设备插回来后自动切回去（只在同一次运行里记着，重启不猜）。
+ */
+let deviceWatchId = null
+let lostDevice = ''
+
+function startDeviceWatch() {
+  if (deviceWatchId || process.platform !== 'win32') return
+  deviceWatchId = setInterval(async () => {
+    if (!mpvEngine || !mpvEngine.running || !store.get().settings.exclusiveOutput) return
+    const cur = String(store.get().settings.audioDevice || '')
+    let devs
+    try {
+      devs = await mpvEngine.listDevices()
+    } catch {
+      return
+    }
+    const names = new Set(devs.map((d) => d.name))
+    if (cur && !names.has(cur)) {
+      lostDevice = cur
+      pushMpvLog('error', '输出设备已断开：' + cur + ' → 自动切回系统默认')
+      logLine('[device] 设备断开，回退系统默认：' + cur)
+      store.patch({ settings: { audioDevice: '' } })
+      sendToRenderer('device-lost', { device: cur, restored: false })
+      try { await mpvEngine.restart({ exclusive: true, audioDevice: '' }) } catch {}
+      return
+    }
+    if (!cur && lostDevice && names.has(lostDevice)) {
+      const back = lostDevice
+      lostDevice = ''
+      pushMpvLog('info', '输出设备已接回：' + back + ' → 自动切回')
+      logLine('[device] 设备接回，自动切回：' + back)
+      store.patch({ settings: { audioDevice: back } })
+      sendToRenderer('device-lost', { device: back, restored: true })
+      try { await mpvEngine.restart({ exclusive: true, audioDevice: back }) } catch {}
+    }
+  }, 8000)
+  if (deviceWatchId.unref) deviceWatchId.unref()
+  logLine('[device] 开始监视输出设备（8s 一次）')
+}
+
+function stopDeviceWatch() {
+  if (deviceWatchId) { clearInterval(deviceWatchId); deviceWatchId = null }
+  lostDevice = ''
 }
 
 /* ---------------- IPC ---------------- */
@@ -1217,6 +1335,11 @@ function registerIpc() {
   ipcMain.handle('mpv:seek', (e, sec) => { if (mpvEngine) mpvEngine.seek(Number(sec) || 0); return true })
   ipcMain.handle('mpv:volume', (e, v) => { if (mpvEngine) mpvEngine.setVolume(Number(v) || 0); return true })
   ipcMain.handle('mpv:mute', (e, m) => { if (mpvEngine) mpvEngine.setMute(!!m); return true })
+  // A-B 循环（v2.1）：a=null 清除
+  ipcMain.handle('mpv:setAbLoop', (e, a, b) => {
+    if (mpvEngine) mpvEngine.setAbLoop(a, b)
+    return true
+  })
   ipcMain.handle('mpv:quit', () => { stopMpv(); return true })
   // 开启独占前的确认框（把不可逆的副作用说清楚，避免误触）
   ipcMain.on('win:play-state', (e, playing) => updateThumbar(!!playing))
@@ -1373,6 +1496,14 @@ function registerIpc() {
       return { ok: false, error: err.message }
     }
   })
+
+  /* ---------------- 播放结束后动作 / A-B（v2.1） ---------------- */
+
+  // 渲染层上报"整队播完"（列表回卷 / 顺序模式最后一首结束）
+  ipcMain.on('player:queue-end', () => runPowerAction())
+  ipcMain.handle('power:get', () => powerAfterQueue)
+  ipcMain.handle('power:set', (e, kind) => { setPowerAfterQueue(kind); return powerAfterQueue })
+  ipcMain.handle('power:cancel', () => cancelPowerAction())
 }
 
 /** 文本解码：优先 UTF-8，失败回退 GBK（Windows 中文 lrc 常见） */
@@ -1472,6 +1603,8 @@ if (gotLock) cleanChromiumCache()
       session: null,
       window: {}
     }, { onError: (msg) => logLine('STORE_ERROR', msg) })
+    // v2.1：恢复「播放结束后」的设定（关机这类动作要跨重启记住）
+    powerAfterQueue = store.get().settings.powerAfterQueue || 'off'
 
     // 异步清上次残留的 mpv，不阻塞启动
     killOrphanMpv()

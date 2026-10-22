@@ -118,6 +118,20 @@ async function boot() {
   bindGlobalKeys()
   if (typeof Diag !== 'undefined') Diag.init()   // v1.8 诊断面板
 
+  // v2.1：Windows 媒体控制（锁屏/音量浮层/硬件媒体键）
+  initMediaSession()
+  updateAbUi()
+  window.api.onPowerAction((p) => {
+    if (p && p.kind) showPowerCountdown(p.kind, p.delay || 15)
+    else { clearInterval(powerCountdownTimer); powerCountdownTimer = null }
+  })
+  window.api.onDeviceLost((p) => {
+    if (!p) return
+    if (p.restored) toast('输出设备已接回：' + p.device + '（独占已自动切回）', 4000)
+    else toast('输出设备已断开：' + p.device + '\n已切回系统默认设备（独占仍在）', 5000)
+    updateHifiBadge()
+  })
+
   UI.setVolume(player.volume, player.muted)
   UI.setMode(player.mode)
   UI.setLyricOffset(state.lyricOffset)
@@ -722,6 +736,8 @@ function bindPlayer() {
   player.on('track-change', (track) => {
     state.currentId = track.id
     state.counted = false
+    resetAb()                       // A-B 是"这一首之内"的事，换歌就作废
+    updateMediaSession(track)
     applyTrackGain(track.id)
     UI.renderNowPlaying(track, player.isPlaying)
     UI.setPlayIcon(player.isPlaying)
@@ -755,12 +771,18 @@ function bindPlayer() {
     if (!playing) saveSession()
     // 任务栏缩略图的播放/暂停按钮要跟着变
     window.api.setPlayState(playing)
+    syncMediaSessionState(playing)
+    // 独占模式下 mpv 不是 <audio>，得另外挂一条静音流让 Windows 上出现媒体会话
+    keepAliveMediaSession(playing)
   })
 
   player.on('time', (cur, dur) => {
     UI.setProgress(cur, dur)
     UI.updateLyricIndex(cur + state.lyricOffset)
     pushDesktopLyric()
+    enforceAbLoop(cur)
+    if (state.ab.a != null) updateAbUi()
+    updateMediaPosition(cur, dur)
     // 播放到 30s 或一半计入播放次数
     if (!state.counted && player.current) {
       const half = dur > 60 ? dur * 0.5 : 30
@@ -775,6 +797,9 @@ function bindPlayer() {
       }
     }
   })
+
+  // 整队播完（v2.1）：交给主进程决定要不要关机/休眠
+  player.on('queue-end', () => window.api.notifyQueueEnd())
 
   player.on('mode-change', (mode) => {
     UI.setMode(mode)
@@ -1292,6 +1317,11 @@ function bindUI() {
     UI.toggleQueue()
   })
   document.getElementById('btnQueueClose').addEventListener('click', () => UI.toggleQueue(false))
+  // A-B 循环（v2.1）：单击循环 设A → 设B → 取消
+  document.getElementById('btnAb').addEventListener('click', (e) => {
+    e.stopPropagation()
+    onAbClick()
+  })
   document.getElementById('queueBody').addEventListener('click', (e) => {
     const item = e.target.closest('.qp-item')
     if (!item || !item.dataset.qi) return
@@ -1693,6 +1723,193 @@ async function onScanDone() {
   }
 }
 
+/* ================= A-B 循环（v2.1） ================= */
+
+const AB_MIN_GAP = 1      // A/B 至少差 1 秒，否则就是原地打转
+state.ab = { a: null, b: null }
+
+/** 独占模式把循环交给 mpv（精确到采样）；普通输出由 enforceAbLoop 每帧比较后回跳 */
+function applyAbLoop() {
+  if (typeof audio.setAbLoop === 'function') audio.setAbLoop(state.ab.a, state.ab.b)
+}
+
+function updateAbUi() {
+  const btn = UI.els.btnAb
+  if (!btn) return
+  const { a, b } = state.ab
+  btn.classList.toggle('arm', a != null && b == null)
+  btn.classList.toggle('on', a != null && b != null)
+  btn.textContent = a != null && b == null ? 'A-' : 'A-B'
+  btn.title = a == null ? 'A-B 循环：点一下设起点，再点一下设终点'
+    : b == null ? 'A 点已设 ' + fmtTime(a) + '，播放到终点位置再点一下'
+      : 'A-B 循环中 ' + fmtTime(a) + ' → ' + fmtTime(b) + '，再点一下取消'
+  const dur = (audio && audio.duration) || 0
+  const put = (el, t) => {
+    if (!el) return
+    if (t == null || !(dur > 0)) { el.hidden = true; return }
+    el.hidden = false
+    el.style.left = Math.max(0, Math.min(100, (t / dur) * 100)) + '%'
+  }
+  put(UI.els.abMarkA, a)
+  put(UI.els.abMarkB, b)
+}
+
+function syncAb() {
+  applyAbLoop()
+  updateAbUi()
+}
+
+function resetAb(silent = true) {
+  if (state.ab.a == null && state.ab.b == null) return
+  state.ab = { a: null, b: null }
+  syncAb()
+  if (!silent) toast('已取消 A-B 循环')
+}
+
+function onAbClick() {
+  if (!player || !player.current) { toast('先播放一首歌再设 A-B'); return }
+  const t = Math.max(0, audio.currentTime || 0)
+  const { a, b } = state.ab
+  if (a == null) {
+    state.ab = { a: t, b: null }
+    toast('A 点：' + fmtTime(t) + '（播放到终点再点一下）', 2200)
+  } else if (b == null) {
+    if (t - a < AB_MIN_GAP) { toast('B 点至少要在 A 点之后 1 秒'); return }
+    state.ab = { a, b: t }
+    toast('A-B 循环：' + fmtTime(a) + ' → ' + fmtTime(t), 2200)
+  } else {
+    resetAb(false)
+    return
+  }
+  syncAb()
+}
+
+/** 普通输出下的循环判定；独占模式 mpv 自己循环，这里直接跳过 */
+function enforceAbLoop(cur) {
+  const { a, b } = state.ab
+  if (a == null || b == null) return
+  if (typeof audio.setAbLoop === 'function') return
+  if (cur >= b - 0.06) player.seek(a)
+}
+
+/* ================= Windows 媒体控制（Media Session / SMTC，v2.1） ================= */
+
+/**
+ * Chromium 会把 navigator.mediaSession 接到 Windows 的 SMTC 上（音量浮层、锁屏、硬件媒体键）。
+ * 这条链路不需要原生模块，但有个前提：必须有一个**正在播放的 <audio>**。
+ * 独占模式下声音走 mpv，页面里没有播放中的 <audio>，所以额外挂一条静音流
+ * （体积 0 的 8bit WAV，音量 0.001 —— 不能设 0，Chromium 认为"静音"就不算 audible）。
+ */
+let mediaKeepAlive = null
+let mediaPosAt = 0
+
+function silentWavUrl(seconds = 0.2, rate = 8000) {
+  const n = Math.floor(seconds * rate)
+  const buf = new ArrayBuffer(44 + n)
+  const dv = new DataView(buf)
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)) }
+  w(0, 'RIFF'); dv.setUint32(4, 36 + n, true); w(8, 'WAVE'); w(12, 'fmt ')
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true)
+  dv.setUint32(24, rate, true); dv.setUint32(28, rate, true)
+  dv.setUint16(32, 1, true); dv.setUint16(34, 8, true)
+  w(36, 'data'); dv.setUint32(40, n, true)
+  for (let i = 0; i < n; i++) dv.setUint8(44 + i, 128)
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }))
+}
+
+function initMediaSession() {
+  if (!('mediaSession' in navigator)) return
+  const ms = navigator.mediaSession
+  const set = (name, fn) => { try { ms.setActionHandler(name, fn) } catch {} }
+  set('play', () => player.play())
+  set('pause', () => player.pause())
+  set('previoustrack', () => player.prev())
+  set('nexttrack', () => player.next())
+  set('stop', () => { player.pause(); player.seek(0) })
+  set('seekto', (d) => { if (d && d.seekTime != null) player.seek(d.seekTime) })
+  set('seekbackward', (d) => player.seek(Math.max(0, (audio.currentTime || 0) - ((d && d.seekOffset) || 10))))
+  set('seekforward', (d) => player.seek((audio.currentTime || 0) + ((d && d.seekOffset) || 10)))
+}
+
+function updateMediaSession(track) {
+  if (!('mediaSession' in navigator) || !track) return
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: track.title || track.fileName || '未知曲目',
+      artist: track.artist || '',
+      album: track.album || '',
+      artwork: track.cover ? [{ src: track.cover, sizes: '512x512', type: 'image/jpeg' }] : []
+    })
+  } catch {}
+}
+
+function syncMediaSessionState(playing) {
+  if (!('mediaSession' in navigator)) return
+  try { navigator.mediaSession.playbackState = playing ? 'playing' : 'paused' } catch {}
+}
+
+/** 进度位置：Windows 浮层的进度条靠它；1 秒一次足够，别每帧都调 */
+function updateMediaPosition(cur, dur) {
+  if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState) return
+  const now = Date.now()
+  if (now - mediaPosAt < 1000) return
+  mediaPosAt = now
+  if (!(dur > 0) || !isFinite(dur)) return
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: dur,
+      position: Math.min(Math.max(0, cur || 0), dur),
+      playbackRate: 1
+    })
+  } catch {}
+}
+
+function keepAliveMediaSession(playing) {
+  if (!('mediaSession' in navigator)) return
+  // 普通输出下 <audio> 本身就是一场活跃会话，不需要这条假流
+  if (!state.exclusive) {
+    if (mediaKeepAlive && !mediaKeepAlive.paused) mediaKeepAlive.pause()
+    return
+  }
+  try {
+    if (!mediaKeepAlive) {
+      mediaKeepAlive = new Audio(silentWavUrl())
+      mediaKeepAlive.loop = true
+      mediaKeepAlive.volume = 0.001
+      mediaKeepAlive.addEventListener('error', () => { mediaKeepAlive = null })
+    }
+    if (playing) {
+      if (mediaKeepAlive.paused) mediaKeepAlive.play().catch(() => {})
+    } else if (!mediaKeepAlive.paused) {
+      mediaKeepAlive.pause()
+    }
+  } catch {}
+}
+
+/* ================= 播放结束后关机 / 设备热插拔（v2.1） ================= */
+
+let powerCountdownTimer = null
+const POWER_TEXT = { shutdown: '关机', hibernate: '休眠', quit: '关闭播放器' }
+
+function showPowerCountdown(kind, seconds) {
+  clearInterval(powerCountdownTimer)
+  let left = seconds
+  const tick = () => {
+    if (left <= 0) { clearInterval(powerCountdownTimer); powerCountdownTimer = null; return }
+    toast(`队列已播完：${left} 秒后${POWER_TEXT[kind] || '执行动作'}（Esc 或托盘菜单可取消）`, 1200)
+    left--
+  }
+  tick()
+  powerCountdownTimer = setInterval(tick, 1000)
+}
+
+async function cancelPowerCountdown() {
+  clearInterval(powerCountdownTimer)
+  powerCountdownTimer = null
+  const ok = await window.api.powerCancel().catch(() => false)
+  toast(ok ? '已取消' : '没有待执行的关机任务')
+}
+
 /* ================= 快捷键 ================= */
 
 function handleShortcut(action) {
@@ -1712,6 +1929,8 @@ function bindGlobalKeys() {
   window.addEventListener('keydown', (e) => {
     const inInput = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
     if (e.key === 'Escape') {
+      // 关机倒计时进行中：Esc 优先取消它（这一刻误触的代价最大）
+      if (powerCountdownTimer) { cancelPowerCountdown(); e.preventDefault(); return }
       if (state.analyzing) {
         state.abortAnalysis = true
         e.preventDefault()

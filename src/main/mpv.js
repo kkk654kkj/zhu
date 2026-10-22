@@ -302,6 +302,15 @@ class MpvEngine {
   }
   setMute(m) { this._send(['set_property', 'mute', !!m]) }
 
+  /**
+   * A-B 循环（v2.1）：交给 mpv 自己做，比渲染层每 250ms 比较时间再 seek 精确得多，
+   * 也不会有循环点的"卡顿感"。a/b 传 null 表示清除（mpv 用字面量 "no"）。
+   */
+  setAbLoop(a, b) {
+    this._send(['set_property', 'ab-loop-a', a == null ? 'no' : Math.max(0, Number(a) || 0)])
+    this._send(['set_property', 'ab-loop-b', b == null ? 'no' : Math.max(0, Number(b) || 0)])
+  }
+
   /** 以另一套 exclusive / 设备设置重启（用于独占失败后回退共享、或切换输出设备） */
   async restart({ exclusive, audioDevice = this._audioDevice || '' }) {
     const file = this._lastFile

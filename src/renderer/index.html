@@ -182,10 +182,11 @@
       <button class="icon-btn play" id="btnPlay" title="播放/暂停"><svg><use href="#i-play"/></svg></button>
       <button class="icon-btn lg" id="btnNext" title="下一首"><svg><use href="#i-next"/></svg></button>
       <button class="icon-btn" id="btnQueue" title="播放队列"><svg><use href="#i-list"/></svg></button>
+      <button class="ab-btn" id="btnAb" title="A-B 循环：点一下设起点，再点一下设终点（拖动进度条可重设）">A-B</button>
     </div>
     <div class="pb-progress">
       <span class="t" id="tCur">0:00</span>
-      <div class="bar" id="progressBar"><i class="fill" id="progressFill"></i><i class="dot" id="progressDot"></i></div>
+      <div class="bar" id="progressBar"><i class="fill" id="progressFill"></i><i class="dot" id="progressDot"></i><i class="ab-mark" id="abMarkA" hidden></i><i class="ab-mark" id="abMarkB" hidden></i></div>
       <span class="t" id="tDur">0:00</span>
     </div>
   </div>

@@ -1522,3 +1522,35 @@ body.mini .hifi-badge { display: none; }
   text-overflow: ellipsis;
 }
 .diag-foot-btns { display: flex; gap: 8px; flex: 0 0 auto; }
+
+/* ================= A-B 循环（v2.1） ================= */
+.ab-btn {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--txt-3);
+  font: 600 10px/1 "Mesh", "Microsoft YaHei UI", sans-serif;
+  letter-spacing: .5px;
+  padding: 5px 5px;
+  border-radius: 5px;
+  cursor: pointer;
+  margin-left: 2px;
+  min-width: 30px;
+}
+.ab-btn:hover { color: var(--txt); border-color: var(--txt-3); }
+/* 设了 A 还没设 B */
+.ab-btn.arm { color: #e5a03d; border-color: rgba(229,160,61,.5); background: rgba(229,160,61,.10); }
+/* 循环生效中 */
+.ab-btn.on { color: var(--accent); border-color: rgba(49,194,124,.5); background: var(--accent-soft); }
+.ab-mark {
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 10px;
+  margin-top: -5px;
+  background: var(--accent);
+  border-radius: 1px;
+  pointer-events: none;
+  opacity: .9;
+}
+.ab-mark.a { opacity: .55; }

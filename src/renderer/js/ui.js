@@ -20,6 +20,7 @@ const UI = {
       'dirModal', 'dirList', 'btnDirAdd', 'btnDirSave', 'btnDirClose',
       'btnNorm', 'btnDLyric',
       'btnEq', 'eqPanel', 'eqPresets', 'eqBands', 'btnEqPower', 'btnEqClose', 'btnEqFlat', 'spectrum',
+      'btnAb', 'abMarkA', 'abMarkB',
       'btnMini', 'miniView', 'mvCover', 'mvTitle', 'mvArtist', 'mvLyric',
       'mvCur', 'mvDur', 'mvBar', 'mvFill', 'mvDot',
       'mvMode', 'mvPrev', 'mvPlay', 'mvNext', 'mvFav',

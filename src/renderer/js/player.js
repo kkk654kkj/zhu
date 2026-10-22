@@ -229,8 +229,11 @@ class Player extends Emitter {
     } else {
       this.index = this.index + 1
       if (this.index >= this.tracks.length) {
-        if (this.mode === 'list') this.index = 0
-        else { this.index = this.tracks.length - 1; this.stop(); return }
+        if (this.mode === 'list') {
+          this.index = 0
+          // 列表循环绕过一圈也算"播完一轮"——「播放结束后关机」要的就是这个时刻
+          if (auto) this.emit('queue-end')
+        } else { this.index = this.tracks.length - 1; this.stop(); return }
       }
     }
     this._loadCurrent(true)
@@ -276,6 +279,8 @@ class Player extends Emitter {
     }
     if (this.mode === 'order' && this.index >= this.tracks.length - 1) {
       this.emit('state-change', false)
+      // v2.1：整队播完（顺序模式停在最后一首）——主进程据此决定要不要关机/休眠
+      this.emit('queue-end')
       return
     }
     this.next(true)

@@ -60,6 +60,11 @@ class MpvAudio {
 
   get duration() { return this._duration }
   get paused() { return this._paused }
+
+  /** A-B 循环（v2.1）：独占模式直接交给 mpv，循环点精确到采样，不用每 250ms 比较再 seek */
+  setAbLoop(a, b) {
+    window.api.mpvSetAbLoop(a == null ? null : Number(a), b == null ? null : Number(b)).catch(() => {})
+  }
   get ended() { return this._ended }
 
   get volume() { return this._volume }
