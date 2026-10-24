@@ -269,6 +269,7 @@ const DEFAULT_SETTINGS = {
   autoScanOnStart: false,
   watchFolders: true,          // 监视音乐文件夹变化并自动增量扫描（v1.7）
   closeToTray: false,
+  closeAsk: true,              // v2.4：点 × 时弹窗询问（最小化到托盘 / 直接退出），勾「不再提示」后关闭
   // 音量均衡
   normalizeVolume: false,
   targetLufs: -16,
@@ -459,10 +460,19 @@ function createWindow() {
   win.on('move', debounce(saveBounds, 400))
 
   win.on('close', (e) => {
-    if (store.get().settings.closeToTray && !quitting) {
-      e.preventDefault()
-      win.hide()
-      return
+    if (!quitting) {
+      const st = store.get().settings
+      // v2.4：默认每次点 × 都问一次（最小化到托盘 / 直接退出），勾了「不再提示」后按记住的选择执行
+      if (st.closeAsk) {
+        e.preventDefault()
+        handleCloseAsk()
+        return
+      }
+      if (st.closeToTray) {
+        e.preventDefault()
+        win.hide()
+        return
+      }
     }
     saveBounds()
     // 主窗口真要关掉 → 桌面歌词一起收（否则只剩一个歌词窗悬空，进程也不会退出）。
@@ -582,6 +592,44 @@ function cancelPowerAction() {
   return true
 }
 
+/**
+ * v2.4：点 × 弹窗问「最小化到托盘还是直接退出」。
+ * 勾选「不再提示」后记住这次的选择（可在托盘菜单改回来）；
+ * 不勾则只对本次生效，设置不变。弹窗失败时退回旧行为（按 closeToTray 设置执行）。
+ */
+async function handleCloseAsk() {
+  try {
+    const r = await dialog.showMessageBox(win, {
+      type: 'question',
+      title: '关闭播放器',
+      message: '点击 × 时想做什么？',
+      detail: '勾选「不再提示」后将按这次的选择执行，之后可在托盘菜单里改回来。',
+      buttons: ['最小化到托盘', '直接退出', '取消'],
+      defaultId: 0,
+      cancelId: 2,
+      checkboxLabel: '不再提示',
+      checkboxChecked: false,
+      noLink: true
+    })
+    if (r.response === 2) return
+    const toTray = r.response === 0
+    if (r.checkboxChecked) {
+      store.patch({ settings: { closeToTray: toTray, closeAsk: false } })
+      refreshTrayMenu()
+      logLine('[close] 记住选择：' + (toTray ? '最小化到托盘' : '直接退出') + '（不再提示）')
+    } else {
+      logLine('[close] 本次：' + (toTray ? '最小化到托盘' : '直接退出'))
+    }
+    if (toTray) { win.hide(); return }
+    quitting = true
+    win.close()
+  } catch (err) {
+    logLine('[close] 询问弹窗失败 ' + err.message + '，按托盘设置执行')
+    if (store.get().settings.closeToTray) win.hide()
+    else { quitting = true; win.close() }
+  }
+}
+
 function refreshTrayMenu() {
   if (!tray) return
   try {
@@ -603,6 +651,12 @@ function refreshTrayMenu() {
           checked: powerAfterQueue === k,
           click: () => setPowerAfterQueue(k)
         }))
+      },
+      {
+        label: '关闭时询问（点 × 弹窗选择）',
+        type: 'checkbox',
+        checked: store.get().settings.closeAsk !== false,
+        click: (item) => store.patch({ settings: { closeAsk: item.checked } })
       },
       {
         label: '关闭时最小化到托盘',
