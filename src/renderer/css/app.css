@@ -1602,3 +1602,22 @@ body.mini .hifi-badge { display: none; }
 .sp-chip:hover { color: var(--txt); border-color: var(--txt-3); }
 .sp-chip.on { color: var(--accent); border-color: rgba(49,194,124,.5); background: var(--accent-soft); }
 .sp-foot { padding: 8px 12px 10px; font-size: 11px; color: var(--txt-3); text-align: center; }
+
+/* ================= 独占输出设备面板（v2.3） ================= */
+#audioPanel {
+  position: fixed;
+  right: 12px;
+  bottom: calc(var(--pb-h) + 12px);
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 14px 44px rgba(0,0,0,.55);
+  z-index: 40;
+  overflow: hidden;
+}
+.ap-hint { padding: 8px 12px 0; font-size: 11px; color: var(--txt-3); line-height: 1.5; }
+.ap-loading { font-size: 12px; color: var(--txt-3); padding: 4px 2px; }
+#audioDevices { max-height: 220px; overflow-y: auto; }

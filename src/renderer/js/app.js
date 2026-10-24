@@ -986,30 +986,62 @@ async function toggleExclusiveOutput() {  if (state.settings.exclusiveOutput) {
   location.reload()
 }
 
-/**
- * 列出 WASAPI 输出设备并用右键菜单选（仅供独占输出使用）。
- * 枚举需要引擎在跑，主进程会在用完且当前不是独占时自动关掉临时进程。
- */
-async function openAudioDeviceMenu(x, y) {
-  toast('正在检测输出设备…', 1500)
+/* ================= 独占输出设备面板（v2.3：从隐藏的右键菜单升级为正式面板） ================= */
+
+let audioDevicesCache = []
+let audioDevicesLoading = false
+
+/** 打开面板并重新枚举设备（枚举需要引擎在跑，主进程会自动管理临时进程） */
+async function openAudioPanel() {
+  toggleAudioPanel(true)
+  await refreshAudioDevices()
+}
+
+function toggleAudioPanel(show) {
+  const panel = document.getElementById('audioPanel')
+  const target = show === undefined ? panel.hidden : !!show
+  panel.hidden = !target
+}
+
+async function refreshAudioDevices() {
+  if (audioDevicesLoading) return
+  audioDevicesLoading = true
+  const body = document.getElementById('audioDevices')
+  body.innerHTML = '<span class="ap-loading">正在检测输出设备…</span>'
   const res = await window.api.mpvDevices().catch((err) => ({ ok: false, error: err.message }))
+  audioDevicesLoading = false
   if (!res || !res.ok) {
-    toast('检测输出设备失败：' + ((res && res.error) || '未知错误'), 3000)
+    body.innerHTML = '<span class="ap-loading">检测失败：' + esc((res && res.error) || '未知错误') + '</span>'
     return
   }
+  audioDevicesCache = res.devices || []
+  paintAudioPanel()
+}
+
+function paintAudioPanel() {
   const cur = state.settings.audioDevice || ''
-  const items = [
-    { label: '跟随系统默认设备' + (cur ? '' : '（当前）'), act: 'set-audio-device', arg: '' },
-    { sep: true }
-  ]
-  for (const d of res.devices) {
-    items.push({
-      label: (d.description || d.name) + (d.name === cur ? '（当前）' : ''),
-      act: 'set-audio-device',
-      arg: d.name
-    })
+  const body = document.getElementById('audioDevices')
+  const chip = (label, name) =>
+    '<button class="sp-chip' + (name === cur ? ' on' : '') + '" data-dev="' + esc(name) + '">' +
+    esc(label) + (name === cur ? '（当前）' : '') + '</button>'
+  let html = chip('跟随系统默认设备', '')
+  for (const d of audioDevicesCache) {
+    html += chip(d.description || d.name, d.name)
   }
-  UI.showContextMenu(x, y, items.length > 2 ? items : items.concat([{ label: '没有检测到可用设备', act: 'noop-audio-device' }]))
+  if (!audioDevicesCache.length) {
+    html += '<span class="ap-loading">没有检测到可用设备</span>'
+  }
+  body.innerHTML = html
+}
+
+/** 选中设备（'' = 跟随系统默认）。保存并即时切（独占没开时只保存，开启后生效）。 */
+async function setAudioDevice(name) {
+  name = name || ''
+  state.settings.audioDevice = name
+  const r = await window.api.mpvSetDevice(name).catch((err) => ({ ok: false, error: err.message }))
+  if (!r || !r.ok) toast('切换输出设备失败：' + ((r && r.error) || '未知错误'), 3000)
+  else toast(r.applied ? '输出设备已切换' : '输出设备已保存（开启独占后生效）')
+  paintAudioPanel()
 }
 
 /* ================= 迷你模式 ================= */
@@ -1308,16 +1340,28 @@ function bindUI() {
   // 桌面歌词
   document.getElementById('btnDLyric').addEventListener('click', toggleDesktopLyric)
 
-  // 独占输出（位完美）
+  // 独占输出（位完美）：左键开关；选输出设备走正式面板（v2.3，原来藏在右键菜单里）
   document.getElementById('btnHifi').addEventListener('click', toggleExclusiveOutput)
-  // 右键选输出设备：接了 USB DAC 的人基本都要指定，系统默认经常不是它
   document.getElementById('btnHifi').addEventListener('contextmenu', (e) => {
     e.preventDefault()
-    openAudioDeviceMenu(e.clientX, e.clientY)
+    e.stopPropagation()
+    openAudioPanel()
+  })
+  // 独占生效时播放条左侧的 HiFi 角标：左键/右键都能打开设备面板
+  document.getElementById('hifiBadge').addEventListener('click', (e) => {
+    e.stopPropagation()
+    openAudioPanel()
   })
   document.getElementById('hifiBadge').addEventListener('contextmenu', (e) => {
     e.preventDefault()
-    openAudioDeviceMenu(e.clientX, e.clientY)
+    e.stopPropagation()
+    openAudioPanel()
+  })
+  document.getElementById('btnAudioRefresh').addEventListener('click', refreshAudioDevices)
+  document.getElementById('btnAudioClose').addEventListener('click', () => toggleAudioPanel(false))
+  document.getElementById('audioDevices').addEventListener('click', (e) => {
+    const chip = e.target.closest('.sp-chip')
+    if (chip) setAudioDevice(chip.dataset.dev || '')
   })
 
   // 均衡器面板（独占输出下禁用：任何软件处理都会破坏位完美）
@@ -1398,6 +1442,7 @@ function bindUI() {
     if (!e.target.closest('#ctxMenu')) UI.hideContextMenu()
     if (!e.target.closest('#eqPanel') && !e.target.closest('#btnEq')) UI.toggleEq(false)
     if (!e.target.closest('#sleepPanel') && !e.target.closest('#btnSleep')) toggleSleepPanel(false)
+    if (!e.target.closest('#audioPanel') && !e.target.closest('#btnHifi') && !e.target.closest('#hifiBadge')) toggleAudioPanel(false)
   })
 
   // 右键菜单动作

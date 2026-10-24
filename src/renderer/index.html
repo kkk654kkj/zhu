@@ -253,6 +253,20 @@
   <div class="sp-foot">到点后播放淡出并暂停</div>
 </div>
 
+<!-- 独占输出设备面板（v2.3：从隐藏的右键菜单升级为正式面板） -->
+<div id="audioPanel" hidden>
+  <div class="sp-head">
+    <span>独占输出设备</span>
+    <div class="eq-head-right">
+      <button class="mini-btn" id="btnAudioRefresh" title="重新检测设备"><svg><use href="#i-refresh"/></svg></button>
+      <button class="mini-btn" id="btnAudioClose"><svg><use href="#i-close"/></svg></button>
+    </div>
+  </div>
+  <div class="ap-hint">指定独占输出（位完美）使用的声卡，适合接了 USB DAC / 外置声卡的情况</div>
+  <div class="sp-opts" id="audioDevices"><span class="ap-loading">正在检测输出设备…</span></div>
+  <div class="sp-foot">当前选择会记住，重开播放器后仍生效</div>
+</div>
+
 <!-- 播放队列抽屉 -->
 <div id="queuePanel" hidden>
   <div class="qp-head"><span>播放队列</span><button class="mini-btn" id="btnQueueClose"><svg><use href="#i-close"/></svg></button></div>
