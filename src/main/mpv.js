@@ -49,7 +49,7 @@ class MpvEngine {
   }
 
   /** 启动引擎进程（幂等）。返回 {ok, exclusive, error} */
-  async start({ exclusive = true, audioDevice = '' } = {}) {
+  async start({ exclusive = true, audioDevice = '', volume = 1 } = {}) {
     if (this.running) {
       return { ok: true, exclusive: this.exclusive }
     }
@@ -58,6 +58,9 @@ class MpvEngine {
     }
     this.exclusive = !!exclusive
     this._audioDevice = audioDevice || ''
+    // v2.5：启动音量跟随上次设置（以前硬编码 100，每次重启引擎音量都被重置）
+    const vol01 = Math.max(0, Math.min(1, Number(volume) || 0))
+    this._volume01 = vol01
     this._buf = ''
     this._queue = []
     this.ready = false
@@ -73,7 +76,8 @@ class MpvEngine {
       '--no-osd-bar',
       '--really-quiet',
       '--msg-level=all=warn',
-      '--volume=100',                 // 100 = 单位增益，位完美的基准
+      // v2.5：启动音量跟随设置（浮点，支持 0.1 精度）；1 = 100 = 位完美基准
+      '--volume=' + (Math.round(vol01 * 1000) / 10),
       // 必须关掉无缝：gapless=yes 时 mpv 为了不断流，会把下一首重采样成上一首的
       // 采样率（实测 96k 的 FLAC 被按 44.1k 输出），位完美直接失效
       '--gapless-audio=no',
@@ -311,15 +315,32 @@ class MpvEngine {
     this._send(['set_property', 'ab-loop-b', b == null ? 'no' : Math.max(0, Number(b) || 0)])
   }
 
-  /** 以另一套 exclusive / 设备设置重启（用于独占失败后回退共享、或切换输出设备） */
-  async restart({ exclusive, audioDevice = this._audioDevice || '' }) {
+  /**
+   * 以另一套 exclusive / 设备设置重启（用于独占失败后回退共享、或切换输出设备）。
+   * v2.5 修复：以前重启后固定 paused 加载且无人恢复——独占播放中切设备，音乐会停在
+   * 原地不再出声（用户看起来就是"切换设备无效"）。现在先记下播放状态，重启后接着播。
+   */
+  async restart({ exclusive, audioDevice = this._audioDevice || '', volume = null } = {}) {
+    let wasPlaying = false
+    try { wasPlaying = (await this.request(['get_property', 'pause'], 800)) === false } catch {}
     const file = this._lastFile
     const pos = this._lastPos
     this.kill()
-    const r = await this.start({ exclusive, audioDevice })
+    const r = await this.start({
+      exclusive,
+      audioDevice,
+      volume: volume != null ? volume : (this._volume01 != null ? this._volume01 : 1)
+    })
     if (r.ok && file) {
       this.load(file, { paused: true })
-      if (pos > 0.3) setTimeout(() => this.seek(pos), 120)
+      if (pos > 0.3) {
+        setTimeout(() => {
+          this.seek(pos)
+          if (wasPlaying) setTimeout(() => this.play(), 80)
+        }, 120)
+      } else if (wasPlaying) {
+        setTimeout(() => this.play(), 120)
+      }
     }
     return r
   }

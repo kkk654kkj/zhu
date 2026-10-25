@@ -1621,3 +1621,22 @@ body.mini .hifi-badge { display: none; }
 .ap-hint { padding: 8px 12px 0; font-size: 11px; color: var(--txt-3); line-height: 1.5; }
 .ap-loading { font-size: 12px; color: var(--txt-3); padding: 4px 2px; }
 #audioDevices { max-height: 220px; overflow-y: auto; }
+
+/* v2.5：独占输出面板——分区标题 + 高精度音量滑条 */
+.ap-sec {
+  padding: 10px 12px 0;
+  font-size: 12px;
+  color: var(--txt-2);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.ap-sec b { font-size: 11px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+.ap-volrow { padding: 6px 12px 0; }
+.ap-volrow input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+  height: 18px;
+  cursor: pointer;
+}
+#audioDevices { margin-bottom: 4px; }

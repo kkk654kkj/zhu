@@ -1030,8 +1030,10 @@ async function ensureMpv(exclusive) {
   const wantExclusive = exclusive !== false
   // 输出设备来自设置；空字符串 = 跟随系统默认
   const audioDevice = String(store.get().settings.audioDevice || '').trim()
-  pushMpvLog('info', '启动引擎：exclusive=' + wantExclusive + ' device=' + (audioDevice || '(系统默认)'))
-  const r = await mpvEngine.start({ exclusive: wantExclusive, audioDevice })
+  // v2.5：启动音量跟随设置（以前 mpv 固定 --volume=100，重启引擎音量就被重置）
+  const startVolume = Math.max(0, Math.min(1, Number(store.get().settings.volume ?? 1)))
+  pushMpvLog('info', '启动引擎：exclusive=' + wantExclusive + ' device=' + (audioDevice || '(系统默认)') + ' volume=' + Math.round(startVolume * 1000) / 10)
+  const r = await mpvEngine.start({ exclusive: wantExclusive, audioDevice, volume: startVolume })
   logLine('[mpv] start exclusive=' + wantExclusive + ' ' + JSON.stringify(r) + ' exe=' + mpvExePath())
   pushMpvLog(r.ok ? 'info' : 'error',
     '启动结果：' + (r.ok ? 'ok' : '失败 ' + (r.error || '')) + ' exe=' + mpvExePath())
@@ -1448,7 +1450,9 @@ function registerIpc() {
     store.patch({ settings: { audioDevice: name } })
     if (!mpvEngine || !mpvEngine.running) return { ok: true, applied: false }
     if (!store.get().settings.exclusiveOutput) return { ok: true, applied: false }
-    const r = await mpvEngine.restart({ exclusive: true, audioDevice: name })
+    // v2.5：重启时带上当前音量（重启后不再被重置成 100；播放状态由 restart 内部恢复）
+    const startVolume = Math.max(0, Math.min(1, Number(store.get().settings.volume ?? 1)))
+    const r = await mpvEngine.restart({ exclusive: true, audioDevice: name, volume: startVolume })
     return { ok: !!r.ok, applied: true, error: r.error }
   })
 

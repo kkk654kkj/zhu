@@ -859,6 +859,8 @@ function bindPlayer() {
     UI.setVolume(v, muted)
     saveSettings({ volume: v, muted })
     if (state.exclusive) updateHifiBadge()
+    // 音量面板开着时实时同步（拖主音量条 / 媒体键改音量，面板数字跟着走）
+    if (!document.getElementById('audioPanel').hidden) paintExclusiveVolume()
   })
 
   player.on('error', () => {
@@ -994,7 +996,29 @@ let audioDevicesLoading = false
 /** 打开面板并重新枚举设备（枚举需要引擎在跑，主进程会自动管理临时进程） */
 async function openAudioPanel() {
   toggleAudioPanel(true)
+  paintExclusiveVolume()
   await refreshAudioDevices()
+}
+
+/* ---- 高精度音量（v2.5）：独占下直达 mpv 浮点音量，0.1 步进，附 dB 换算 ---- */
+
+function paintExclusiveVolume() {
+  const slider = document.getElementById('apVol')
+  if (!slider) return
+  const v = Math.round((player.volume || 0) * 1000) / 10
+  slider.value = v.toFixed(1)
+  const db = v > 0 ? (20 * Math.log10(v / 100)).toFixed(1) + ' dB' : '-∞ dB'
+  document.getElementById('apVolVal').textContent = v.toFixed(1) + '% · ' + db
+  document.querySelectorAll('#apVolPresets .sp-chip').forEach((chip) => {
+    chip.classList.toggle('on', Math.abs(Number(chip.dataset.v) - v) < 0.05)
+  })
+}
+
+function setExclusiveVolume(v) {
+  v = Math.max(0, Math.min(100, Number(v) || 0))
+  // player.setVolume → MpvAudio.volume → mpv set_property volume（浮点）→ vol-change 落盘
+  player.setVolume(v / 100)
+  paintExclusiveVolume()
 }
 
 function toggleAudioPanel(show) {
@@ -1362,6 +1386,12 @@ function bindUI() {
   document.getElementById('audioDevices').addEventListener('click', (e) => {
     const chip = e.target.closest('.sp-chip')
     if (chip) setAudioDevice(chip.dataset.dev || '')
+  })
+  // 高精度音量（v2.5）：拖动实时生效；预设一键到位
+  document.getElementById('apVol').addEventListener('input', (e) => setExclusiveVolume(e.target.value))
+  document.getElementById('apVolPresets').addEventListener('click', (e) => {
+    const chip = e.target.closest('.sp-chip')
+    if (chip) setExclusiveVolume(chip.dataset.v)
   })
 
   // 均衡器面板（独占输出下禁用：任何软件处理都会破坏位完美）
