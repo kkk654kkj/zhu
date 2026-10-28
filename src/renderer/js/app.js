@@ -1175,17 +1175,34 @@ function bindUI() {
   })
   document.getElementById('btnImportPlaylist').addEventListener('click', importM3uPlaylist)
 
-  // 歌单右键：导出 m3u / 删除
+  // 歌单右键：重命名 / 导出 m3u / 删除；双击歌单名也可重命名（v2.7）
   document.getElementById('playlistList').addEventListener('contextmenu', (e) => {
     const item = e.target.closest('.nav-item[data-playlist]')
     if (!item) return
     e.preventDefault()
     const plId = item.dataset.playlist
     UI.showContextMenu(e.clientX, e.clientY, [
+      { label: '重命名', icon: 'edit', act: 'rename-playlist', arg: plId },
       { label: '导出为 m3u…', icon: 'folder', act: 'export-m3u', arg: plId },
       { sep: true },
       { label: '删除歌单', icon: 'trash', danger: true, act: 'delete-playlist', arg: plId }
     ])
+  })
+  document.getElementById('playlistList').addEventListener('dblclick', (e) => {
+    const item = e.target.closest('.nav-item[data-playlist]')
+    if (item) openRenameModal(item.dataset.playlist)
+  })
+
+  // 改名弹窗（v2.7）
+  document.getElementById('btnRenameClose').addEventListener('click', closeRenameModal)
+  document.getElementById('btnRenameCancel').addEventListener('click', closeRenameModal)
+  document.getElementById('btnRenameOk').addEventListener('click', confirmRename)
+  document.getElementById('renameModal').addEventListener('click', (e) => {
+    if (e.target.id === 'renameModal') closeRenameModal()
+  })
+  document.getElementById('renameInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); confirmRename() }
+    if (e.key === 'Escape') { e.preventDefault(); closeRenameModal() }
   })
 
   // 列表点击
@@ -1672,6 +1689,9 @@ async function handleCtxAction(act, arg) {
     case 'delete-playlist':
       deletePlaylist(arg)
       return
+    case 'rename-playlist':
+      openRenameModal(arg)
+      return
     case 'set-audio-device': {
       const name = arg || ''
       state.settings.audioDevice = name
@@ -1752,6 +1772,43 @@ async function handleCtxAction(act, arg) {
       toast(db === 0 ? '已重置该曲增益' : `「${track.title}」增益 ${db > 0 ? '+' : ''}${db} dB`)
       break
     }
+  }
+}
+
+/* ================= 歌单改名（v2.7） ================= */
+
+let renameTargetId = null
+
+function openRenameModal(plId) {
+  const pl = state.playlists.find((p) => p.id === plId)
+  if (!pl) return
+  renameTargetId = plId
+  const input = document.getElementById('renameInput')
+  input.value = pl.name
+  document.getElementById('renameModal').hidden = false
+  input.focus()
+  input.select()
+}
+
+function closeRenameModal() {
+  document.getElementById('renameModal').hidden = true
+  renameTargetId = null
+}
+
+async function confirmRename() {
+  const plId = renameTargetId
+  if (!plId) return
+  const name = document.getElementById('renameInput').value.trim()
+  const pl = state.playlists.find((p) => p.id === plId)
+  closeRenameModal()
+  if (!pl || !name || name === pl.name) return
+  const updated = await window.api.updatePlaylist(plId, { name })
+  if (updated) {
+    const i = state.playlists.findIndex((p) => p.id === plId)
+    if (i >= 0) state.playlists[i] = updated
+    renderPlaylists()
+    if (state.view === plId) renderView()
+    toast('已重命名为「' + name + '」')
   }
 }
 
@@ -2104,6 +2161,7 @@ function bindGlobalKeys() {
       UI.hideContextMenu()
       if (typeof Diag !== 'undefined' && Diag.isOpen()) { Diag.close(); e.preventDefault(); return }
       if (!UI.els.dirModal.hidden) { UI.hideDirModal(); e.preventDefault(); return }
+      if (!document.getElementById('renameModal').hidden) { closeRenameModal(); e.preventDefault(); return }
       if (inInput) { document.activeElement.blur(); e.preventDefault() }
       // 有选中项时 Esc 先清选中（v1.7）
       if (state.selected.size) { clearSelection(); e.preventDefault() }

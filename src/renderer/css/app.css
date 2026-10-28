@@ -1675,3 +1675,17 @@ body.mini .hifi-badge { display: none; }
 }
 .sel-btn:hover { color: var(--txt); border-color: var(--txt-3); background: var(--bg-hover); }
 .sel-btn svg { width: 12px; height: 12px; }
+
+/* ================= 歌单改名弹窗（v2.7） ================= */
+.rename-modal { width: 320px; }
+.rename-input {
+  width: 100%;
+  background: var(--bg-main);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--txt);
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+}
+.rename-input:focus { border-color: var(--accent); }
