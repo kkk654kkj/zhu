@@ -127,6 +127,15 @@
 
     <div class="table-body" id="tableBody"></div>
 
+    <!-- 多选工具条（v2.6）：Ctrl/Shift 选中歌曲后浮现 -->
+    <div class="sel-bar" id="selBar" hidden>
+      <span class="sel-count" id="selCount">已选 0 首</span>
+      <button class="sel-btn" data-sel="play"><svg><use href="#i-play"/></svg>播放</button>
+      <button class="sel-btn" data-sel="fav"><svg><use href="#i-heart"/></svg>收藏</button>
+      <button class="sel-btn" data-sel="addpl"><svg><use href="#i-plus"/></svg>加入歌单</button>
+      <button class="sel-btn" data-sel="clear"><svg><use href="#i-close"/></svg>取消选择</button>
+    </div>
+
     <div class="empty-state" id="emptyState" hidden>
       <svg><use href="#i-music"/></svg>
       <p id="emptyText">曲库为空</p>

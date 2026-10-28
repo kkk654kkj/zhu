@@ -551,9 +551,27 @@ const UI = {
     menu.style.left = Math.min(x, vw - rect.width - 8) + 'px'
     menu.style.top = Math.min(y, vh - rect.height - 8) + 'px'
 
+    // v2.6：子菜单防溢出——右侧放不下时向左弹
+    menu.querySelectorAll('.ctx-sub').forEach((el) => {
+      el.addEventListener('mouseenter', () => {
+        const sub = el.querySelector('.ctx-submenu')
+        if (!sub) return
+        sub.classList.remove('flip')
+        if (sub.getBoundingClientRect().right > vw - 8) sub.classList.add('flip')
+      })
+    })
+
+    // v2.6：含子菜单的父项点击不关菜单、不触发动作，改为展开/收起子菜单；
+    // 只有叶子项（data-act）才执行并关闭。
     const handler = (e) => {
+      const subParent = e.target.closest('.ctx-sub')
+      if (subParent && subParent.contains(e.target) && !e.target.closest('.ctx-submenu')) {
+        // 点在父项本体上 → 切换子菜单（悬停也能开，点击是给不知道悬停的人用的）
+        subParent.classList.toggle('open')
+        return
+      }
       const item = e.target.closest('.ctx-item[data-act]')
-      if (!item || e.target.closest('.ctx-submenu') !== null && !e.target.closest('.ctx-item[data-act]')) return
+      if (!item) return
       const act = item.dataset.act
       const arg = item.dataset.arg
       menu.hidden = true

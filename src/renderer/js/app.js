@@ -254,6 +254,11 @@ function paintSelection() {
   document.querySelectorAll('#tableBody .tr').forEach((row) => {
     row.classList.toggle('selected', state.selected.has(row.dataset.id))
   })
+  // 多选工具条（v2.6）：有选中才浮现
+  const bar = document.getElementById('selBar')
+  const n = state.selected.size
+  bar.hidden = n === 0
+  document.getElementById('selCount').textContent = '已选 ' + n + ' 首'
 }
 
 function clearSelection() {
@@ -1206,6 +1211,32 @@ function bindUI() {
     e.preventDefault()
     const track = state.byId.get(row.dataset.id)
     if (track) showTrackMenu(e.clientX, e.clientY, track)
+  })
+
+  // 多选工具条（v2.6）：播放 / 收藏 / 加入歌单 / 清除
+  document.getElementById('selBar').addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-sel]')
+    if (!btn) return
+    // 阻止冒泡到 document 的「点外部收起菜单/面板」监听，否则刚弹出的歌单菜单立即被关掉
+    e.stopPropagation()
+    const tracks = selectedTracks()
+    if (!tracks.length) return
+    const kind = btn.dataset.sel
+    if (kind === 'clear') { clearSelection(); return }
+    if (kind === 'play') {
+      player.setQueue(tracks, 0, true)
+      return
+    }
+    // fav / addpl 复用右键菜单的动作管道
+    currentMenuTrack = tracks[0]
+    currentMenuTracks = tracks
+    if (kind === 'fav') { handleCtxAction('fav'); return }
+    if (kind === 'addpl') {
+      const r = btn.getBoundingClientRect()
+      UI.showContextMenu(r.left, r.bottom + 6, state.playlists.length
+        ? state.playlists.map((p) => ({ label: p.name, act: 'add-pl', arg: p.id }))
+        : [{ label: '（暂无歌单）', act: 'noop' }])
+    }
   })
 
   // 表头排序
