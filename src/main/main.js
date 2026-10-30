@@ -1628,8 +1628,8 @@ function toClientTrack(t) {
 
 logLine('stage: dataDir=' + DATA_DIR)
 
-// 单实例锁：部分环境建锁文件会失败（返回 false 甚至直接 abort），
-// 不能让它挡住启动——拿不到锁就当作单实例降级处理。
+// 单实例锁：拿不到锁 = 已有实例在运行（Electron 会向其发送 second-instance 事件，
+// 由那边弹出/聚焦窗口）。此时本进程必须直接退出，否则会开双实例（抢 mpv、抢缓存）。
 let gotLock = false
 try {
   gotLock = app.requestSingleInstanceLock()
@@ -1638,7 +1638,8 @@ try {
 }
 logLine('stage: lock=' + gotLock)
 if (!gotLock) {
-  logLine('WARN 未获取单实例锁，继续启动')
+  logLine('已有实例在运行，本进程退出')
+  app.exit(0)
 }
 
 // 只在确认是唯一实例时清缓存：多实例情况下删的是正在运行实例的文件（多半删不掉）
