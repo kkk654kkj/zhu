@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld('api', {
 
   /* ---- 联网版（v3.0）：在线音乐 ---- */
   onlineSources: () => invoke('online:sources'),
+  onlineProxyBase: () => invoke('online:proxyBase'),
   onlineSearch: (opts) => invoke('online:search', opts),
   /** 解析播放地址：{ ok, streamUrl, song, fallback, partial, bitrate, error } */
   onlinePlayable: (song) => invoke('online:playable', song),
@@ -58,6 +59,15 @@ contextBridge.exposeInMainWorld('api', {
   onlineCancelDownload: (key) => invoke('online:cancelDownload', key),
   onlinePickDownloadDir: () => invoke('online:pickDownloadDir'),
   onlineOpenDownloadDir: () => invoke('online:openDownloadDir'),
+  onlineCacheInfo: () => invoke('online:cacheInfo'),
+  onlineCacheClear: () => invoke('online:cacheClear'),
+  onlinePickCacheDir: () => invoke('online:pickCacheDir'),
+  onlineOpenCacheDir: () => invoke('online:openCacheDir'),
+  onNowPlaying: (cb) => {
+    const h = (_e, p) => cb(p)
+    ipcRenderer.on('online:now-playing', h)
+    return () => ipcRenderer.removeListener('online:now-playing', h)
+  },
   onDownloadProgress: (cb) => {
     const h = (_e, p) => cb(p)
     ipcRenderer.on('online:download-progress', h)

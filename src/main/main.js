@@ -274,6 +274,212 @@ function ensureStreamBase() {
   return streamReady || Promise.resolve('')
 }
 
+/* ---------------- 联网版：在线音乐缓存 ---------------- */
+
+/**
+ * 缓存「放过的在线音频」，下次再放同一首直接从磁盘出，不再走网络。
+ * 对无损尤其关键：一首 flac 几十上百 MB，重放不该再等一遍。
+ *
+ * 索引单独存一份 json：界面要显示「几首 / 占多大」，
+ * 每次遍历目录累加太慢（用久了这里会有几百个文件）。
+ */
+const CACHE_INDEX = 'index.json'
+let cacheIdx = null // { <key>: { file, title, artist, ext, size, at } }
+
+function cacheDirPath() {
+  const custom = String(store.get().settings.onlineCacheDir || '').trim()
+  return custom || path.join(DATA_DIR, 'music-cache')
+}
+
+function cacheLoad() {
+  if (cacheIdx) return cacheIdx
+  cacheIdx = {}
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(cacheDirPath(), CACHE_INDEX), 'utf8'))
+    if (j && typeof j === 'object') cacheIdx = j
+  } catch (err) { /* 没索引 = 空缓存 */ }
+  return cacheIdx
+}
+
+function cacheSave() {
+  try {
+    fs.mkdirSync(cacheDirPath(), { recursive: true })
+    fs.writeFileSync(path.join(cacheDirPath(), CACHE_INDEX), JSON.stringify(cacheIdx || {}))
+  } catch (err) {
+    logLine('[cache] 索引写入失败', err.message)
+  }
+}
+
+/**
+ * 缓存按「实际拿到的音质」分类，不能按「请求的音质」。
+ * 否则无损没取到时降级下来的 128k mp3 会被存成 flac，
+ * 用户下次以为在听无损，其实是一首糊的。
+ */
+function cacheClassOf(info) {
+  const ext = String((info && info.ext) || '').toLowerCase()
+  if ((info && info.lossless) || ext === 'flac') return 'flac'
+  return (Number(info && info.bitrate) || 0) > 128 ? 'best' : '128'
+}
+
+function cacheKeyOf(song, cls) {
+  return `${song.source}_${song.id}_${cls}`
+}
+
+/** 请求的音质 → 可以接受的缓存档位（从优到次） */
+function cacheKeysFor(prefer) {
+  if (prefer === 'lossless') return ['flac']
+  if (prefer === '128k') return ['128', 'best']   // 省流量不吃 flac（动辄上百 MB）
+  return ['best', 'flac']                          // 音质优先时 flac 当然更好
+}
+
+/** 命中返回 { path, rec, cls }；文件被手动删掉或大小对不上就当作没缓存 */
+function cacheTry(song, cls) {
+  const idx = cacheLoad()
+  const key = cacheKeyOf(song, cls)
+  const rec = idx[key]
+  if (!rec) return null
+  const fp = path.join(cacheDirPath(), rec.file)
+  try {
+    const st = fs.statSync(fp)
+    if (!st.isFile() || st.size !== rec.size) {
+      delete idx[key]
+      return null
+    }
+    rec.at = Date.now() // 命中即刷新，做 LRU
+    return { path: fp, rec, cls }
+  } catch (err) {
+    delete idx[key]
+    return null
+  }
+}
+
+function cacheHit(song, prefer) {
+  for (const cls of cacheKeysFor(prefer)) {
+    const hit = cacheTry(song, cls)
+    if (hit) return hit
+  }
+  return null
+}
+
+function cacheTotalBytes() {
+  const idx = cacheLoad()
+  return Object.values(idx).reduce((s, x) => s + (Number(x.size) || 0), 0)
+}
+
+function cachePut(key, file, meta, size) {
+  const idx = cacheLoad()
+  idx[key] = {
+    file,
+    title: meta.title || '',
+    artist: meta.artist || '',
+    ext: meta.ext || '',
+    size,
+    at: Date.now()
+  }
+  cacheSave()
+  cacheEvict()
+}
+
+/** 超过上限就按最久没放过的删，删到上限的 80%，别每次都贴着边删 */
+function cacheEvict() {
+  const limitMB = Number(store.get().settings.onlineCacheLimitMB) || 0
+  if (limitMB <= 0) return
+  const idx = cacheLoad()
+  const items = Object.keys(idx).map((k) => ({ k, v: idx[k] }))
+  let total = items.reduce((s, x) => s + (Number(x.v.size) || 0), 0)
+  const limit = limitMB * 1048576
+  if (total <= limit) return
+  items.sort((a, b) => (Number(a.v.at) || 0) - (Number(b.v.at) || 0))
+  const target = limit * 0.8
+  let removed = 0
+  for (const it of items) {
+    if (total <= target) break
+    try { fs.unlinkSync(path.join(cacheDirPath(), it.v.file)) } catch (err) { /* 已经没了 */ }
+    delete idx[it.k]
+    total -= Number(it.v.size) || 0
+    removed++
+  }
+  if (removed) {
+    cacheSave()
+    logLine('[cache] 超出上限，清理了', removed, '首，现', (total / 1048576).toFixed(0) + 'MB')
+  }
+}
+
+/** 启动时清掉上次异常退出留下的 .part（进程被杀时来不及自己收） */
+function cacheCleanupParts() {
+  try {
+    const dir = cacheDirPath()
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.part')) continue
+      try { fs.unlinkSync(path.join(dir, f)) } catch (err) { /* 忽略 */ }
+    }
+  } catch (err) { /* 目录还不存在 */ }
+}
+
+/** 只删索引里登记过的文件和 .part 残留，绝不碰目录里别的东西 */
+function cacheClear() {
+  const idx = cacheLoad()
+  const dir = cacheDirPath()
+  let n = 0
+  for (const k of Object.keys(idx)) {
+    try { fs.unlinkSync(path.join(dir, idx[k].file)); n++ } catch (err) { /* 忽略 */ }
+  }
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (f.endsWith('.part')) { try { fs.unlinkSync(path.join(dir, f)) } catch (err) { /* 忽略 */ } }
+    }
+  } catch (err) { /* 目录不存在 */ }
+  cacheIdx = {}
+  cacheSave()
+  return { removed: n }
+}
+
+function cacheStats() {
+  const idx = cacheLoad()
+  const items = Object.values(idx)
+  return {
+    dir: cacheDirPath(),
+    count: items.length,
+    size: items.reduce((s, x) => s + (Number(x.size) || 0), 0),
+    limitMB: Number(store.get().settings.onlineCacheLimitMB) || 0,
+    enabled: store.get().settings.onlineCacheOn !== false
+  }
+}
+
+/** 从磁盘出流，支持 Range（拖动进度条要靠它） */
+function serveLocalFile(filePath, req, res) {
+  const stat = fs.statSync(filePath)
+  const total = stat.size
+  const base = {
+    'Content-Type': mimeFor(filePath),
+    'Accept-Ranges': 'bytes',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-store'
+  }
+  const range = req.headers.range
+  if (range) {
+    const m = /bytes=(\d*)-(\d*)/.exec(range)
+    let start = m && m[1] ? parseInt(m[1], 10) : 0
+    let end = m && m[2] ? parseInt(m[2], 10) : total - 1
+    if (!Number.isFinite(start) || start < 0) start = 0
+    if (!Number.isFinite(end) || end >= total) end = total - 1
+    if (start > end) {
+      res.writeHead(416, { 'Content-Range': `bytes */${total}` })
+      res.end()
+      return
+    }
+    res.writeHead(206, {
+      ...base,
+      'Content-Length': String(end - start + 1),
+      'Content-Range': `bytes ${start}-${end}/${total}`
+    })
+    fs.createReadStream(filePath, { start, end }).pipe(res)
+    return
+  }
+  res.writeHead(200, { ...base, 'Content-Length': String(total) })
+  fs.createReadStream(filePath).pipe(res)
+}
+
 function startStreamServer() {
   const http = require('http')
   let readyResolve = () => {}
@@ -300,11 +506,47 @@ function startStreamServer() {
         album: '',
         duration: Number(u.searchParams.get('d')) || 0
       }
+      // 先看缓存：命中就连解析都省了（无损解析要 1~7 秒，重放不该再等）
+      const cacheOn = store.get().settings.onlineCacheOn !== false
+      if (cacheOn) {
+        const hit = cacheHit(song, prefer)
+        if (hit) {
+          logLine('[cache] 命中', path.basename(hit.path))
+          sendToRenderer('online:now-playing', {
+            id: `${source}:${id}`,
+            song: { title: hit.rec.title || song.title, artist: hit.rec.artist || song.artist },
+            lossless: hit.cls === 'flac',
+            bitrate: 0,
+            ext: hit.rec.ext || path.extname(hit.path).slice(1),
+            cached: true
+          })
+          serveLocalFile(hit.path, req, res)
+          return
+        }
+      }
       const info = await online.getPlayable(song, prefer)
       if (!info || !info.url) {
         logLine('[online] 代理无地址', source, id)
         res.writeHead(404).end('no source')
         return
+      }
+      // 解析出来的实际音质如果正好有缓存，就别再拉一遍流。
+      // （无损请求在「网易没这首/只有 mp3」时会降级，降级档位同样值得复用缓存）
+      if (cacheOn) {
+        const hit2 = cacheTry(song, cacheClassOf(info))
+        if (hit2) {
+          logLine('[cache] 命中(降级档)', path.basename(hit2.path))
+          sendToRenderer('online:now-playing', {
+            id: `${source}:${id}`,
+            song: { title: hit2.rec.title || song.title, artist: hit2.rec.artist || song.artist },
+            lossless: hit2.cls === 'flac',
+            bitrate: info.bitrate || 0,
+            ext: hit2.rec.ext || info.ext,
+            cached: true
+          })
+          serveLocalFile(hit2.path, req, res)
+          return
+        }
       }
       const headers = { 'User-Agent': 'Mozilla/5.0' }
       if (info.referer) headers.Referer = info.referer
@@ -326,16 +568,135 @@ function startStreamServer() {
         const v = upstream.headers.get(k)
         if (v) out[k.replace(/(^|-)([a-z])/g, (m, a, b) => a + b.toUpperCase())] = v
       }
-      res.writeHead(upstream.status === 206 ? 206 : 200, out)
-      const reader = upstream.body.getReader()
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (!res.write(Buffer.from(value))) {
-          await new Promise((r) => res.once('drain', r))
+      // 只有「从头整段请求」才顺手存缓存；用户拖进度条发来的 Range 请求
+      // 存下来的是一段残片，反而会把缓存搞脏。
+      const rangeHdr = String(req.headers.range || '').trim()
+      const canCache = cacheOn && (!rangeHdr || /^bytes=0-$/.test(rangeHdr))
+      const cKey = cacheKeyOf(song, cacheClassOf(info))
+      let partPath = null
+      let partStream = null
+      let partBytes = 0
+      if (canCache) {
+        try {
+          fs.mkdirSync(cacheDirPath(), { recursive: true })
+          // 每个请求用自己的临时文件名：同一首歌可能被连点两次，
+          // 共用一个 .part 的话，先结束的那个会把后一个正在写的文件删掉。
+          const uniq = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+          partPath = path.join(cacheDirPath(), `${cKey}.${uniq}.part`)
+          partStream = fs.createWriteStream(partPath)
+          partStream.on('error', () => { partStream = null })
+        } catch (err) {
+          partPath = null
+          partStream = null
         }
       }
-      res.end()
+      const dropPart = () => {
+        const ps = partStream
+        const p = partPath
+        partStream = null
+        partPath = null
+        if (!p) return
+        // Windows 上不能删一个还开着的文件，得等流真正关了再删
+        const del = () => { try { fs.unlinkSync(p) } catch (e) { /* 忽略 */ } }
+        if (!ps) { del(); return }
+        try {
+          ps.once('close', del)
+          ps.destroy()
+        } catch (e) {
+          del()
+        }
+      }
+      // 收尾：字节数和预期一致才算缓存成功，半截的直接丢
+      const finishCache = () => {
+        if (!partStream || !partPath) return
+        const expect = Number(out['Content-Length']) || 0
+        const target = partPath
+        const key = cKey
+        const meta = { title: info.song ? info.song.title : song.title, artist: info.song ? info.song.artist : song.artist, ext: info.ext }
+        const stream = partStream
+        partStream = null
+        partPath = null
+        stream.end(() => {
+          if (!expect || partBytes !== expect) {
+            try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
+            return
+          }
+          const file = `${key}.${meta.ext || 'mp3'}`
+          try {
+            const target2 = path.join(cacheDirPath(), file)
+            // 另一个并发请求可能已经先写完了，那就用它的
+            if (fs.existsSync(target2)) {
+              try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
+              return
+            }
+            fs.renameSync(target, target2)
+            cachePut(key, file, meta, partBytes)
+            logLine('[cache] 缓存完成', file, (partBytes / 1048576).toFixed(1) + 'MB')
+          } catch (e) {
+            try { fs.unlinkSync(target) } catch (e2) { /* 忽略 */ }
+          }
+        })
+      }
+      res.writeHead(upstream.status === 206 ? 206 : 200, out)
+      // 告诉界面「这首实际是什么音质」——界面拿到的是解析时那一刻的结论，
+      // 而真正取流发生在这里，两边可能不一致（第一次解析失败、重试成功之类）。
+      sendToRenderer('online:now-playing', {
+        id: `${source}:${id}`,
+        song: info.song ? { title: info.song.title, artist: info.song.artist } : null,
+        lossless: !!info.lossless,
+        bitrate: info.bitrate || 0,
+        ext: info.ext || 'mp3',
+        cached: false
+      })
+      const reader = upstream.body.getReader()
+      // 客户端一断开（切歌、拖进度条）就把上游和写盘一起收掉。
+      // 只等 'drain' 是不够的：连接没了就没有 drain，这个请求会永远悬着。
+      let aborted = false
+      const onClose = () => {
+        if (res.writableFinished) return
+        aborted = true
+        try { reader.cancel() } catch (e) { /* 已结束 */ }
+        dropPart()
+      }
+      res.on('close', onClose)
+      const waitDrain = (emitter) => new Promise((r) => {
+        let done = false
+        const go = () => {
+          if (done) return
+          done = true
+          emitter.off('drain', go)
+          emitter.off('close', go)
+          r()
+        }
+        emitter.once('drain', go)
+        emitter.once('close', go)
+        setTimeout(go, 3000) // 宁可丢掉缓存，也不能卡住播放
+      })
+      let complete = false
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (aborted) break
+          const buf = Buffer.from(value)
+          const ps = partStream
+          if (ps) {
+            partBytes += buf.length
+            // 磁盘跟不上就先等写盘，否则 100MB 的 flac 会在内存里堆起来
+            if (!ps.write(buf)) await waitDrain(ps)
+          }
+          if (!res.write(buf)) await waitDrain(res)
+        }
+        complete = !aborted
+      } catch (err) {
+        complete = false
+      } finally {
+        res.off('close', onClose)
+        // 正常读完才落缓存；中途断开就把残片丢掉
+        if (complete) finishCache()
+        else dropPart()
+      }
+      try { res.end() } catch (e) { /* 已断开 */ }
     } catch (err) {
       logLine('[online] 代理异常', err.message)
       try { res.writeHead(500).end('proxy error') } catch (e) { /* 已断开 */ }
@@ -396,7 +757,11 @@ const DEFAULT_SETTINGS = {
   // 联网版（v3.0）：在线音乐
   onlineDownloadDir: '',       // 下载目录，'' = 默认「音乐\猪专属下载」
   onlineSources: ['kw', 'qq', 'kg', 'wy'],  // 参与搜索的音源（顺序即合并优先级）
-  onlineQuality: 'best'        // best | 128k
+  onlineQuality: 'lossless',   // lossless（能拿 flac 就拿，拿不到自动降级）| best | 128k
+  onlineQualityMigrated: false,// v3.1 一次性迁移标记（老版本默认 best → lossless）
+  onlineCacheOn: true,         // 播放时顺手把音频缓存到本地
+  onlineCacheDir: '',          // 缓存目录，'' = 数据目录\music-cache
+  onlineCacheLimitMB: 4096     // 缓存上限（MB），0 = 不限；超了按最久没放的删
 }
 
 // 迷你卡片默认尺寸 / 尺寸下限
@@ -1231,6 +1596,14 @@ function downloadDir() {
 /** 正在下载的任务：key=源:id → { cancelled } */
 const activeDownloads = new Map()
 
+/** 音质设置 → 各音源认的 prefer 值（只有 lossless / best / 128k 三种） */
+function qualityPref() {
+  const q = store.get().settings.onlineQuality
+  if (q === 'lossless') return 'lossless'
+  if (q === '128k') return '128k'
+  return 'best'
+}
+
 function registerIpc() {
   // —— 音乐库 ——
   // 扫库期间 lib:list 必须等待扫描结束，否则渲染进程会读到半成品列表
@@ -1457,7 +1830,7 @@ function registerIpc() {
    */
   ipcMain.handle('online:playable', async (e, song) => {
     if (!song || !song.source || !song.id) return { ok: false, error: '参数不完整' }
-    const prefer = store.get().settings.onlineQuality === '128k' ? '128k' : 'best'
+    const prefer = qualityPref()
     try {
       const info = await online.getPlayable(song, prefer)
       if (!info) return { ok: false, error: '各音源都没有这首歌的可用地址（多半是版权限制）' }
@@ -1475,6 +1848,7 @@ function registerIpc() {
         song: actual,
         fallback: !!info.fallback,
         partial: !!info.partial,
+        lossless: !!info.lossless,
         bitrate: info.bitrate || 0,
         ext: info.ext || 'mp3',
         size: info.size || 0
@@ -1496,7 +1870,7 @@ function registerIpc() {
   ipcMain.handle('online:download', async (e, song) => {
     if (!song || !song.source || !song.id) return { ok: false, error: '参数不完整' }
     const dir = downloadDir()
-    const prefer = store.get().settings.onlineQuality === '128k' ? '128k' : 'best'
+    const prefer = qualityPref()
     const key = `${song.source}:${song.id}`
     if (activeDownloads.has(key)) return { ok: false, error: '这首正在下载中' }
 
@@ -1549,6 +1923,37 @@ function registerIpc() {
 
   ipcMain.handle('online:openDownloadDir', async () => {
     const dir = downloadDir()
+    try {
+      await fsp.mkdir(dir, { recursive: true })
+      shell.openPath(dir)
+    } catch (err) { /* 忽略 */ }
+    return dir
+  })
+
+  // —— 联网版：在线缓存 ——
+  ipcMain.handle('online:cacheInfo', () => cacheStats())
+
+  ipcMain.handle('online:cacheClear', () => {
+    const r = cacheClear()
+    logLine('[cache] 用户清理缓存，删除', r.removed, '首')
+    return { ...cacheStats(), removed: r.removed }
+  })
+
+  ipcMain.handle('online:pickCacheDir', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: '选择缓存目录',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (res.canceled || !res.filePaths.length) return null
+    const dir = res.filePaths[0]
+    // 换目录不动老文件：用户可能还想手动找回；真要腾地方有「清理缓存」
+    cacheIdx = null
+    store.patch({ settings: { ...store.get().settings, onlineCacheDir: dir } })
+    return cacheStats()
+  })
+
+  ipcMain.handle('online:openCacheDir', async () => {
+    const dir = cacheDirPath()
     try {
       await fsp.mkdir(dir, { recursive: true })
       shell.openPath(dir)
@@ -1927,6 +2332,17 @@ if (gotLock) cleanChromiumCache()
     // v2.1：恢复「播放结束后」的设定（关机这类动作要跨重启记住）
     powerAfterQueue = store.get().settings.powerAfterQueue || 'off'
 
+    // v3.1 一次性迁移：老版本的音质默认是 best，新版本默认无损。
+    // 只在「从没迁移过」时动一次，之后用户自己选什么就是什么。
+    {
+      const st0 = store.get().settings
+      if (!st0.onlineQualityMigrated) {
+        const q = st0.onlineQuality === '128k' ? '128k' : 'lossless'
+        store.patch({ settings: { ...st0, onlineQuality: q, onlineQualityMigrated: true } })
+        logLine('[settings] 音质迁移到', q)
+      }
+    }
+
     // 异步清上次残留的 mpv，不阻塞启动
     killOrphanMpv()
 
@@ -1936,6 +2352,7 @@ if (gotLock) cleanChromiumCache()
       lyricDir: path.join(userData, 'lyrics')
     })
 
+    cacheCleanupParts()
     registerFileProtocol()
     registerCoverProtocol()
     online.setLogger(logLine)

@@ -1070,6 +1070,77 @@ function toggleAudioPanel(show) {
   panel.hidden = !target
 }
 
+/* ================= 在线缓存面板（v3.1） ================= */
+
+function toggleCachePanel(show) {
+  const panel = document.getElementById('cachePanel')
+  const target = show === undefined ? panel.hidden : !!show
+  panel.hidden = !target
+  if (target) refreshCachePanel()
+}
+
+function fmtSize(bytes) {
+  const b = Number(bytes) || 0
+  if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'
+  if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB'
+  return Math.max(0, Math.round(b / 1024)) + ' KB'
+}
+
+/** 面板上的「共几首 / 占多少」+ 目录 + 开关状态 */
+async function refreshCachePanel() {
+  const info = await window.api.onlineCacheInfo().catch(() => null)
+  if (!info) return
+  const usage = document.getElementById('cacheUsage')
+  usage.textContent = info.count ? `${info.count} 首 · ${fmtSize(info.size)}` : '还没有缓存'
+  usage.classList.toggle('off', !info.count)
+  const p = document.getElementById('cachePath')
+  p.textContent = info.dir
+  p.title = info.dir
+  document.getElementById('cacheOn').checked = info.enabled
+  const sel = document.getElementById('cacheLimit')
+  const lim = String(info.limitMB || 0)
+  if (!Array.from(sel.options).some((o) => o.value === lim)) {
+    const opt = document.createElement('option')
+    opt.value = lim
+    opt.textContent = lim === '0' ? '不限' : Math.round(Number(lim) / 1024) + ' GB'
+    sel.appendChild(opt)
+  }
+  sel.value = lim
+  return info
+}
+
+function bindCachePanel() {
+  document.getElementById('btnCacheClose').addEventListener('click', () => toggleCachePanel(false))
+  document.getElementById('cacheOn').addEventListener('change', async (e) => {
+    const on = e.target.checked
+    state.settings.onlineCacheOn = on
+    await window.api.patchSettings({ onlineCacheOn: on }).catch(() => {})
+    toast(on ? '已开启在线缓存' : '已关闭在线缓存')
+  })
+  document.getElementById('cacheLimit').addEventListener('change', async (e) => {
+    const mb = Number(e.target.value) || 0
+    state.settings.onlineCacheLimitMB = mb
+    await window.api.patchSettings({ onlineCacheLimitMB: mb }).catch(() => {})
+    toast(mb ? '缓存上限：' + (mb >= 1024 ? mb / 1024 + ' GB' : mb + ' MB') : '缓存不设上限')
+    refreshCachePanel()
+  })
+  document.getElementById('cachePickDir').addEventListener('click', async () => {
+    const info = await window.api.onlinePickCacheDir().catch(() => null)
+    if (!info) return
+    state.settings.onlineCacheDir = info.dir
+    toast('缓存目录：' + info.dir, 3000)
+    refreshCachePanel()
+  })
+  document.getElementById('cacheOpenDir').addEventListener('click', () => window.api.onlineOpenCacheDir())
+  document.getElementById('cacheClear').addEventListener('click', async () => {
+    const info = await refreshCachePanel()
+    if (info && !info.count) { toast('缓存已经是空的'); return }
+    const r = await window.api.onlineCacheClear().catch(() => null)
+    toast(r ? `已清理 ${r.removed} 首缓存` : '清理失败')
+    refreshCachePanel()
+  })
+}
+
 async function refreshAudioDevices() {
   if (audioDevicesLoading) return
   audioDevicesLoading = true
@@ -1497,6 +1568,7 @@ function bindUI() {
     toggleSleepPanel()
   })
   document.getElementById('btnSleepClose').addEventListener('click', () => toggleSleepPanel(false))
+  bindCachePanel()
   document.getElementById('sleepOpts').addEventListener('click', (e) => {
     const chip = e.target.closest('.sp-chip')
     if (!chip) return

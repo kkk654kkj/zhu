@@ -1901,3 +1901,49 @@ body.mini .hifi-badge { display: none; }
   width: 0;
   transition: width .15s linear;
 }
+
+/* ================= 在线缓存面板（v3.1） ================= */
+#cachePanel {
+  position: fixed;
+  right: 12px;
+  bottom: calc(var(--pb-h) + 12px);
+  width: 304px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 14px 44px rgba(0,0,0,.55);
+  z-index: 40;
+  overflow: hidden;
+}
+#cachePanel .sp-count { font-size: 18px; padding: 12px 12px 2px; }
+.cp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 0;
+  font-size: 12px;
+}
+.cp-label { color: var(--txt-3); flex: none; }
+.cp-path {
+  color: var(--txt-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+  font-size: 11px;
+}
+.cp-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--txt-2);
+  cursor: pointer;
+  user-select: none;
+}
+.cp-check input { accent-color: var(--accent); width: 14px; height: 14px; }
+.sp-chip.danger { color: #e06666; border-color: rgba(224,102,102,.4); }
+.sp-chip.danger:hover { color: #ff8080; border-color: #e06666; background: rgba(224,102,102,.1); }
+#cachePanel .op-select { margin-left: auto; }

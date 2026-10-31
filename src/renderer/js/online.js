@@ -7,6 +7,14 @@
  * 会出现「切下一首就放不出来」。
  */
 
+/** 音质设置的统一出口：主进程只认 lossless / best / 128k 三个值 */
+function qualityKey() {
+  const q = state.settings && state.settings.onlineQuality
+  if (q === 'lossless') return 'lossless'
+  if (q === '128k') return '128k'
+  return 'best'
+}
+
 const Online = {
   list: [],            // 当前搜索结果（OnlineSong）
   keyword: '',
@@ -15,6 +23,7 @@ const Online = {
   loading: false,
   playingId: null,     // 当前正在播的在线曲目 id（on:<src>:<id>）
   sources: [],         // 全部可用源（主进程返回）
+  proxyBase: '',       // 本地代理基地址 http://127.0.0.1:<port>
   enabled: new Set(),  // 本次参与搜索的源
   downloads: new Map(),// key → { received, total }
   _ready: false,
@@ -27,17 +36,43 @@ const Online = {
     } catch (err) {
       this.sources = []
     }
+    // 本地代理的基地址（端口是主进程启动时随机分配的，必须问一次）
+    try {
+      this.proxyBase = await window.api.onlineProxyBase()
+    } catch (err) {
+      this.proxyBase = ''
+    }
     const cfg = (state.settings && state.settings.onlineSources) || ['kw', 'qq', 'kg', 'wy']
     this.enabled = new Set(cfg.filter((id) => this.sources.some((s) => s.id === id)))
     if (!this.enabled.size && this.sources.length) this.enabled.add(this.sources[0].id)
 
     const sel = document.getElementById('opQuality')
-    if (sel) sel.value = (state.settings && state.settings.onlineQuality) || 'best'
+    if (sel) sel.value = qualityKey()
 
     this.renderSources()
     this.bind()
     window.api.onDownloadProgress((p) => this.onProgress(p))
     window.api.onDownloadDone((p) => this.onDone(p))
+    window.api.onNowPlaying((p) => this.onNowPlaying(p))
+  },
+
+  /**
+   * 主进程取流时才真正知道拿到的是什么音质，可能和点播那一刻的结论不一样：
+   * 点播时解析失败（网络抖动 / 网易限流）会先报 320k，紧接着取流重试成功就是 flac。
+   * 与其让界面撒谎，不如等这条事件把它纠正过来。
+   */
+  onNowPlaying(p) {
+    const cur = player.current
+    if (!cur || !cur.online || !p) return
+    if ((cur.onlineKey || '') !== p.id) return
+    if (p.lossless && !cur.lossless) {
+      cur.lossless = true
+      cur.ext = 'FLAC'
+      toast('这首其实拿到了无损 FLAC' + (p.bitrate ? ' · ' + p.bitrate + 'k' : '') + (p.cached ? '（来自缓存）' : ''))
+    } else if (!p.lossless && cur.lossless) {
+      cur.lossless = false
+      toast('无损这次没取到，已按 ' + (p.bitrate || 320) + 'k 播放')
+    }
   },
 
   /* ---------------- 界面 ---------------- */
@@ -77,8 +112,11 @@ const Online = {
     document.getElementById('opQuality').addEventListener('change', (e) => {
       window.api.patchSettings({ onlineQuality: e.target.value }).catch(() => {})
       state.settings.onlineQuality = e.target.value
-      toast(e.target.value === '128k' ? '已切换：省流量（128k 优先）' : '已切换：音质优先')
+      const label = { lossless: '无损优先（拿不到自动降级）', best: '音质优先（320k）', '128k': '省流量（128k）' }
+      toast('已切换：' + (label[e.target.value] || e.target.value))
     })
+
+    document.getElementById('opCacheBtn').addEventListener('click', () => toggleCachePanel())
 
     document.getElementById('opDirBtn').addEventListener('click', async () => {
       const dir = await window.api.onlinePickDownloadDir()
@@ -224,11 +262,11 @@ const Online = {
       return
     }
     const actual = r.song || song
-    const track = this.toTrack(actual, r)
+    const track = this.toTrack(song, r)
+    // 队列取「用户点的那个源」这一批，跟界面上看到的列表一致
     const queue = this.list
-      .filter((s) => s.source === actual.source)
+      .filter((s) => s.source === song.source)
       .map((s) => this.toTrack(s, null))
-    // 队列里的曲目尚未解析，audio 先挂 lxstream 地址（协议层会现取），当前这首用已验证的
     const idx = queue.findIndex((t) => t.id === track.id)
     if (idx >= 0) queue[idx] = track
     else queue.unshift(track)
@@ -240,7 +278,8 @@ const Online = {
     const notes = []
     if (r.fallback) notes.push('已自动换源：' + (this.sources.find((s) => s.id === actual.source)?.name || actual.source))
     if (r.partial) notes.push('仅试听片段')
-    if (r.bitrate) notes.push(r.bitrate + 'k')
+    if (r.lossless) notes.push('无损 FLAC' + (r.bitrate ? ' ' + r.bitrate + 'k' : ''))
+    else if (r.bitrate) notes.push(r.bitrate + 'k')
     this.setStatus(
       `▶ ${esc(actual.title)} — ${esc(actual.artist)}` + (notes.length ? '（' + notes.join(' · ') + '）' : ''),
       this.hasMore
@@ -248,18 +287,28 @@ const Online = {
     if (r.partial) toast('这首只有试听片段（版权限制），要完整版请换源或另找', 3500)
   },
 
-  /** OnlineSong → player 能吃的 ClientTrack */
-  toTrack(song, resolved) {
+  /** 这首歌在本机代理上的地址（解析交给主进程，播到才做） */
+  streamUrlFor(song) {
     const q = new URLSearchParams({
-      q: (state.settings && state.settings.onlineQuality) === '128k' ? '128k' : 'best',
+      q: qualityKey(),
       t: song.title || '',
       a: song.artist || '',
       d: String(song.duration || 0)
     })
+    return `${this.proxyBase}/stream?src=${encodeURIComponent(song.source)}&id=${encodeURIComponent(song.id)}&${q}`
+  },
+
+  /** OnlineSong → player 能吃的 ClientTrack */
+  toTrack(song, resolved) {
+    // 取流地址一律用「用户点的那首」拼，不用换源后的结果：
+    // 主进程的缓存键挂在地址上，如果跟着换源结果走，
+    // 同一行点两次（一次直连、一次换源）就会变成两份互不相认的缓存。
+    const actual = (resolved && resolved.song) || song
     return {
       id: `on:${song.source}:${song.id}`,
-      online: song,                       // 歌词/下载都靠它回到主进程
-      audio: resolved ? resolved.streamUrl : `lxstream://play/${song.source}/${encodeURIComponent(song.id)}?${q}`,
+      online: actual,                     // 歌词/下载用实际发声的那首
+      onlineKey: `${song.source}:${song.id}`,
+      audio: this.streamUrlFor(song),
       title: song.title,
       artist: song.artist,
       album: song.album || '',
@@ -267,7 +316,7 @@ const Online = {
       cover: song.cover || null,
       hasLyric: true,
       ext: (resolved && resolved.ext ? resolved.ext : 'mp3').toUpperCase(),
-      lossless: false,
+      lossless: !!(resolved && resolved.lossless),
       isDsd: false,
       onlineBitrate: resolved ? resolved.bitrate : 0,
       path: null

@@ -553,13 +553,127 @@ async function probeStream(info, realDuration, expectDuration = 0) {
   }
 }
 
+/* ---------------- 无损：借聚合 API 取网易的 flac ---------------- */
+
 /**
- * 取播放直链（对外入口）：先解析，再按需抢救音质。
+ * 折腾了一圈才定下这条路，记录一下各家现状（2026-10 实测）：
+ *
+ *  · 酷我：mobi.s 换直链带 br=flac 也只回 11 秒 / bitrate=1，VIP 歌一律试听；
+ *  · 咪咕：listenSong.do?toneFlag=SQ 要么「暂不提供试听地址」，要么给 mp3，不是 flac；
+ *  · 酷狗：trackercdn br=flac 全返回 status=2（无授权）；
+ *  · 网易：自己的 eapi 要登录态，但公开的聚合 API 能用「网易 id + br=999」直接换到 flac。
+ *
+ * 洛雪那些音源脚本看着什么平台都能无损，实际都是走各家的自建中转服务器
+ * （脚本里能看到 97.64.x.x 之类地址），依赖别人的账号和带宽，说不准哪天就没了，
+ * 不适合塞进这个离线可用的播放器。所以只接「查得到 id 就能换」的这一条。
+ *
+ * 代价是覆盖面受网易曲库限制：周杰伦这类网易没版权的，原唱在网易索引里根本搜不到，
+ * 出来全是翻唱。所以这里的校验必须狠——宁可退回 320k 原唱，也不能给用户一个翻唱 flac。
+ */
+const GD_API = 'https://music-api.gdstudio.xyz/api.php'
+const FLAC_PREFER = 'lossless'
+
+/** 这首歌在网易有没有对得上的条目（歌手必须一致，时长差太多不要） */
+async function neteaseTwin(song) {
+  if (song.source === 'wy' && song.id) return song
+  try {
+    const list = await SOURCES.wy.search(`${song.title} ${song.artist}`.trim(), 1, 20)
+    return rankMatches(list, song)[0] || null
+  } catch (err) {
+    return null
+  }
+}
+
+/**
+ * 拿无损直链。返回 null 表示「这首歌拿不到无损」，调用方直接降级即可。
+ * 注意聚合 API 的搜索接口极慢（实测 7~90 秒），所以只用它的 url 接口。
+ */
+async function resolveLossless(song, prefer) {
+  const twin = await neteaseTwin(song)
+  if (!twin) return null
+  const askUrl = () => reqJson(`${GD_API}?types=url&source=netease&id=${encode(twin.id)}&br=999`, { timeout: 7000 })
+  // 这个聚合 API 抖动挺厉害，同一首歌两次跑结果可能不同。
+  // 拿不到响应（超时/502）就再问一次；但它明确回了一个非 flac 地址，说明这首确实没有，别浪费第二次。
+  let j = await askUrl()
+  if (!j || !j.url) j = await askUrl()
+  if (!j || !j.url) return null
+  const br = Number(j.br) || 0
+  // 有些歌只给 320k mp3，也走这个接口——那种情况不算无损，交给降级处理
+  const isFlac = /\.flac(\?|$)/i.test(j.url) || br >= 700
+  if (!isFlac) return null
+  // 真取一下头几个字节，确认不是错误页
+  const probed = await probeStream(
+    { url: j.url, ext: 'flac', bitrate: br, duration: twin.duration || song.duration || 0, size: Number(j.size) || 0, referer: 'https://music.163.com/' },
+    twin.duration || song.duration || 0,
+    song.duration || 0
+  )
+  if (probed.broken || probed.partial) return null
+  return {
+    ...probed,
+    // 播放时长以下载得到的这份为准，界面上的时长别被蹭偏
+    duration: twin.duration || song.duration || 0,
+    actual: twin,
+    lossless: true,
+    ext: 'flac'
+  }
+}
+
+/**
+ * 取播放直链（对外入口）。
+ *
+ * prefer = 'lossless' 时先试无损，拿不到再按普通链路降级——
+ * 「至少要有无损」和「不能因为拿不到无损就放不出来」这两件事都得成立。
  */
 async function getPlayable(song, prefer = 'best', opts = {}) {
+  if (prefer === FLAC_PREFER) {
+    const key = 'flac:' + cacheKey(song, FLAC_PREFER)
+    const hit = urlCache.get(key)
+    if (hit && Date.now() - hit.at < URL_TTL_MS) {
+      return { ...hit, song: hit.actual || song, fallback: false, lossless: true }
+    }
+    // 无损解析可能 1~7 秒，而「这首歌根本没有无损」要等它跑完才知道。
+    // 所以让降级链路在旁边并行跑：1.5 秒还没拿到 flac 就把它拉起来，
+    // 万一 flac 迟迟不来（6 秒），用户至少立刻有声音，不用干等十秒。
+    let fbPromise = null
+    const startFallback = () => {
+      if (fbPromise) return fbPromise
+      fbPromise = (async () => {
+        const res = await resolvePlayable(song, 'best', opts)
+        if (!res) return null
+        const up = await maybeUpgrade(res, song, 'best')
+        urlCache.set(cacheKey(song, 'best'), { ...up, at: Date.now() })
+        return up
+      })()
+      return fbPromise
+    }
+    const fbTimer = setTimeout(startFallback, 1500)
+
+    let got = null
+    try {
+      got = await Promise.race([
+        resolveLossless(song, prefer),
+        new Promise((r) => setTimeout(() => r(null), 6000))
+      ])
+    } catch (err) {
+      logger('[flac] 解析异常 ' + err.message)
+    } finally {
+      clearTimeout(fbTimer)
+    }
+    if (got) {
+      const rec = { ...got, at: Date.now() }
+      urlCache.set(key, rec)
+      return { ...rec, song: got.actual || song, fallback: false, lossless: true }
+    }
+    // 降级：注意这里必须把 prefer 换回 best，各家 getUrl 只认 best / 128k
+    const up = await startFallback()
+    if (!up) return null
+    return { ...up, lossless: false }
+  }
   const res = await resolvePlayable(song, prefer, opts)
   if (!res) return null
-  return await maybeUpgrade(res, song, prefer)
+  const up = await maybeUpgrade(res, song, prefer)
+  urlCache.set(cacheKey(song, prefer), { ...up, at: Date.now() })
+  return up
 }
 
 /**
@@ -601,7 +715,11 @@ async function maybeUpgrade(res, song, prefer) {
 async function resolvePlayable(song, prefer = 'best', { allowFallback = true } = {}) {
   const key = cacheKey(song, prefer)
   const hit = urlCache.get(key)
-  if (hit && Date.now() - hit.at < URL_TTL_MS) return { ...hit, song, fallback: false }
+  if (hit && Date.now() - hit.at < URL_TTL_MS) {
+    // hit.song 是「实际发声的那首」（可能换过源），别用用户点的这首覆盖掉
+    const real = hit.song || song
+    return { ...hit, song: real, fallback: real.source !== song.source || real.id !== song.id }
+  }
 
   let partial = null
 
