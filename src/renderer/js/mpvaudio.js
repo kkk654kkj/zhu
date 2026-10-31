@@ -85,8 +85,18 @@ class MpvAudio {
     this._pos = 0
     this._posStamp = performance.now()
     // 先按"暂停"加载，避免非自动播放的场景（会话恢复）先响一下
-    window.api.mpvLoad(this._srcPath, { paused: !this._wantPlaying })
-    if (this._wantPlaying) window.api.mpvPlay()
+    const wantPlaying = this._wantPlaying
+    window.api.mpvLoad(this._srcPath, { paused: !wantPlaying }).then((ok) => {
+      // 主进程解析在线直链失败会返回 false：必须报错，
+      // 否则界面停在这里一直"正在加载"，用户只能手动切歌
+      if (ok === false) {
+        this._paused = true
+        this._wantPlaying = false
+        this._emit('error')
+        return
+      }
+      if (wantPlaying && this._wantPlaying) window.api.mpvPlay()
+    }).catch(() => {})
   }
 
   play() {

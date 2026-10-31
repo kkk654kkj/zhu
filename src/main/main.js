@@ -13,12 +13,18 @@ const { Readable } = require('stream')
 const { Store } = require('./store')
 const { Library, fileId, MIME_BY_EXT, resolveCoverPath, COVER_EMBEDDED } = require('./library')
 const { MpvEngine } = require('./mpv')
+const online = require('./online')
 
 const isDev = process.argv.includes('--dev')
 const DEFAULT_MUSIC_DIR = 'D:\\音乐'
-// 应用显示名（窗口标题 / 托盘提示 / 任务栏分组）
-const APP_NAME = '猪专属播放器'
-app.setName(APP_NAME)
+// 应用显示名（窗口标题 / 托盘提示）
+const APP_NAME = '猪专属播放器·联网版'
+// 内部应用名绝不能跟着改。
+// 实测：把这里换成带「·」的新名字后，Chromium 会去 %APPDATA%\<新名字> 建它自己的
+// 目录（某些 Windows 环境建不了），结果是自定义协议 lxfile/lxcover 全部失效、
+// <audio> 只报 "Format error"，而 http 请求却照常——极难排查。
+// 所以内部名沿用老名字，界面上的名字用 APP_NAME 单独给。
+app.setName('猪专属播放器')
 
 // 数据目录（便携式）：放在应用目录下的 data\
 // 不用系统默认 userData —— 部分 Windows 环境下 Chromium 在 %APPDATA% 里建不了
@@ -244,6 +250,107 @@ function registerCoverProtocol() {
   })
 }
 
+/**
+ * v3.0（联网版）：在线音频本地代理。
+ *
+ * 一开始试的是自定义协议 lxstream://，但 Electron 里 <audio> 加载自定义 scheme
+ * 不可靠（请求根本到不了 protocol.handle，只在 media error 里看到 code 4，
+ * 排查成本极高）。改用最朴素的本地 HTTP 服务：
+ *  · <audio> / fetch / mpv 全都天然支持 http；
+ *  · 自己发 CORS 头，WebAudio（均衡器/频谱）拿得到同源数据；
+ *  · 直链过期时这层能透明重取，页面无感；
+ *  · 需要 Referer 的 CDN 也在这里补。
+ *
+ * 地址：http://127.0.0.1:<随机端口>/stream?src=kw&id=xxx&q=best&t=&a=&d=
+ * 只监听回环，外部访问不到。
+ */
+let streamServer = null
+let streamBase = ''
+let streamReady = null
+
+/* 端口是异步绑定的，播放请求可能比它就绪更早，统一在这里等一等 */
+function ensureStreamBase() {
+  if (streamBase) return Promise.resolve(streamBase)
+  return streamReady || Promise.resolve('')
+}
+
+function startStreamServer() {
+  const http = require('http')
+  let readyResolve = () => {}
+  streamReady = new Promise((resolve) => { readyResolve = resolve })
+  streamServer = http.createServer(async (req, res) => {
+    try {
+      const u = new URL(req.url, 'http://127.0.0.1')
+      if (u.pathname !== '/stream') {
+        res.writeHead(404).end('not found')
+        return
+      }
+      const source = u.searchParams.get('src') || ''
+      const id = u.searchParams.get('id') || ''
+      const prefer = u.searchParams.get('q') || 'best'
+      if (!source || !id) {
+        res.writeHead(400).end('bad params')
+        return
+      }
+      const song = {
+        source,
+        id,
+        title: u.searchParams.get('t') || '',
+        artist: u.searchParams.get('a') || '',
+        album: '',
+        duration: Number(u.searchParams.get('d')) || 0
+      }
+      const info = await online.getPlayable(song, prefer)
+      if (!info || !info.url) {
+        logLine('[online] 代理无地址', source, id)
+        res.writeHead(404).end('no source')
+        return
+      }
+      const headers = { 'User-Agent': 'Mozilla/5.0' }
+      if (info.referer) headers.Referer = info.referer
+      if (req.headers.range) headers.Range = req.headers.range
+      const upstream = await fetch(info.url, { headers, redirect: 'follow' })
+      if (!upstream.ok && upstream.status !== 206) {
+        logLine('[online] 上游失败', upstream.status, info.url.slice(0, 70))
+        res.writeHead(502).end('upstream ' + upstream.status)
+        return
+      }
+      const out = {
+        'Content-Type': upstream.headers.get('content-type') || 'audio/mpeg',
+        'Accept-Ranges': 'bytes',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Expose-Headers': 'content-length, content-range, accept-ranges',
+        'Cache-Control': 'no-store'
+      }
+      for (const k of ['content-length', 'content-range']) {
+        const v = upstream.headers.get(k)
+        if (v) out[k.replace(/(^|-)([a-z])/g, (m, a, b) => a + b.toUpperCase())] = v
+      }
+      res.writeHead(upstream.status === 206 ? 206 : 200, out)
+      const reader = upstream.body.getReader()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (!res.write(Buffer.from(value))) {
+          await new Promise((r) => res.once('drain', r))
+        }
+      }
+      res.end()
+    } catch (err) {
+      logLine('[online] 代理异常', err.message)
+      try { res.writeHead(500).end('proxy error') } catch (e) { /* 已断开 */ }
+    }
+  })
+  streamServer.on('error', (err) => logLine('[online] 代理服务错误', err.message))
+  streamServer.listen(0, '127.0.0.1', () => {
+    const port = streamServer.address().port
+    streamBase = `http://127.0.0.1:${port}`
+    logLine('[online] 代理就绪', streamBase)
+    readyResolve(streamBase)
+  })
+  return streamBase
+}
+
 function toLxUrl(filePath) {  if (!filePath) return null
   const norm = path.resolve(filePath).replace(/\\/g, '/')
   // 固定用 local 当 host，完整路径（含盘符）放在 path 里：
@@ -285,7 +392,11 @@ const DEFAULT_SETTINGS = {
   exclusiveOutput: false,      // 独占输出（v1.5）：true 时用 mpv + WASAPI exclusive
   audioDevice: '',             // 独占输出设备（v1.6）：mpv 的 --audio-device，'' = 系统默认
   powerAfterQueue: 'off',      // v2.1：整队播完后 off|shutdown|hibernate|quit
-  resumePos: {}                // 长音轨断点位置（v1.6）：{ trackId: 秒 }
+  resumePos: {},               // 长音轨断点位置（v1.6）：{ trackId: 秒 }
+  // 联网版（v3.0）：在线音乐
+  onlineDownloadDir: '',       // 下载目录，'' = 默认「音乐\猪专属下载」
+  onlineSources: ['kw', 'qq', 'kg', 'wy'],  // 参与搜索的音源（顺序即合并优先级）
+  onlineQuality: 'best'        // best | 128k
 }
 
 // 迷你卡片默认尺寸 / 尺寸下限
@@ -1104,6 +1215,22 @@ function stopDeviceWatch() {
 
 /* ---------------- IPC ---------------- */
 
+/* ---------------- 联网版：下载目录 / 进行中的下载 ---------------- */
+
+/** 下载目录：用户设置优先，否则「我的音乐\猪专属下载」 */
+function downloadDir() {
+  const custom = String(store.get().settings.onlineDownloadDir || '').trim()
+  if (custom) return custom
+  try {
+    return path.join(app.getPath('music'), '猪专属下载')
+  } catch (err) {
+    return path.join(DATA_DIR, 'downloads')
+  }
+}
+
+/** 正在下载的任务：key=源:id → { cancelled } */
+const activeDownloads = new Map()
+
 function registerIpc() {
   // —— 音乐库 ——
   // 扫库期间 lib:list 必须等待扫描结束，否则渲染进程会读到半成品列表
@@ -1308,6 +1435,127 @@ function registerIpc() {
     }
   })
 
+  // —— 联网版：在线音乐 ——
+  ipcMain.handle('online:sources', () => online.listSources())
+  ipcMain.handle('online:proxyBase', () => ensureStreamBase())
+
+  ipcMain.handle('online:search', async (e, { keyword, page, limit, sources } = {}) => {
+    const kw = String(keyword || '').trim()
+    if (!kw) return { list: [], keyword: '' }
+    const useSources = Array.isArray(sources) && sources.length
+      ? sources
+      : (store.get().settings.onlineSources || ['kw', 'qq', 'kg', 'wy'])
+    const t0 = Date.now()
+    const list = await online.search(kw, Number(page) || 1, Number(limit) || 30, useSources)
+    logLine(`[online] 搜索「${kw}」p${page || 1} → ${list.length} 条 ${Date.now() - t0}ms`)
+    return { list, keyword: kw, page: Number(page) || 1 }
+  })
+
+  /**
+   * 播放前先解析：这样「无版权/只有试听」能在界面上说清楚，
+   * 而不是让 <audio> 或 mpv 直接报一个用户看不懂的错误。
+   */
+  ipcMain.handle('online:playable', async (e, song) => {
+    if (!song || !song.source || !song.id) return { ok: false, error: '参数不完整' }
+    const prefer = store.get().settings.onlineQuality === '128k' ? '128k' : 'best'
+    try {
+      const info = await online.getPlayable(song, prefer)
+      if (!info) return { ok: false, error: '各音源都没有这首歌的可用地址（多半是版权限制）' }
+      const actual = info.song || song
+      const q = new URLSearchParams({
+        q: prefer,
+        t: actual.title || '',
+        a: actual.artist || '',
+        d: String(actual.duration || 0)
+      })
+      const streamUrl = `${await ensureStreamBase()}/stream?src=${encodeURIComponent(actual.source)}&id=${encodeURIComponent(actual.id)}&${q}`
+      return {
+        ok: true,
+        streamUrl,
+        song: actual,
+        fallback: !!info.fallback,
+        partial: !!info.partial,
+        bitrate: info.bitrate || 0,
+        ext: info.ext || 'mp3',
+        size: info.size || 0
+      }
+    } catch (err) {
+      return { ok: false, error: err.message || '解析失败' }
+    }
+  })
+
+  ipcMain.handle('online:lyric', async (e, song) => {
+    if (!song || !song.source || !song.id) return null
+    try {
+      return await online.getLyric(song)
+    } catch (err) {
+      return null
+    }
+  })
+
+  ipcMain.handle('online:download', async (e, song) => {
+    if (!song || !song.source || !song.id) return { ok: false, error: '参数不完整' }
+    const dir = downloadDir()
+    const prefer = store.get().settings.onlineQuality === '128k' ? '128k' : 'best'
+    const key = `${song.source}:${song.id}`
+    if (activeDownloads.has(key)) return { ok: false, error: '这首正在下载中' }
+
+    const task = { cancelled: false }
+    activeDownloads.set(key, task)
+    const sender = e.sender
+
+    // 不阻塞调用方：下载在后台跑，进度通过事件推
+    ;(async () => {
+      try {
+        const dest = await require('fs/promises').mkdir(dir, { recursive: true }).then(() => dir)
+        const r = await online.download(song, prefer, dest, (received, total) => {
+          if (task.cancelled || sender.isDestroyed()) return
+          sender.send('online:download-progress', { key, received, total })
+        })
+        if (task.cancelled) return
+        sender.send('online:download-done', { key, ok: true, path: r.path, size: r.size, ext: r.ext })
+        logLine(`[online] 下载完成 ${r.path} (${(r.size / 1048576).toFixed(1)}MB)`)
+        // 落盘后丢给曲库做一次增量扫描，下载完就能在「最近添加」里看到
+        if (library) library.scan(store.get().settings.musicDirs || []).catch(() => {})
+      } catch (err) {
+        if (!task.cancelled && !sender.isDestroyed()) {
+          sender.send('online:download-done', { key, ok: false, error: err.message || '下载失败' })
+        }
+        logLine('[online] 下载失败', err.message)
+      } finally {
+        activeDownloads.delete(key)
+      }
+    })()
+
+    return { ok: true, dir }
+  })
+
+  ipcMain.handle('online:cancelDownload', (e, key) => {
+    const t = activeDownloads.get(String(key))
+    if (t) t.cancelled = true
+    return true
+  })
+
+  ipcMain.handle('online:pickDownloadDir', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: '选择下载目录',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (res.canceled || !res.filePaths.length) return null
+    const dir = res.filePaths[0]
+    store.patch({ settings: { ...store.get().settings, onlineDownloadDir: dir } })
+    return dir
+  })
+
+  ipcMain.handle('online:openDownloadDir', async () => {
+    const dir = downloadDir()
+    try {
+      await fsp.mkdir(dir, { recursive: true })
+      shell.openPath(dir)
+    } catch (err) { /* 忽略 */ }
+    return dir
+  })
+
   // —— 对话框 / 系统集成 ——
   ipcMain.handle('dialog:pickDirs', async () => {
     const res = await dialog.showOpenDialog(win, {
@@ -1381,8 +1629,18 @@ function registerIpc() {
 
   // —— 独占输出（mpv 后端） ——
   ipcMain.handle('mpv:start', (e, exclusive) => ensureMpv(exclusive !== false))
-  ipcMain.handle('mpv:load', (e, filePath, opts) => {
-    if (mpvEngine) mpvEngine.load(filePath, opts || {})
+  ipcMain.handle('mpv:load', async (e, filePath, opts) => {
+    let target = filePath
+    // 旧会话里可能还存着 lxstream:// 地址（早期实现），这里兜一下；新地址都是 http 代理
+    if (typeof filePath === 'string' && filePath.startsWith('lxstream://')) {
+      const info = await online.resolveStreamUrl(filePath)
+      if (!info || !info.url) {
+        logLine('[mpv] 在线直链解析失败', filePath)
+        return false
+      }
+      target = info.url
+    }
+    if (mpvEngine) mpvEngine.load(target, opts || {})
     return true
   })
   ipcMain.handle('mpv:play', () => { if (mpvEngine) mpvEngine.play(); return true })
@@ -1680,6 +1938,8 @@ if (gotLock) cleanChromiumCache()
 
     registerFileProtocol()
     registerCoverProtocol()
+    online.setLogger(logLine)
+    startStreamServer()
     await library.init()
     registerIpc()
 

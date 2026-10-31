@@ -1,0 +1,829 @@
+'use strict'
+/**
+ * 在线音源适配层（联网版新增）。
+ *
+ * 统一四个平台：酷我(kw) / 网易(wy) / QQ(qq) / 酷狗(kg)。
+ * 每个源实现三个能力：search() 搜索、getUrl() 取播放直链、getLyric() 取歌词。
+ * 平台接口随时可能失效，所以所有请求都容错返回 null，绝不让主进程崩。
+ *
+ * 直链有有效期（URL 内嵌签名和时间戳），这里按 20 分钟缓存，过期自动重取。
+ */
+
+const crypto = require('crypto')
+
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+const TIMEOUT = 15000
+
+/* 主进程把 logLine 注进来，方便平台接口哪天挂了能在日志里看出来 */
+let logger = () => {}
+function setLogger(fn) { if (typeof fn === 'function') logger = fn }
+
+/* ---------------- 通用请求 ---------------- */
+
+async function req(url, opts = {}) {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), opts.timeout || TIMEOUT)
+  try {
+    const headers = { 'User-Agent': UA, ...(opts.headers || {}) }
+    const res = await fetch(url, {
+      method: opts.method || 'GET',
+      headers,
+      body: opts.body,
+      redirect: 'follow',
+      signal: ctrl.signal
+    })
+    return res
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function reqText(url, opts) {
+  try {
+    const res = await req(url, opts)
+    if (!res.ok) return null
+    return await res.text()
+  } catch (err) {
+    return null
+  }
+}
+
+async function reqJson(url, opts) {
+  const txt = await reqText(url, opts)
+  if (!txt) return null
+  try {
+    return JSON.parse(txt)
+  } catch (err) {
+    return null
+  }
+}
+
+function encode(s) {
+  return encodeURIComponent(s)
+}
+
+/** 秒 → mm:ss */
+function fmtDur(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0))
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
+}
+
+/** 把 HTML 实体和多余空白清掉（酷我的歌名带 &nbsp;） */
+function clean(s) {
+  return String(s == null ? '' : s)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/* ---------------- 酷我 ---------------- */
+
+/**
+ * 酷我搜索接口有两种返回：带 mobi=1&vipver=1 时是标准 JSON，
+ * 不带时是 JS 字面量（单引号、键不加引号）。
+ * 两种都要能解析——接口行为会变，不能只押一种。
+ */
+function parseKuwoList(text) {
+  if (!text) return []
+  try {
+    const j = JSON.parse(text)
+    const list = j && j.abslist
+    if (Array.isArray(list)) return list
+  } catch (err) { /* 落到宽松解析 */ }
+
+  const out = []
+  // 逐个对象扫描：{'KEY':'val', ...}
+  const objRe = /\{[^{}]*\}/g
+  let m
+  while ((m = objRe.exec(text))) {
+    const body = m[0]
+    if (!/DC_TARGETID|MUSICRID|"DC_TARGETID"/.test(body)) continue
+    const obj = {}
+    const kvRe = /['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?\s*:\s*'((?:[^'\\]|\\.)*)'/g
+    let kv
+    while ((kv = kvRe.exec(body))) obj[kv[1]] = kv[2].replace(/\\'/g, "'")
+    if (obj.DC_TARGETID) out.push(obj)
+  }
+  return out
+}
+
+const kw = {
+  id: 'kw',
+  name: '酷我',
+  short: 'KW',
+  maxQuality: '320k mp3',
+
+  async search(keyword, page = 1, limit = 30) {
+    const pn = Math.max(0, page - 1)
+    const url = `http://search.kuwo.cn/r.s?all=${encode(keyword)}&ft=music&itemset=web_2013`
+      + `&client=kt&pn=${pn}&rn=${limit}&rformat=json&encoding=utf8&mobi=1&vipver=1`
+    const txt = await reqText(url)
+    const rows = parseKuwoList(txt)
+    return rows.map((r) => ({
+      source: 'kw',
+      id: String(r.DC_TARGETID || r.MUSICRID || '').replace(/^MUSIC_/, ''),
+      title: clean(r.NAME || r.SONGNAME),
+      artist: clean(r.ARTIST || '未知歌手'),
+      album: clean(r.ALBUM || ''),
+      duration: Number(r.DURATION) || 0,
+      // 酷我搜索结果自带格式清单，界面据此标注有没有 320k / 无损
+      quality: /MP3H|MP3HIGH|ALFLAC/.test(String(r.FORMATS || '')) ? '320k' : '128k',
+      hasLossless: /ALFLAC|FLAC/.test(String(r.FORMATS || '')),
+      cover: r.web_albumpic_short
+        ? `https://img2.kuwo.cn/star/albumcover/${String(r.web_albumpic_short).replace(/^\//, '')}`
+        : '',
+      raw: undefined
+    })).filter((s) => s.id && s.title)
+  },
+
+  async getUrl(song, prefer = 'best') {
+    const br = prefer === 'lossless' ? 'flac' : prefer === '128k' ? '128kmp3' : '320kmp3'
+    const url = `http://nmobi.kuwo.cn/mobi.s?f=web&source=kwplayer_ar_9.3.0.0_B_jiakong_vh.apk`
+      + `&type=convert_url_with_sign&br=${br}&rid=${encode(song.id)}`
+    const j = await reqJson(url)
+    const d = j && j.data
+    if (!d || !d.url || d.url === 'None') return null
+    return {
+      url: d.url,
+      ext: (d.format || 'mp3').toLowerCase(),
+      bitrate: Number(d.bitrate) || 0,
+      duration: Number(d.duration) || song.duration || 0,
+      referer: 'https://www.kuwo.cn/'
+    }
+  },
+
+  async getLyric(song) {
+    const j = await reqJson(`http://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=${encode(song.id)}&httpsStatus=1`)
+    const list = j && j.data && j.data.lrclist
+    if (!Array.isArray(list) || !list.length) return null
+    const meta = j.data.songinfo || {}
+    const head = []
+    if (meta.songName) head.push(`[ti:${meta.songName}]`)
+    if (meta.artist) head.push(`[ar:${meta.artist}]`)
+    if (meta.album) head.push(`[al:${meta.album}]`)
+    const lines = list.map((l) => {
+      const t = Number(l.time) || 0
+      const mm = String(Math.floor(t / 60)).padStart(2, '0')
+      const ss = String(Math.floor(t % 60)).padStart(2, '0')
+      const cs = String(Math.round((t % 1) * 100)).padStart(2, '0')
+      return `[${mm}:${ss}.${cs}]${l.lineLyric || ''}`
+    })
+    return head.concat(lines).join('\n')
+  }
+}
+
+/* ---------------- 网易云 ---------------- */
+
+const wy = {
+  id: 'wy',
+  name: '网易云',
+  short: 'WY',
+  maxQuality: '320k mp3',
+
+  async search(keyword, page = 1, limit = 30) {
+    const offset = (page - 1) * limit
+    // 主用 cloudsearch/pc：不限频，返回也全（带封面、时长）。
+    // 老的 /api/search/get/web 现在对同一 IP 限得很死，连搜两次就 405，只作兜底。
+    let j = await reqJson(
+      `https://music.163.com/api/cloudsearch/pc?s=${encode(keyword)}&type=1&limit=${limit}&offset=${offset}`,
+      { headers: { Referer: 'https://music.163.com' } }
+    )
+    if (!(j && j.code === 200 && j.result && Array.isArray(j.result.songs))) {
+      j = await reqJson(
+        'https://music.163.com/api/search/get?s=' + encode(keyword) + `&type=1&limit=${limit}&offset=${offset}`,
+        { headers: { Referer: 'https://music.163.com', Cookie: 'appver=2.0.2' } }
+      )
+    }
+    const songs = j && j.result && j.result.songs
+    if (!Array.isArray(songs)) {
+      if (j && j.code && j.code !== 200) logger('[wy] 搜索失败 code=' + j.code + ' ' + (j.msg || ''))
+      return []
+    }
+    // 两套接口字段名不一样：cloudsearch 用 ar/al/dt，老接口用 artists/album/duration
+    return songs.map((s) => {
+      const artists = s.ar && s.ar.length ? s.ar : (s.artists || [])
+      const album = s.al || s.album || {}
+      const ms = s.dt || s.duration || 0
+      return {
+        source: 'wy',
+        id: String(s.id),
+        title: clean(s.name),
+        artist: clean(artists.map((a) => a && a.name).filter(Boolean).join(' / ') || (album.artist && album.artist.name) || '未知歌手'),
+        album: clean(album.name || ''),
+        duration: Math.round((Number(ms) || 0) / 1000),
+        quality: '128k',
+        hasLossless: false,
+        cover: clean(album.picUrl || ''),
+        raw: undefined
+      }
+    }).filter((s) => s.id && s.title)
+  },
+
+  /** 网易没有公开的取链接口，走「外链播放」：无版权的歌会 302 到 404 页面 */
+  async getUrl(song) {
+    const u = `https://music.163.com/song/media/outer/url?id=${encode(song.id)}.mp3`
+    try {
+      // 用 Range 取 2 字节验证：既确认是音频，也确认支持断点（mpv 拖动进度需要）
+      const res = await req(u, {
+        headers: { Referer: 'https://music.163.com', Range: 'bytes=0-1' }
+      })
+      if (!res.ok && res.status !== 206) return null
+      const type = res.headers.get('content-type') || ''
+      if (/text\/html/i.test(type)) return null      // 落到 404 页
+      if (!/audio|octet-stream|mpeg/i.test(type)) return null
+      // 外链会 302 到 m801.music.126.net，统一升到 https，避免混合内容被拦
+      const finalUrl = res.url.replace(/^http:\/\//i, 'https://')
+      const total = Number(res.headers.get('content-range')?.split('/')[1]) || 0
+      const bitrate = total && song.duration ? Math.round((total * 8) / song.duration / 1000) : 0
+      return {
+        url: finalUrl,
+        ext: 'mp3',
+        bitrate: bitrate > 400 ? 0 : bitrate,
+        duration: song.duration || 0,
+        referer: 'https://music.163.com/'
+      }
+    } catch (err) {
+      return null
+    }
+  },
+
+  async getLyric(song) {
+    const j = await reqJson(`https://music.163.com/api/song/lyric?id=${encode(song.id)}&lv=1&kv=1&tv=-1`, {
+      headers: { Referer: 'https://music.163.com' }
+    })
+    const lrc = j && j.lrc && j.lrc.lyric
+    return lrc && /\[\d{1,3}:/.test(lrc) ? lrc : null
+  }
+}
+
+/* ---------------- QQ 音乐 ---------------- */
+
+const qq = {
+  id: 'qq',
+  name: 'QQ音乐',
+  short: 'QQ',
+  maxQuality: '128k m4a（非会员）',
+
+  async search(keyword, page = 1, limit = 30) {
+    const url = `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?format=json&w=${encode(keyword)}`
+      + `&n=${limit}&p=${page}&cr=1&new_json=1&aggr=1&lossless=0`
+    const txt = await reqText(url, { headers: { Referer: 'https://y.qq.com/' } })
+    if (!txt) return []
+    let j = null
+    try {
+      // 接口偶尔返回 jsonp 包裹
+      j = JSON.parse(txt.replace(/^callback\(|\)$/g, ''))
+    } catch (err) {
+      return []
+    }
+    const list = j && j.data && j.data.song && j.data.song.list
+    if (!Array.isArray(list)) return []
+    return list.map((s) => {
+      const albumMid = (s.album && s.album.mid) || s.albummid || ''
+      return {
+        source: 'qq',
+        id: String(s.mid || s.songmid || ''),
+        title: clean(s.name || s.songname),
+        artist: clean((s.singer || []).map((a) => a.name).join(' / ') || '未知歌手'),
+        album: clean((s.album && s.album.name) || s.albumname || ''),
+        duration: Number(s.interval) || 0,
+        quality: '128k',
+        hasLossless: false,
+        cover: albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : '',
+        raw: undefined
+      }
+    }).filter((s) => s.id && s.title)
+  },
+
+  async getUrl(song) {
+    // 未登录只能拿到非 VIP 歌曲的试听链（m4a）
+    const payload = {
+      req_0: {
+        module: 'vkey.GetVkeyServer',
+        method: 'CgiGetVkey',
+        param: {
+          guid: String(Math.floor(1e9 + Math.random() * 9e9)),
+          songmid: [song.id],
+          songtype: [0],
+          uin: '0',
+          loginflag: 1,
+          platform: '20'
+        }
+      },
+      comm: { uin: 0, format: 'json', ct: 24, cv: 0 }
+    }
+    const j = await reqJson('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Referer: 'https://y.qq.com/' },
+      body: JSON.stringify(payload)
+    })
+    const d = j && j.req_0 && j.req_0.data
+    const info = d && d.midurlinfo && d.midurlinfo[0]
+    const purl = info && info.purl
+    if (!purl) return null
+    const sip = (d.sip && d.sip[0]) || 'https://ws.stream.qqmusic.qq.com/'
+    return {
+      url: sip.replace(/^http:/, 'https:') + purl,
+      ext: /\.m4a/i.test(purl) ? 'm4a' : 'mp3',
+      bitrate: 128,
+      duration: song.duration || 0,
+      referer: 'https://y.qq.com/'
+    }
+  },
+
+  async getLyric(song) {
+    const url = `https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=${encode(song.id)}`
+      + `&format=json&nobase64=1&g_tk=5381`
+    const txt = await reqText(url, { headers: { Referer: 'https://y.qq.com/portal/player.html' } })
+    if (!txt) return null
+    try {
+      const j = JSON.parse(txt.replace(/^MusicJsonCallback\(|\)$/g, ''))
+      const lrc = j && j.lyric
+      return lrc && /\[\d{1,3}:/.test(lrc) ? lrc : null
+    } catch (err) {
+      return null
+    }
+  }
+}
+
+/* ---------------- 酷狗 ---------------- */
+
+const kg = {
+  id: 'kg',
+  name: '酷狗',
+  short: 'KG',
+  maxQuality: '128k mp3（部分）',
+
+  async search(keyword, page = 1, limit = 30) {
+    const url = `https://songsearch.kugou.com/song_search_v2?keyword=${encode(keyword)}&page=${page}`
+      + `&pagesize=${limit}&platform=WebFilter&userid=0&clientver=2000&iscorrection=1`
+      + `&privilege_filter=0&filter=10&area_code=1&tag_aggr=1`
+    const j = await reqJson(url)
+    const list = j && j.data && j.data.lists
+    if (!Array.isArray(list)) return []
+    return list.map((s) => ({
+      source: 'kg',
+      id: String(s.FileHash || ''),
+      // 320k 用另一条 hash，存起来省一次搜索
+      idHq: s.HQFileHash ? String(s.HQFileHash) : '',
+      title: clean(s.SongName),
+      artist: clean(s.SingerName || '未知歌手'),
+      album: clean(s.AlbumName || ''),
+      duration: Number(s.Duration) || 0,
+      quality: s.HQFileHash ? '320k' : '128k',
+      hasLossless: false,
+      cover: s.Image ? String(s.Image).replace('{size}', '400') : '',
+      albumId: String(s.AlbumID || ''),
+      raw: undefined
+    })).filter((s) => s.id && s.title)
+  },
+
+  /** 走 tracker 接口；热门版权歌会返回 status=2（无授权），此时按失败处理交给别的源 */
+  async getUrl(song) {
+    const tries = []
+    if (song.idHq) tries.push({ hash: song.idHq.toLowerCase(), br: 'hq' })
+    tries.push({ hash: String(song.id).toLowerCase(), br: 'hq' })
+    tries.push({ hash: String(song.id).toLowerCase(), br: '' })
+    for (const t of tries) {
+      const key = crypto.createHash('md5').update(t.hash + 'kgcloudv2').digest('hex')
+      const url = `https://trackercdn.kugou.com/i/v2/?key=${key}&hash=${t.hash}&br=${t.br}`
+        + `&appid=1005&pid=2&cmd=25&behavior=play`
+      const j = await reqJson(url, { headers: { Referer: 'https://www.kugou.com/' } })
+      if (j && j.status === 1 && j.url) {
+        const u = Array.isArray(j.url) ? j.url[0] : j.url
+        if (u) {
+          return {
+            url: u,
+            ext: (j.extName || 'mp3').toLowerCase(),
+            bitrate: Math.round((Number(j.bitRate) || 0) / 1000),
+            duration: song.duration || 0,
+            referer: 'https://www.kugou.com/'
+          }
+        }
+      }
+    }
+    return null
+  },
+
+  async getLyric(song) {
+    const search = await reqJson(`https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=`
+      + `&duration=&hash=${encode(song.id)}`)
+    const cand = search && search.candidates && search.candidates[0]
+    if (!cand) return null
+    const dl = await reqJson(`https://lyrics.kugou.com/download?ver=1&client=pc&id=${encode(cand.id)}`
+      + `&accesskey=${encode(cand.accesskey)}&fmt=lrc&charset=utf8`)
+    if (!dl || !dl.content) return null
+    const txt = Buffer.from(dl.content, 'base64').toString('utf8')
+    return /\[\d{1,3}:/.test(txt) ? txt : null
+  }
+}
+
+/* ---------------- 源注册表 ---------------- */
+
+const SOURCES = { kw, wy, qq, kg }
+/**
+ * 顺序即优先级：搜索时按这个顺序交错合并，跨源兜底也按这个顺序试。
+ *
+ * 网易排最后是有实测依据的：它的公开搜索索引里，热门版权歌的原唱已经拿不到，
+ * 搜「晴天 周杰伦」出来的前几条全是翻唱和自我上传（“晴天(深情版) - Lucky小爱”）。
+ * 拿它兜底既慢又容易换错人，所以放末位，只在其他源都没有时再试。
+ */
+const SOURCE_ORDER = ['kw', 'qq', 'kg', 'wy']
+
+function listSources() {
+  return SOURCE_ORDER.map((id) => ({
+    id,
+    name: SOURCES[id].name,
+    short: SOURCES[id].short,
+    quality: SOURCES[id].maxQuality
+  }))
+}
+
+/**
+ * 搜索相关度打分：各平台自己排出来的顺序经常把翻唱/伴奏/片段排在正版前面，
+ * 用户搜「起风了」第一首是抖音翻唱版会很难受。这里简单按「歌名/歌手是否命中」
+ * 重排一次，命中越多越靠前，伴奏类和 DJ 版降权。
+ */
+function relevance(song, keyword) {
+  const norm = (s) => String(s || '').toLowerCase().replace(/[\s\-_()（）\[\]【】·.。]/g, '')
+  const k = norm(keyword)
+  const t = norm(song.title)
+  const a = norm(song.artist)
+  let score = 0
+  if (t && t === k) score += 12
+  else if (t && k.includes(t)) score += 7
+  else if (t && t.includes(k)) score += 5
+  if (a && k.includes(a)) score += 5
+  if (song.duration >= 90 && song.duration <= 600) score += 2
+  if (/伴奏|纯音乐|ktv|karaoke|dj版|翻自|remix|cover/i.test(song.title)) score -= 5
+  return score
+}
+
+/* ---------------- 搜索缓存 ---------------- */
+
+/**
+ * 各平台对同一 IP 的搜索都有频次限制（网易最狠，几次就 405）。
+ * 缓存三分钟：既省一次往返，也让「改个字再改回来」这类操作不白吃配额。
+ * 只缓存有结果的查询，空结果不缓存——免得某次网络抖动把关键词钉死三分钟。
+ */
+const SEARCH_TTL_MS = 3 * 60 * 1000
+const searchCache = new Map()
+
+async function searchOne(id, keyword, page, limit) {
+  const key = `${id}|${keyword}|${page}|${limit}`
+  const hit = searchCache.get(key)
+  if (hit && Date.now() - hit.at < SEARCH_TTL_MS) return hit.list
+  try {
+    const list = await SOURCES[id].search(keyword, page, limit)
+    if (Array.isArray(list) && list.length) {
+      if (searchCache.size > 120) searchCache.delete(searchCache.keys().next().value)
+      searchCache.set(key, { list, at: Date.now() })
+    }
+    return list
+  } catch (err) {
+    logger('[online] ' + id + ' 搜索异常：' + err.message)
+    return []
+  }
+}
+
+async function search(keyword, page = 1, limit = 30, sourceIds = null) {
+  const ids = (sourceIds && sourceIds.length ? sourceIds : SOURCE_ORDER).filter((id) => SOURCES[id])
+  const results = await Promise.all(ids.map((id) => searchOne(id, keyword, page, limit)))
+  // 交错合并：各家第一首、各家第二首……避免某一源把整页占满
+  const merged = []
+  const maxLen = Math.max(0, ...results.map((r) => r.length))
+  for (let i = 0; i < maxLen; i++) {
+    for (const list of results) {
+      if (list[i]) merged.push(list[i])
+    }
+  }
+  // 第一页才按相关度重排：翻页时用户是想"看后面的"，顺序应该稳定
+  if (page === 1) {
+    merged.sort((x, y) => relevance(y, keyword) - relevance(x, keyword))
+  }
+  return merged
+}
+
+/* ---------------- 直链缓存 ---------------- */
+
+const URL_TTL_MS = 20 * 60 * 1000
+const urlCache = new Map()   // key: src:id:prefer → { url, ext, bitrate, duration, at }
+
+function cacheKey(song, prefer) {
+  return `${song.source}:${song.id}:${prefer}`
+}
+
+/**
+ * 探测直链是否完整。
+ *
+ * 平台对热门歌经常只给 30 秒试听，而接口会老老实实说"这段音频 11 秒"——
+ * 拿这个时长去算码率反而算出来很正常（185KB/11s = 135k），完全看不出问题。
+ * 所以必须用**搜索结果里的歌曲时长**做基准：
+ * ① 文件大小 ÷ 歌曲时长 < 40kbps → 试听；
+ * ② 接口给的片段时长明显短于歌曲时长（<70%）→ 试听。
+ */
+async function probeStream(info, realDuration, expectDuration = 0) {
+  try {
+    const headers = { Range: 'bytes=0-1' }
+    if (info.referer) headers.Referer = info.referer
+    const res = await req(info.url, { headers, timeout: 8000 })
+    const cr = res.headers.get('content-range') || ''
+    const total = Number(cr.split('/')[1]) || 0
+    const type = res.headers.get('content-type') || ''
+    if (/text\/html/i.test(type)) return { ...info, broken: true }
+    if (!total || !realDuration) return info
+    const kbps = Math.round((total * 8) / realDuration / 1000)
+    // 兜底换源时，候选的时长不能自己跟自己对——必须跟**用户点的那首歌**比。
+    // 否则「45 秒剪辑版」永远判不出来：0.7MB/45s = 130k，看着比谁都健康。
+    const expect = expectDuration || realDuration
+    const tooShort = realDuration > 0 && expect > 0 && realDuration < expect * 0.7
+    return {
+      ...info,
+      size: total,
+      bitrate: info.bitrate >= 32 ? info.bitrate : kbps,
+      partial: kbps < 40 || tooShort
+    }
+  } catch (err) {
+    return info
+  }
+}
+
+/**
+ * 取播放直链（对外入口）：先解析，再按需抢救音质。
+ */
+async function getPlayable(song, prefer = 'best', opts = {}) {
+  const res = await resolvePlayable(song, prefer, opts)
+  if (!res) return null
+  return await maybeUpgrade(res, song, prefer)
+}
+
+/**
+ * 音质补救：主源只给 48k / 64k 这种糊音质时，去别的源碰碰运气。
+ *
+ * 只在「已经拿到完整版、但码率低于 96k」时才跑，所以绝大多数歌没有额外耗时；
+ * 上限 6 秒，超时就用手上这个——宁可音质差一点，也不能让用户干等。
+ */
+async function maybeUpgrade(res, song, prefer) {
+  if (res.partial) return res
+  if ((res.bitrate || 0) >= 96) return res
+  const t0 = Date.now()
+  for (const id of SOURCE_ORDER) {
+    if (id === res.song.source || !SOURCES[id]) continue
+    if (Date.now() - t0 > 6000) break
+    try {
+      const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10)
+      const cands = rankMatches(list, song).slice(0, 2)
+      for (const cand of cands) {
+        const got = await SOURCES[id].getUrl(cand, prefer)
+        if (!got || !got.url) continue
+        const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0)
+        if (probed.broken || probed.partial) continue
+        if ((probed.bitrate || 0) < 128) continue
+        const rec = { ...probed, at: Date.now() }
+        urlCache.set(cacheKey(cand, prefer), rec)
+        logger('[online] 音质补救 ' + res.song.source + ' ' + (res.bitrate||0) + 'k → ' + id + ' ' + probed.bitrate + 'k')
+        return { ...rec, song: cand, fallback: true, upgraded: true }
+      }
+    } catch (err) { /* 下一个源 */ }
+  }
+  return res
+}
+
+/**
+ * 解析播放直链，带缓存与换源兜底。
+ * 顺序：本源完整版 → 本源其他候选 → 其他源完整版 → 退回试听片段（标注 partial）
+ */
+async function resolvePlayable(song, prefer = 'best', { allowFallback = true } = {}) {
+  const key = cacheKey(song, prefer)
+  const hit = urlCache.get(key)
+  if (hit && Date.now() - hit.at < URL_TTL_MS) return { ...hit, song, fallback: false }
+
+  let partial = null
+
+  const src = SOURCES[song.source]
+  if (src) {
+    try {
+      const got = await src.getUrl(song, prefer)
+      if (got && got.url) {
+        const probed = await probeStream(got, song.duration || got.duration)
+        if (!probed.partial && !probed.broken) {
+          const rec = { ...probed, at: Date.now() }
+          urlCache.set(key, rec)
+          return { ...rec, song, fallback: false }
+        }
+        if (probed.partial) partial = { ...probed, at: Date.now(), song }
+      }
+    } catch (err) { /* 继续兜底 */ }
+  }
+
+  if (!allowFallback) return partial ? { ...partial, fallback: false, partial: true } : null
+
+  // 换候选：先用**本源的其他条目**，再跨源。
+  //
+  // 只看源的顺序是不够的。酷我这类平台上，同一首歌常有好几条并存：
+  // 第一条是 VIP 试听（接口老实说"这段 11 秒"），第二条才是完整 320k。
+  // 用户点的恰好是第一条时，如果直接跳到别的源，就会把本源的完整版白白错过。
+  // 实测《稻香》就是这样：酷我第二条是 320k 完整的，却一路兜底到别处。
+  const tryList = async (id, list) => {
+    const cands = rankMatches(list, song)
+      .filter((c) => !(c.source === song.source && c.id === song.id))
+      .slice(0, 3)
+    for (const cand of cands) {
+      const got = await SOURCES[id].getUrl(cand, prefer)
+      if (!got || !got.url) continue
+      const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0)
+      if (probed.broken) continue
+      if (probed.partial) {
+        if (!partial || (probed.size || 0) > (partial.size || 0)) partial = { ...probed, at: Date.now(), song: cand }
+        continue
+      }
+      const rec = { ...probed, at: Date.now() }
+      urlCache.set(cacheKey(cand, prefer), rec)
+      return { ...rec, song: cand, fallback: cand.source !== song.source }
+    }
+    return null
+  }
+
+  // ① 本源内换候选
+  if (src) {
+    try {
+      const list = await src.search(`${song.title} ${song.artist}`.trim(), 1, 10)
+      const got = await tryList(song.source, list)
+      if (got) return got
+    } catch (err) { /* 继续跨源 */ }
+  }
+
+  // ② 跨源兜底：按「歌名 + 歌手」到其他源找同名曲，时长差 5 秒以内优先。
+  //    每个源要试多个候选——同一个源里同名歌常有好几条（原版/重制/翻唱）。
+  const others = SOURCE_ORDER.filter((id) => id !== song.source && SOURCES[id])
+  for (const id of others) {
+    try {
+      const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10)
+      const got = await tryList(id, list)
+      if (got) return got
+    } catch (err) { /* 下一个源 */ }
+  }
+
+  if (partial) return { ...partial, fallback: true, partial: true }
+  return null
+}
+
+/** 判断别的源里的搜索结果是不是同一首歌，返回按可信度排序的候选 */
+function normText(s) {
+  return String(s || '').toLowerCase().replace(/[\s\-_()（）\[\]【】]/g, '')
+}
+
+function matchScore(s, song) {
+  const t = normText(song.title)
+  const a = normText(String(song.artist || '').split('/')[0])
+  const st = normText(s.title)
+  const sa = normText(String(s.artist || ''))
+  // 歌手完全对不上时直接判定不是同一首。
+  // 否则「晴天」会被换成网易上某个用户上传的同名翻唱——名字一样、人不对，
+  // 用户点周杰伦却听到陌生人唱，比放不出来还糟。
+  if (a && sa && !sa.includes(a) && !a.includes(sa)) return 0
+  let score = 0
+  if (st === t) score += 6
+  else if (st.includes(t) || t.includes(st)) score += 5
+  if (a && sa) score += 3
+  if (song.duration && s.duration) {
+    const diff = Math.abs(s.duration - song.duration)
+    if (diff <= 5) score += 2
+    // 时长相差三成以上，基本是剪辑版 / 现场版 / 加速版，宁可不要。
+    // 光看大小是发现不了的：45 秒的剪辑版算出来码率 130k，比完整版还"健康"。
+    else if (diff > song.duration * 0.3) score -= 4
+  }
+  return score
+}
+
+function rankMatches(list, song) {
+  if (!list || !list.length) return []
+  return list
+    .map((s) => ({ s, score: matchScore(s, song) }))
+    .filter((x) => x.score >= 8)
+    .sort((x, y) => y.score - x.score)
+    .map((x) => x.s)
+}
+
+function pickBestMatch(list, song) {
+  return rankMatches(list, song)[0] || null
+}
+
+/* ---------------- 歌词 ---------------- */
+
+const lyricCache = new Map()
+
+async function getLyric(song) {
+  const key = `${song.source}:${song.id}`
+  if (lyricCache.has(key)) return lyricCache.get(key)
+  const src = SOURCES[song.source]
+  let lrc = null
+  if (src) {
+    try {
+      lrc = await src.getLyric(song)
+    } catch (err) { lrc = null }
+  }
+  // 本源没词就换源找同一首（换了源的曲目也能出词）
+  if (!lrc) {
+    for (const id of SOURCE_ORDER) {
+      if (id === song.source || !SOURCES[id]) continue
+      try {
+        const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 5)
+        const cand = pickBestMatch(list, song)
+        if (!cand) continue
+        lrc = await SOURCES[id].getLyric(cand)
+        if (lrc) break
+      } catch (err) { /* 下一个 */ }
+    }
+  }
+  if (lyricCache.size > 200) lyricCache.clear()
+  lyricCache.set(key, lrc)
+  return lrc
+}
+
+/* ---------------- 下载 ---------------- */
+
+/**
+ * 流式下载到目标文件。
+ * @param {object} song
+ * @param {string} filePath 完整目标路径（含扩展名由调用方按 ext 决定）
+ * @param {(received:number, total:number)=>void} onProgress
+ */
+async function download(song, prefer, dir, onProgress) {
+  const info = await getPlayable(song, prefer)
+  if (!info) throw new Error('所有音源都没有这首歌的可用地址')
+
+  const ext = info.ext === 'm4a' ? 'm4a' : info.ext === 'flac' ? 'flac' : 'mp3'
+  const safe = (s) => String(s || '').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
+  const base = safe(`${song.artist} - ${song.title}`).slice(0, 120) || '未知歌曲'
+  let target = require('path').join(dir, `${base}.${ext}`)
+  // 重名自动加 (2)(3)…
+  const fs = require('fs')
+  let n = 1
+  while (fs.existsSync(target)) {
+    n++
+    target = require('path').join(dir, `${base} (${n}).${ext}`)
+  }
+
+  const res = await req(info.url, { headers: { Referer: 'https://www.kugou.com/' }, timeout: 60000 })
+  if (!res.ok) throw new Error('下载失败：HTTP ' + res.status)
+  const total = Number(res.headers.get('content-length')) || 0
+  const chunks = []
+  let received = 0
+  const reader = res.body.getReader()
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(Buffer.from(value))
+    received += value.length
+    if (onProgress) onProgress(received, total)
+  }
+  await fs.promises.mkdir(dir, { recursive: true })
+  await fs.promises.writeFile(target, Buffer.concat(chunks))
+  return { path: target, size: received, ext, fallbackSong: info.fallback ? info.song : null }
+}
+
+/* ---------------- 直链解析给协议/mpv 用 ---------------- */
+
+/** 从 lxstream://play/<source>/<id>?... 解析出可播放信息 */
+async function resolveStreamUrl(rawUrl) {
+  let u
+  try {
+    u = new URL(rawUrl)
+  } catch (err) {
+    return null
+  }
+  if (u.protocol !== 'lxstream:') return null
+  const parts = u.pathname.replace(/^\/+/, '').split('/')
+  const source = decodeURIComponent(parts[0] || '')
+  const id = decodeURIComponent(parts[1] || '')
+  if (!SOURCES[source] || !id) return null
+  const song = {
+    source,
+    id,
+    title: u.searchParams.get('t') || '',
+    artist: u.searchParams.get('a') || '',
+    album: '',
+    duration: Number(u.searchParams.get('d')) || 0
+  }
+  const prefer = u.searchParams.get('q') || 'best'
+  return getPlayable(song, prefer)
+}
+
+module.exports = {
+  SOURCES,
+  SOURCE_ORDER,
+  setLogger,
+  listSources,
+  search,
+  getPlayable,
+  getLyric,
+  download,
+  resolveStreamUrl,
+  fmtDur
+}

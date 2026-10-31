@@ -24,6 +24,7 @@ const state = {
   restoringSession: false,// 正在恢复上次会话（此时不要叠加断点续播）
   selected: new Set(),   // 列表多选（v1.7）
   selAnchor: null,       // Shift 范围选的起点下标
+  onlineFails: 0,        // 在线曲目连续播放失败次数（防连跳）
   sessionTimer: null
 }
 
@@ -636,6 +637,26 @@ function switchView(view) {
 
 function renderView() {
   clearSelection()          // 列表重建后旧选中已失效
+  // 在线搜索是独立面板：不复用本地表格（列不一样，多出「音源 / 下载」）
+  const isOnline = state.view === 'online'
+  document.getElementById('viewHeader').hidden = isOnline
+  document.getElementById('onlinePane').hidden = !isOnline
+  if (isOnline) {
+    UI.renderTableHeadVisible(false)
+    UI.renderTable([])
+    UI.hideEmpty()
+    // hideEmpty 会把 tableBody 显示出来，所以必须放在它后面：
+    // tableBody 是 flex:1，不隐藏的话会把在线面板挤到下面（顶部一大片空白）
+    document.getElementById('tableBody').hidden = true
+    Online.init().then(() => {
+      Online.render()
+      if (!Online.list.length) {
+        const inp = document.getElementById('opInput')
+        if (inp) inp.focus()
+      }
+    })
+    return
+  }
   const list = computedList()
   state.visible = list
 
@@ -785,6 +806,8 @@ function bindPlayer() {
   player.on('track-change', (track) => {
     state.currentId = track.id
     state.counted = false
+    state.onlineFails = 0          // 能切到这首说明上一首没失败
+    if (track.online) Online.markPlaying(track.id)
     resetAb()                       // A-B 是"这一首之内"的事，换歌就作废
     updateMediaSession(track)
     applyTrackGain(track.id)
@@ -869,6 +892,22 @@ function bindPlayer() {
   })
 
   player.on('error', () => {
+    const cur = player.current
+    // 在线曲目失败和本地文件不同：多半是版权/直链失效，跳过才有意义。
+    // 但不能无脑连跳——连跳 3 首就停，否则一路把搜索结果的队列跳光。
+    if (cur && cur.online) {
+      state.onlineFails = (state.onlineFails || 0) + 1
+      if (state.onlineFails >= 3) {
+        state.onlineFails = 0
+        toast('连续多首在线歌曲无法播放，已停止自动跳过（试试换音源）', 4000)
+        player.pause()
+        return
+      }
+      toast('这首在线歌曲放不出来（版权或音源失效），已跳过', 2500)
+      setTimeout(() => player.next(true), 500)
+      return
+    }
+    state.onlineFails = 0
     // 独占模式下多半是声卡/引擎问题（设备被占用、格式不支持），不是这个文件坏了：
     // 此时绝不能自动跳曲，否则会一路把整个队列跳完
     if (state.exclusive) {
@@ -878,7 +917,6 @@ function bindPlayer() {
     }
     // DSD（v2.0）：普通输出（Chromium）没有 DSD 解码器，报错信息必须说清楚原因，
     // 否则用户只会以为文件坏了
-    const cur = player.current
     toast(cur && cur.isDsd
       ? 'DSD 文件需要独占输出才能播放：点标题栏波形按钮开启（已跳过）'
       : '该歌曲无法播放，已跳过', cur && cur.isDsd ? 4000 : 1800)
@@ -1115,14 +1153,18 @@ async function toggleFavoriteCurrent() {
 async function loadLyric(track) {
   state.lyricOffset = state.settings.lyricOffset || 0
   UI.setLyricOffset(state.lyricOffset)
-  if (!track.hasLyric) {
+  const isOnline = !!track.online
+  if (!isOnline && !track.hasLyric) {
     if (track.id === state.currentId) UI.renderLyric(null, track.title)
     return
   }
   let parsed = state.lyricCache.get(track.id)
   if (parsed === undefined) {
-    const text = await window.api.readLyric(track.id)
-    // 读文件是异步的：等待期间用户可能已经切歌，慢返回的旧歌词不能覆盖新歌
+    // 在线曲目走主进程取词（本源没词会自动换源找同一首）
+    const text = isOnline
+      ? await window.api.onlineLyric(track.online).catch(() => null)
+      : await window.api.readLyric(track.id)
+    // 读文件/取词是异步的：等待期间用户可能已经切歌，慢返回的旧歌词不能覆盖新歌
     if (track.id !== state.currentId) return
     parsed = text ? parseLrc(text) : null
     state.lyricCache.set(track.id, parsed)

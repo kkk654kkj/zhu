@@ -48,6 +48,27 @@ contextBridge.exposeInMainWorld('api', {
   // 歌词
   readLyric: (trackId) => invoke('lyric:read', trackId),
 
+  /* ---- 联网版（v3.0）：在线音乐 ---- */
+  onlineSources: () => invoke('online:sources'),
+  onlineSearch: (opts) => invoke('online:search', opts),
+  /** 解析播放地址：{ ok, streamUrl, song, fallback, partial, bitrate, error } */
+  onlinePlayable: (song) => invoke('online:playable', song),
+  onlineLyric: (song) => invoke('online:lyric', song),
+  onlineDownload: (song) => invoke('online:download', song),
+  onlineCancelDownload: (key) => invoke('online:cancelDownload', key),
+  onlinePickDownloadDir: () => invoke('online:pickDownloadDir'),
+  onlineOpenDownloadDir: () => invoke('online:openDownloadDir'),
+  onDownloadProgress: (cb) => {
+    const h = (_e, p) => cb(p)
+    ipcRenderer.on('online:download-progress', h)
+    return () => ipcRenderer.removeListener('online:download-progress', h)
+  },
+  onDownloadDone: (cb) => {
+    const h = (_e, p) => cb(p)
+    ipcRenderer.on('online:download-done', h)
+    return () => ipcRenderer.removeListener('online:download-done', h)
+  },
+
   // 系统
   pickDirs: () => invoke('dialog:pickDirs'),
   showInFolder: (p) => invoke('shell:showItem', p),
