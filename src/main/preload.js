@@ -63,6 +63,9 @@ contextBridge.exposeInMainWorld('api', {
   onlineCacheClear: () => invoke('online:cacheClear'),
   onlinePickCacheDir: () => invoke('online:pickCacheDir'),
   onlineOpenCacheDir: () => invoke('online:openCacheDir'),
+  onlineExtraKeyGet: () => invoke('online:extraKeyGet'),
+  onlineExtraKeySet: (key) => invoke('online:extraKeySet', key),
+  onlineOpenChksz: () => invoke('online:openChksz'),
   onNowPlaying: (cb) => {
     const h = (_e, p) => cb(p)
     ipcRenderer.on('online:now-playing', h)

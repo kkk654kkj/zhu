@@ -761,7 +761,8 @@ const DEFAULT_SETTINGS = {
   onlineQualityMigrated: false,// v3.1 一次性迁移标记（老版本默认 best → lossless）
   onlineCacheOn: true,         // 播放时顺手把音频缓存到本地
   onlineCacheDir: '',          // 缓存目录，'' = 数据目录\music-cache
-  onlineCacheLimitMB: 4096     // 缓存上限（MB），0 = 不限；超了按最久没放的删
+  onlineCacheLimitMB: 4096,    // 缓存上限（MB），0 = 不限；超了按最久没放的删
+  onlineChkszKey: ''           // 可选：ChKSz API 的 apikey，填了就能给 QQ/酷狗 的歌拿无损
 }
 
 // 迷你卡片默认尺寸 / 尺寸下限
@@ -1961,6 +1962,36 @@ function registerIpc() {
     return dir
   })
 
+  // —— 联网版：可选的高级音源（ChKSz，用户自己的 apikey） ——
+  ipcMain.handle('online:extraKeyGet', () => {
+    const k = String(store.get().settings.onlineChkszKey || '')
+    return {
+      set: !!k,
+      // 只回显头尾，避免截屏/录屏时整串漏出去
+      masked: k ? k.slice(0, 4) + '••••' + k.slice(-4) : ''
+    }
+  })
+
+  ipcMain.handle('online:extraKeySet', async (e, key) => {
+    const k = String(key || '').trim()
+    if (!k) {
+      online.setExtraKey('')
+      store.patch({ settings: { ...store.get().settings, onlineChkszKey: '' } })
+      return { ok: true, cleared: true }
+    }
+    const r = await online.testExtraKey(k)
+    if (!r.ok) return { ok: false, error: r.error }
+    online.setExtraKey(k)
+    store.patch({ settings: { ...store.get().settings, onlineChkszKey: k } })
+    logLine('[online] 已配置 ChKSz key')
+    return { ok: true, gotUrl: !!r.gotUrl }
+  })
+
+  ipcMain.handle('online:openChksz', () => {
+    shell.openExternal('https://api.chksz.com/login.html')
+    return true
+  })
+
   // —— 对话框 / 系统集成 ——
   ipcMain.handle('dialog:pickDirs', async () => {
     const res = await dialog.showOpenDialog(win, {
@@ -2356,6 +2387,7 @@ if (gotLock) cleanChromiumCache()
     registerFileProtocol()
     registerCoverProtocol()
     online.setLogger(logLine)
+    online.setExtraKey(store.get().settings.onlineChkszKey || '')
     startStreamServer()
     await library.init()
     registerIpc()

@@ -573,6 +573,63 @@ async function probeStream(info, realDuration, expectDuration = 0) {
 const GD_API = 'https://music-api.gdstudio.xyz/api.php'
 const FLAC_PREFER = 'lossless'
 
+/**
+ * 可选的第二个无损来源：ChKSz API（需要用户自己注册拿 apikey）。
+ *
+ * 为什么需要它：GDStudio 只能查网易，而网易没有周杰伦这类歌的版权，
+ * 所以那些歌永远拿不到无损。ChKSz 背后是别人的 SVIP 号池，
+ * 网易/QQ/酷狗都能给 flac——正好补上 QQ 和酷狗这一半。
+ *
+ * 代价是额度（据其文档：每日 50 次/账户），所以只在「源是 QQ/酷狗」时才用它，
+ * 网易的歌优先走免费的 GDStudio，省着点花。
+ */
+let extraKey = ''
+function setExtraKey(k) {
+  extraKey = String(k || '').trim()
+}
+
+const CHKSZ = 'https://api.chksz.com/api'
+
+/** 按源把我们的 id 换成 ChKSz 的请求（它只认 wy / qq / kg 三种） */
+function chkszEndpoint(song, key) {
+  const id = encode(song.id)
+  const k = encode(key)
+  if (song.source === 'wy') return `${CHKSZ}/163_music?id=${id}&level=lossless&apikey=${k}`
+  if (song.source === 'qq') return `${CHKSZ}/qq_music?mid=${id}&size=flac&apikey=${k}`
+  if (song.source === 'kg') return `${CHKSZ}/kugou_music?id=${id}&size=flac&apikey=${k}`
+  return null // 酷我它不支持
+}
+
+/** 用 ChKSz 拿 flac；拿不到（没 key / 无权限 / 额度用完）返回 null */
+async function chkszLossless(song, key) {
+  const url = chkszEndpoint(song, key)
+  if (!url) return null
+  const j = await reqJson(url, { timeout: 8000 })
+  if (!j || j.code !== 200 || !j.url) {
+    if (j && j.code === 401) logger('[chksz] apikey 无效')
+    else if (j && (j.code === 402 || j.code === 429)) logger('[chksz] 额度不足或被限流 ' + j.code)
+    return null
+  }
+  const fmt = String(j.format || j.bitrate || '').toLowerCase()
+  const isFlac = /\.flac(\?|$)/i.test(j.url) || fmt === 'flac' || Number(j.br) >= 700
+  if (!isFlac) return null
+  const duration = song.duration || 0
+  const probed = await probeStream(
+    { url: j.url, ext: 'flac', bitrate: Number(j.br) || 900, duration, referer: 'https://music.163.com/' },
+    duration,
+    duration
+  )
+  if (probed.broken || probed.partial) return null
+  return {
+    ...probed,
+    duration,
+    actual: song,
+    lossless: true,
+    ext: 'flac',
+    from: 'chksz'
+  }
+}
+
 /** 这首歌在网易有没有对得上的条目（歌手必须一致，时长差太多不要） */
 async function neteaseTwin(song) {
   if (song.source === 'wy' && song.id) return song
@@ -584,38 +641,76 @@ async function neteaseTwin(song) {
   }
 }
 
+/** 验一下 apikey 能不能用（会在对方那边消耗 1 次额度，所以只在保存时调） */
+async function testExtraKey(key) {
+  const k = String(key || '').trim()
+  if (!k) return { ok: false, error: '没有填 key' }
+  const j = await reqJson(`${CHKSZ}/163_music?id=1330348068&level=lossless&apikey=${encode(k)}`, { timeout: 9000 })
+  if (!j) return { ok: false, error: '接口没有响应（网络不通或被墙）' }
+  if (j.code === 401) return { ok: false, error: 'apikey 无效' }
+  if (j.code === 402) return { ok: false, error: '额度已用完' }
+  if (j.code === 429) return { ok: false, error: '请求太频繁，稍后再试' }
+  if (j.code === 200) return { ok: true, gotUrl: !!j.url }
+  return { ok: false, error: j.msg || ('接口返回 code ' + j.code) }
+}
+
 /**
- * 拿无损直链。返回 null 表示「这首歌拿不到无损」，调用方直接降级即可。
- * 注意聚合 API 的搜索接口极慢（实测 7~90 秒），所以只用它的 url 接口。
+ * 拿无损直链，按「免费优先、花钱的兜底」的顺序试：
+ *
+ *  ① QQ/酷狗 的歌 → 有 key 就直接问 ChKSz（网易根本没这些歌，绕过去是白跑）
+ *  ② 网易这条路 → GDStudio（免费，覆盖大部分非版权独占的歌）
+ *  ③ 还不行且有 key → ChKSz 兜底（网易源也能用它的 163_music）
+ *
+ * 返回 null 表示「这首歌拿不到无损」，调用方直接降级即可。
+ * 注意 GDStudio 的搜索接口极慢（实测 7~90 秒），所以只用它的 url 接口。
  */
 async function resolveLossless(song, prefer) {
-  const twin = await neteaseTwin(song)
-  if (!twin) return null
-  const askUrl = () => reqJson(`${GD_API}?types=url&source=netease&id=${encode(twin.id)}&br=999`, { timeout: 7000 })
-  // 这个聚合 API 抖动挺厉害，同一首歌两次跑结果可能不同。
-  // 拿不到响应（超时/502）就再问一次；但它明确回了一个非 flac 地址，说明这首确实没有，别浪费第二次。
-  let j = await askUrl()
-  if (!j || !j.url) j = await askUrl()
-  if (!j || !j.url) return null
-  const br = Number(j.br) || 0
-  // 有些歌只给 320k mp3，也走这个接口——那种情况不算无损，交给降级处理
-  const isFlac = /\.flac(\?|$)/i.test(j.url) || br >= 700
-  if (!isFlac) return null
-  // 真取一下头几个字节，确认不是错误页
-  const probed = await probeStream(
-    { url: j.url, ext: 'flac', bitrate: br, duration: twin.duration || song.duration || 0, size: Number(j.size) || 0, referer: 'https://music.163.com/' },
-    twin.duration || song.duration || 0,
-    song.duration || 0
-  )
-  if (probed.broken || probed.partial) return null
-  return {
-    ...probed,
-    // 播放时长以下载得到的这份为准，界面上的时长别被蹭偏
-    duration: twin.duration || song.duration || 0,
-    actual: twin,
-    lossless: true,
-    ext: 'flac'
+  const key = extraKey
+
+  // ① QQ / 酷狗：只有 ChKSz 能拿（GDStudio 只支持网易）
+  if (key && (song.source === 'qq' || song.source === 'kg')) {
+    const got = await chkszLossless(song, key)
+    if (got) return got
   }
+
+  // ② 网易：免费的 GDStudio
+  const twin = await neteaseTwin(song)
+  if (twin) {
+    const askUrl = () => reqJson(`${GD_API}?types=url&source=netease&id=${encode(twin.id)}&br=999`, { timeout: 7000 })
+    // 这个聚合 API 抖动挺厉害，同一首歌两次跑结果可能不同。
+    // 拿不到响应（超时/502）就再问一次；但它明确回了一个非 flac 地址，说明这首确实没有，别浪费第二次。
+    let j = await askUrl()
+    if (!j || !j.url) j = await askUrl()
+    if (j && j.url) {
+      const br = Number(j.br) || 0
+      // 有些歌只给 320k mp3，也走这个接口——那种情况不算无损，交给降级处理
+      if (/\.flac(\?|$)/i.test(j.url) || br >= 700) {
+        // 真取一下头几个字节，确认不是错误页
+        const probed = await probeStream(
+          { url: j.url, ext: 'flac', bitrate: br, duration: twin.duration || song.duration || 0, size: Number(j.size) || 0, referer: 'https://music.163.com/' },
+          twin.duration || song.duration || 0,
+          song.duration || 0
+        )
+        if (!probed.broken && !probed.partial) {
+          return {
+            ...probed,
+            // 播放时长以下载得到的这份为准，界面上的时长别被蹭偏
+            duration: twin.duration || song.duration || 0,
+            actual: twin,
+            lossless: true,
+            ext: 'flac'
+          }
+        }
+      }
+    }
+  }
+
+  // ③ 兜底：有 key 的话，ChKSz 再试一次（腾讯/酷狗的号池有时比免费接口更硬）
+  if (key) {
+    const got = await chkszLossless(twin || song, key)
+    if (got) return { ...got, actual: twin || song }
+  }
+  return null
 }
 
 /**
@@ -937,6 +1032,8 @@ module.exports = {
   SOURCES,
   SOURCE_ORDER,
   setLogger,
+  setExtraKey,
+  testExtraKey,
   listSources,
   search,
   getPlayable,

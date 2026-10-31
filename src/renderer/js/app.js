@@ -1139,6 +1139,38 @@ function bindCachePanel() {
     toast(r ? `已清理 ${r.removed} 首缓存` : '清理失败')
     refreshCachePanel()
   })
+
+  // 高级音源（ChKSz apikey）：用户自己的账号，存本地 settings.json
+  const paintKeyState = async () => {
+    const st = await window.api.onlineExtraKeyGet().catch(() => null)
+    const el = document.getElementById('keyState')
+    if (!st || !el) return
+    el.textContent = st.set ? '已设置 ' + st.masked : '未设置（QQ/酷狗 只能 320k）'
+    el.style.color = st.set ? 'var(--accent)' : ''
+  }
+  document.getElementById('keySave').addEventListener('click', async () => {
+    const input = document.getElementById('chkszKey')
+    const k = input.value.trim()
+    if (!k) { toast('先粘贴 apikey'); return }
+    document.getElementById('keySave').textContent = '验证中…'
+    const r = await window.api.onlineExtraKeySet(k).catch((err) => ({ ok: false, error: err.message }))
+    document.getElementById('keySave').textContent = '保存并验证'
+    if (r && r.ok) {
+      input.value = ''
+      toast(r.gotUrl ? 'key 有效，已启用' : 'key 有效（这首取不到，可能额度或版权），已启用')
+      paintKeyState()
+    } else {
+      toast('没通过：' + ((r && r.error) || '未知错误'), 3500)
+    }
+  })
+  document.getElementById('keyReg').addEventListener('click', () => window.api.onlineOpenChksz())
+  document.getElementById('keyClear').addEventListener('click', async () => {
+    await window.api.onlineExtraKeySet('').catch(() => {})
+    document.getElementById('chkszKey').value = ''
+    toast('已清除高级音源')
+    paintKeyState()
+  })
+  paintKeyState()
 }
 
 async function refreshAudioDevices() {

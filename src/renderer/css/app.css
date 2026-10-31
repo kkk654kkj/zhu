@@ -1947,3 +1947,17 @@ body.mini .hifi-badge { display: none; }
 .sp-chip.danger { color: #e06666; border-color: rgba(224,102,102,.4); }
 .sp-chip.danger:hover { color: #ff8080; border-color: #e06666; background: rgba(224,102,102,.1); }
 #cachePanel .op-select { margin-left: auto; }
+
+.cp-sep { height: 1px; background: var(--line-soft); margin: 10px 12px 0; }
+.cp-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input, #1a1d23);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--txt);
+  font-size: 11px;
+  padding: 5px 8px;
+  outline: none;
+}
+.cp-input:focus { border-color: var(--accent); }

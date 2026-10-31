@@ -316,7 +316,7 @@
 <!-- 在线缓存面板（v3.1：缓存目录 / 上限 / 清理） -->
 <div id="cachePanel" hidden>
   <div class="sp-head">
-    <span>在线音乐缓存</span>
+    <span>在线音乐设置</span>
     <button class="mini-btn" id="btnCacheClose"><svg><use href="#i-close"/></svg></button>
   </div>
   <div class="sp-count" id="cacheUsage">读取中…</div>
@@ -346,6 +346,20 @@
     <button class="sp-chip" id="cacheClear">清理缓存</button>
   </div>
   <div class="sp-foot">放完整首才会缓存（中途切歌不留残片）；再放同一首不用等解析。超出上限按最久没放的自动删。</div>
+  <div class="cp-sep"></div>
+  <div class="cp-row">
+    <span class="cp-label">高级音源</span>
+    <span class="cp-path" id="keyState">未设置</span>
+  </div>
+  <div class="cp-row">
+    <input id="chkszKey" class="cp-input" type="password" spellcheck="false" placeholder="粘贴 apikey（可留空）" />
+  </div>
+  <div class="sp-opts">
+    <button class="sp-chip" id="keySave">保存并验证</button>
+    <button class="sp-chip" id="keyReg">去注册</button>
+    <button class="sp-chip" id="keyClear">清除</button>
+  </div>
+  <div class="sp-foot">填了才能给 QQ / 酷狗 的歌拿无损（这两家在网易没版权）。每日免费 50 次，网易的歌仍走免费通道不占额度。</div>
 </div>
 
 <!-- 独占输出面板（v2.3 设备选择；v2.5 加高精度音量） -->
