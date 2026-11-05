@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld('api', {
   onlineSearch: (opts) => invoke('online:search', opts),
   /** 解析播放地址：{ ok, streamUrl, song, fallback, partial, bitrate, error } */
   onlinePlayable: (song) => invoke('online:playable', song),
+  onlineProbe: (song) => invoke('online:probe', song),
   onlineLyric: (song) => invoke('online:lyric', song),
   onlineDownload: (song) => invoke('online:download', song),
   onlineCancelDownload: (key) => invoke('online:cancelDownload', key),

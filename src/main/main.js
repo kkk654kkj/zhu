@@ -1613,6 +1613,27 @@ function qualityPref() {
   return 'best'
 }
 
+/* 音质探测：结果缓存 10 分钟 + 并发闸门（最多 3 个同时跑，别把解析服务打爆） */
+const probeCache = new Map()
+const PROBE_TTL = 10 * 60 * 1000
+let probeRunning = 0
+const probeWaiting = []
+
+function probeLimit(fn) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      probeRunning++
+      fn().then(resolve, reject).finally(() => {
+        probeRunning--
+        const next = probeWaiting.shift()
+        if (next) next()
+      })
+    }
+    if (probeRunning < 3) run()
+    else probeWaiting.push(run)
+  })
+}
+
 function registerIpc() {
   // —— 音乐库 ——
   // 扫库期间 lib:list 必须等待扫描结束，否则渲染进程会读到半成品列表
@@ -1866,6 +1887,45 @@ function registerIpc() {
       }
     } catch (err) {
       return { ok: false, error: err.message || '解析失败' }
+    }
+  })
+
+  /**
+   * v3.2.1：列表里的「音质」探测。
+   *
+   * 搜索接口给的码率是平台标称值（酷我一律 128k、QQ 一律 128k），既不反映实际，
+   * 也看不出有没有无损——用户看到一列 128k 就以为放不了 flac。
+   * 这里对可见的十几行各问一次解析服务，拿真实文件大小算码率，
+   * 顺带把直链塞进缓存：真点播放时就不用再解析了。
+   */
+  ipcMain.handle('online:probe', async (e, song) => {
+    if (!song || !song.source || !song.id) return { ok: false }
+    const prefer = qualityPref()
+    if (prefer === '128k') return { ok: false, skipped: true }
+    const ck = `${song.source}:${song.id}:${prefer}`
+    const hit = probeCache.get(ck)
+    if (hit && Date.now() - hit.at < PROBE_TTL) return hit.data
+    const run = async () => {
+      const info = await Promise.race([
+        online.getPlayable(song, prefer),
+        new Promise((r) => setTimeout(() => r(null), 8000))
+      ])
+      if (!info) throw new Error('no info')
+      const data = {
+        ok: true,
+        lossless: !!info.lossless,
+        level: info.level || '',
+        bitrate: info.bitrate || 0,
+        ext: info.ext || 'mp3',
+        size: info.size || 0
+      }
+      probeCache.set(ck, { at: Date.now(), data })
+      return data
+    }
+    try {
+      return await probeLimit(run)
+    } catch (err) {
+      return { ok: false }
     }
   })
 

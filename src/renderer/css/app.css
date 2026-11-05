@@ -1788,7 +1788,7 @@ body.mini .hifi-badge { display: none; }
   display: grid;
   align-items: center;
   gap: 10px;
-  grid-template-columns: 38px minmax(160px, 1.6fr) minmax(90px, 1fr) 78px 70px 60px 92px;
+  grid-template-columns: 38px minmax(160px, 1.6fr) minmax(90px, 1fr) 78px 76px 60px 92px;
   height: 40px;
   margin: 0 12px;
   padding: 0 12px;
@@ -1961,3 +1961,7 @@ body.mini .hifi-badge { display: none; }
   outline: none;
 }
 .cp-input:focus { border-color: var(--accent); }
+
+/* 在线列表「音质」列：探测中/探测失败压暗，拿到 flac 时点亮 */
+.op-c-q.dim { color: var(--txt-3); opacity: .55; }
+.op-c-q.lossless { color: #5ad18a; font-weight: 600; }

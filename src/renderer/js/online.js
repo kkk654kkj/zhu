@@ -23,6 +23,7 @@ const Online = {
   hasMore: false,
   loading: false,
   playingId: null,     // 当前正在播的在线曲目 id（on:<src>:<id>）
+  probeToken: 0,       // 音质探测轮次（换关键词就作废上一轮）
   sources: [],         // 全部可用源（主进程返回）
   proxyBase: '',       // 本地代理基地址 http://127.0.0.1:<port>
   enabled: new Set(),  // 本次参与搜索的源
@@ -177,7 +178,7 @@ const Online = {
         </div>
         <div class="op-c-artist" title="${esc(s.artist)}">${esc(s.artist)}</div>
         <div class="op-c-src"><span class="op-badge ${esc(s.source)}">${esc(srcName.get(s.source) || s.source)}</span></div>
-        <div class="op-c-q ${s.quality === '320k' ? 'high' : ''}">${esc(s.quality || '')}</div>
+        <div class="op-c-q ${s._q ? esc(s._q.cls) : (s.quality === '320k' ? 'high dim' : 'dim')}" title="${esc(s._q && s._q.tip ? s._q.tip : '还没探测；播放时按实际文件大小算')}">${esc(s._q ? s._q.text : (s.quality || '—'))}</div>
         <div class="op-c-dur">${fmtDuration(s.duration)}</div>
         <div class="op-c-act">
           <button class="op-act-btn" data-act="play" title="播放">${icon('play')}</button>
@@ -186,6 +187,7 @@ const Online = {
         </div>
       </div>`
     }).join('')
+    this.probeQuality()
   },
 
   markPlaying(id) {
@@ -193,6 +195,53 @@ const Online = {
     document.querySelectorAll('#opBody .op-tr').forEach((el) => {
       el.classList.toggle('playing', el.dataset.id === id)
     })
+  },
+
+  /**
+   * 逐行探测「实际能拿到什么音质」。
+   *
+   * 搜索接口给的码率是平台标称（酷我/QQ 一律 128k），看不出无损，容易让人以为放不了 flac。
+   * 这里对前 24 行各问一次解析服务——只取 2 字节拿 content-range，顺带把直链塞进缓存，
+   * 真点播放时就不用再解析。3 路并发，换关键词就作废上一轮。
+   */
+  async probeQuality() {
+    const token = ++this.probeToken
+    if (qualityKey() === '128k') return
+    const rows = Array.from(document.querySelectorAll('#opBody .op-tr'))
+    const todo = []
+    for (const row of rows.slice(0, 24)) {
+      const song = this.list[Number(row.dataset.index)]
+      if (song && !song._q) todo.push({ row, song })
+    }
+    if (!todo.length) return
+    let idx = 0
+    const worker = async () => {
+      while (idx < todo.length) {
+        if (this.probeToken !== token) return
+        const { row, song } = todo[idx++]
+        const r = await window.api.onlineProbe(song).catch(() => null)
+        if (this.probeToken !== token) return
+        if (!r || !r.ok) {
+          song._q = { text: song.quality || '—', cls: 'dim' }
+        } else if (r.lossless) {
+          const hi = r.level === 'jymaster' || r.level === 'master' || (r.bitrate || 0) >= 1411
+          song._q = {
+            text: hi ? '高解析' : '无损',
+            cls: 'lossless',
+            tip: (hi ? '高解析 FLAC' : '无损 FLAC') + (r.bitrate ? ' · ' + r.bitrate + 'k' : '') + (r.size ? ' · ' + (r.size / 1048576).toFixed(1) + 'MB' : '')
+          }
+        } else {
+          song._q = { text: (r.bitrate || 0) + 'k', cls: 'dim', tip: '只能拿到 ' + (r.bitrate || 0) + 'k ' + String(r.ext || '').toUpperCase() }
+        }
+        const cell = row.querySelector('.op-c-q')
+        if (cell) {
+          cell.textContent = song._q.text
+          cell.className = 'op-c-q ' + song._q.cls
+          if (song._q.tip) cell.title = song._q.tip
+        }
+      }
+    }
+    await Promise.all([worker(), worker(), worker()])
   },
 
   /* ---------------- 搜索 ---------------- */
