@@ -1171,6 +1171,37 @@ function bindCachePanel() {
     paintKeyState()
   })
   paintKeyState()
+
+  // 青听网关（v3.2）：默认开，关掉就只剩 GDStudio（网易）
+  const paintQing = async () => {
+    const st = await window.api.onlineQingGet().catch(() => null)
+    const el = document.getElementById('qingOn')
+    if (!st || !el) return
+    el.checked = st.on !== false
+    document.getElementById('qingState').textContent = st.on !== false ? '已启用' : '已关闭'
+  }
+  document.getElementById('qingOn').addEventListener('change', async (e) => {
+    const on = e.target.checked
+    await window.api.onlineQingSet(on).catch(() => {})
+    document.getElementById('qingState').textContent = on ? '已启用' : '已关闭'
+    toast(on ? '青听网关已启用（QQ/酷我/酷狗 也能无损）' : '已关闭青听网关，只走网易线路')
+  })
+  document.getElementById('qingTest').addEventListener('click', async () => {
+    const btn = document.getElementById('qingTest')
+    const el = document.getElementById('qingState')
+    btn.textContent = '测试中…'
+    el.textContent = ''
+    const r = await window.api.onlineQingTest().catch((err) => ({ ok: false, error: err.message }))
+    btn.textContent = '测试线路'
+    if (r && r.ok) {
+      el.textContent = '线路正常 · ' + r.ms + 'ms'
+      el.style.color = 'var(--accent)'
+    } else {
+      el.textContent = '不通：' + ((r && r.error) || '未知错误')
+      el.style.color = '#e06666'
+    }
+  })
+  paintQing()
 }
 
 async function refreshAudioDevices() {

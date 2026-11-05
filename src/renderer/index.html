@@ -147,7 +147,8 @@
         <div class="op-filters">
           <div class="op-sources" id="opSources"></div>
           <div class="op-right">
-            <select id="opQuality" class="op-select" title="音质偏好：优先无损(flac)，拿不到自动降级到 320k / 128k">
+            <select id="opQuality" class="op-select" title="音质偏好：母带 / 无损(flac) / 320k / 128k，拿不到自动降级">
+              <option value="master">母带（最大）</option>
               <option value="lossless">无损优先</option>
               <option value="best">音质优先</option>
               <option value="128k">省流量</option>
@@ -359,7 +360,17 @@
     <button class="sp-chip" id="keyReg">去注册</button>
     <button class="sp-chip" id="keyClear">清除</button>
   </div>
-  <div class="sp-foot">填了才能给 QQ / 酷狗 的歌拿无损（这两家在网易没版权）。每日免费 50 次，网易的歌仍走免费通道不占额度。</div>
+  <div class="sp-foot">可选。该站目前关闭了邮箱注册（只剩邀请制的 LinuxDo 登录），
+    而下面的青听网关已能覆盖 QQ / 酷狗，一般用不着填。</div>
+  <div class="cp-sep"></div>
+  <div class="cp-row">
+    <label class="cp-check"><input type="checkbox" id="qingOn" /><span>青听网关（四家通吃 · 含母带）</span></label>
+  </div>
+  <div class="sp-opts">
+    <button class="sp-chip" id="qingTest">测试线路</button>
+    <span class="cp-path" id="qingState">—</span>
+  </div>
+  <div class="sp-foot">开着的优先走它：QQ / 酷我 / 酷狗 / 网易 都能直接换 flac，还能要母带档。它是别人的中转服务，挂了就自动退回原来的线路，不影响播放。</div>
 </div>
 
 <!-- 独占输出面板（v2.3 设备选择；v2.5 加高精度音量） -->

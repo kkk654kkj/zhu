@@ -327,7 +327,7 @@ function cacheKeyOf(song, cls) {
 
 /** 请求的音质 → 可以接受的缓存档位（从优到次） */
 function cacheKeysFor(prefer) {
-  if (prefer === 'lossless') return ['flac']
+  if (prefer === 'lossless' || prefer === 'master') return ['flac']
   if (prefer === '128k') return ['128', 'best']   // 省流量不吃 flac（动辄上百 MB）
   return ['best', 'flac']                          // 音质优先时 flac 当然更好
 }
@@ -550,6 +550,12 @@ function startStreamServer() {
       }
       const headers = { 'User-Agent': 'Mozilla/5.0' }
       if (info.referer) headers.Referer = info.referer
+      // 有些平台的直链要带它自己指定的头（比如 QQ 的 Cookie/Referer），网关会一起给
+      if (info.headers && typeof info.headers === 'object') {
+        for (const [k, v] of Object.entries(info.headers)) {
+          if (typeof v === 'string' && !/^(host|content-length|connection|range)$/i.test(k)) headers[k] = v
+        }
+      }
       if (req.headers.range) headers.Range = req.headers.range
       const upstream = await fetch(info.url, { headers, redirect: 'follow' })
       if (!upstream.ok && upstream.status !== 206) {
@@ -757,8 +763,9 @@ const DEFAULT_SETTINGS = {
   // 联网版（v3.0）：在线音乐
   onlineDownloadDir: '',       // 下载目录，'' = 默认「音乐\猪专属下载」
   onlineSources: ['kw', 'qq', 'kg', 'wy'],  // 参与搜索的音源（顺序即合并优先级）
-  onlineQuality: 'lossless',   // lossless（能拿 flac 就拿，拿不到自动降级）| best | 128k
+  onlineQuality: 'lossless',   // master（母带，最大）| lossless | best | 128k
   onlineQualityMigrated: false,// v3.1 一次性迁移标记（老版本默认 best → lossless）
+  onlineQingOn: true,          // v3.2：青听网关（四家通吃、含母带）；关掉就只走 GDStudio
   onlineCacheOn: true,         // 播放时顺手把音频缓存到本地
   onlineCacheDir: '',          // 缓存目录，'' = 数据目录\music-cache
   onlineCacheLimitMB: 4096,    // 缓存上限（MB），0 = 不限；超了按最久没放的删
@@ -1600,6 +1607,7 @@ const activeDownloads = new Map()
 /** 音质设置 → 各音源认的 prefer 值（只有 lossless / best / 128k 三种） */
 function qualityPref() {
   const q = store.get().settings.onlineQuality
+  if (q === 'master') return 'master'
   if (q === 'lossless') return 'lossless'
   if (q === '128k') return '128k'
   return 'best'
@@ -1850,6 +1858,8 @@ function registerIpc() {
         fallback: !!info.fallback,
         partial: !!info.partial,
         lossless: !!info.lossless,
+        level: info.level || '',
+        from: info.from || '',
         bitrate: info.bitrate || 0,
         ext: info.ext || 'mp3',
         size: info.size || 0
@@ -1991,6 +2001,21 @@ function registerIpc() {
     shell.openExternal('https://api.chksz.com/login.html')
     return true
   })
+
+  // —— 联网版 v3.2：青听网关（四家通吃，含母带档） ——
+  ipcMain.handle('online:qingGet', () => ({
+    on: store.get().settings.onlineQingOn !== false
+  }))
+
+  ipcMain.handle('online:qingSet', (e, on) => {
+    const v = on !== false
+    online.setQingEnabled(v)
+    store.patch({ settings: { ...store.get().settings, onlineQingOn: v } })
+    logLine('[online] 青听网关', v ? '已启用' : '已关闭')
+    return { ok: true, on: v }
+  })
+
+  ipcMain.handle('online:qingTest', async () => online.qingSelfTest())
 
   // —— 对话框 / 系统集成 ——
   ipcMain.handle('dialog:pickDirs', async () => {
@@ -2388,6 +2413,7 @@ if (gotLock) cleanChromiumCache()
     registerCoverProtocol()
     online.setLogger(logLine)
     online.setExtraKey(store.get().settings.onlineChkszKey || '')
+    online.setQingEnabled(store.get().settings.onlineQingOn !== false)
     startStreamServer()
     await library.init()
     registerIpc()

@@ -531,6 +531,7 @@ async function probeStream(info, realDuration, expectDuration = 0) {
   try {
     const headers = { Range: 'bytes=0-1' }
     if (info.referer) headers.Referer = info.referer
+    if (info.headers && typeof info.headers === 'object') Object.assign(headers, info.headers)
     const res = await req(info.url, { headers, timeout: 8000 })
     const cr = res.headers.get('content-range') || ''
     const total = Number(cr.split('/')[1]) || 0
@@ -572,6 +573,155 @@ async function probeStream(info, realDuration, expectDuration = 0) {
  */
 const GD_API = 'https://music-api.gdstudio.xyz/api.php'
 const FLAC_PREFER = 'lossless'
+
+/* ---------------- 无损来源②：青听网关（四家通吃，含母带） ---------------- */
+
+/**
+ * 青听音乐（Windows 客户端 v1.0.3）用的解析网关，协议是从它的 app.asar 里读出来的：
+ *
+ *   POST {base}/gateway/ticket      → 领一张 12 小时的匿名票（ttl 43200s）
+ *   POST {base}/music/resolve-url   → { source, rid, level } 换直链
+ *
+ * 头里带 6 个字段，签名是
+ *   HMAC-SHA256(secret, [appId, ts, nonce, METHOD, pathname, sha256hex(body)].join('\n'))
+ * 匿名票 uid 为空也能用，不需要登录、不需要 key。
+ *
+ * 相比 GDStudio：支持 QQ/酷我/酷狗（周杰伦那批终于有 flac）、单次 150~600ms、
+ * 还能要 master / jymaster 母带档。代价是老样子——别人的中转服务，随时可能停，
+ * 所以拿不到就当没有，直接走后面的降级链路，绝不影响能出声这件事。
+ */
+const QING_BASES = ['https://musicserver.haitangw.cc/v1', 'https://qt.haitangw.net/v1']
+const QING_APP_ID = 'qingmusic-desktop'
+const QING_SECRET = 'qm-gw-7c1f4e9a2b8d5360e1a7c4f9b2d8036c'
+const QING_VER = '1.0.3'
+/** 我们的源 id → 它的源 id（它是 tx，我们沿用 tx 之外的叫法 qq） */
+const QING_SRC = { wy: 'wy', qq: 'tx', kg: 'kg', kw: 'kw' }
+/** 每档偏好的尝试顺序；拿不到就往下掉一级 */
+const QING_LEVELS = {
+  master: { wy: ['jymaster', 'hires', 'lossless'], qq: ['jymaster', 'hires', 'lossless'], kw: ['master', 'hires', 'lossless'], kg: ['hires', 'lossless'] },
+  lossless: { wy: ['lossless'], qq: ['lossless'], kw: ['lossless'], kg: ['lossless'] }
+}
+
+let qingOn = true
+let qingTicket = ''
+let qingTicketExp = 0
+let qingTicketPending = null
+// 设备号只在内存里随机生成：服务端只拿它绑票，不校验硬件，重启换一个没关系
+const qingDevice = crypto.randomBytes(8).toString('hex')
+
+function setQingEnabled(on) { qingOn = on !== false }
+
+function qingHeaders(method, url, body, ticket) {
+  const ts = String(Date.now())
+  const nonce = crypto.randomBytes(16).toString('hex')
+  let path = '/'
+  try { path = new URL(url).pathname || '/' } catch (err) { /* 保持 / */ }
+  const raw = [QING_APP_ID, ts, nonce, method.toUpperCase(), path,
+    crypto.createHash('sha256').update(body, 'utf8').digest('hex')].join('\n')
+  const h = {
+    'X-Qing-App-Id': QING_APP_ID,
+    'X-Qing-App-Version': QING_VER,
+    'X-Qing-Device-Id': qingDevice,
+    'X-Qing-Ts': ts,
+    'X-Qing-Nonce': nonce,
+    'X-Qing-Sign': crypto.createHmac('sha256', QING_SECRET).update(raw, 'utf8').digest('hex')
+  }
+  if (ticket) h.Authorization = 'Bearer ' + ticket
+  return h
+}
+
+/** 领票；12 小时有效，提前 10 分钟换新的 */
+async function qingEnsureTicket() {
+  if (qingTicket && Date.now() < qingTicketExp) return qingTicket
+  if (qingTicketPending) return qingTicketPending
+  qingTicketPending = (async () => {
+    for (const base of QING_BASES) {
+      try {
+        const url = base + '/gateway/ticket'
+        const body = JSON.stringify({ deviceId: qingDevice, appVersion: QING_VER, platform: 'win32' })
+        const r = await req(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...qingHeaders('POST', url, body) },
+          body,
+          timeout: 8000
+        })
+        const j = await r.json().catch(() => null)
+        if (j && j.ticket) {
+          qingTicket = j.ticket
+          qingTicketExp = Number(j.expiresAt) > 0 ? Number(j.expiresAt) - 600000 : Date.now() + 3600000
+          return qingTicket
+        }
+      } catch (err) { /* 换下一条线路 */ }
+    }
+    return ''
+  })().finally(() => { qingTicketPending = null })
+  return qingTicketPending
+}
+
+/** 换一次直链；返回 { url } 或 null */
+async function qingResolveOnce(source, rid, level) {
+  const ticket = await qingEnsureTicket()
+  if (!ticket) return null
+  const body = JSON.stringify({ source, rid, level })
+  for (const base of QING_BASES) {
+    const url = base + '/music/resolve-url'
+    try {
+      const r = await req(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'X-Request-Id': 'qmpc-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+          ...qingHeaders('POST', url, body, ticket)
+        },
+        body,
+        timeout: 8000
+      })
+      const j = await r.json().catch(() => null)
+      if (!j) continue
+      if (j.code === 0 || j.code === '0') {
+        const d = j.data || {}
+        // need_decrypt：酷我偶发会回加密流，本地没有它的 AES 密钥，直接放弃换别的档
+        if (d.need_decrypt) return null
+        if (d.url) return { url: d.url, headers: d.playbackHeaders || d.headers || null }
+        return null
+      }
+      // 票过期就作废重领一次
+      if (/TICKET|AUTH|TOKEN/i.test(String(j.code || ''))) qingTicket = ''
+    } catch (err) { /* 换下一条线路 */ }
+  }
+  return null
+}
+
+/** 按音质档从青听网关取 flac */
+async function qingLossless(song, prefer) {
+  if (!qingOn) return null
+  const source = QING_SRC[song.source]
+  if (!source || !song.id) return null
+  const levels = (QING_LEVELS[prefer] || QING_LEVELS.lossless)[song.source] || []
+  const duration = song.duration || 0
+  for (const level of levels) {
+    const got = await qingResolveOnce(source, String(song.id), level)
+    if (!got || !got.url) continue
+    if (!/\.flac(\?|$)/i.test(got.url)) continue
+    const probed = await probeStream(
+      { url: got.url, ext: 'flac', bitrate: 0, duration, referer: 'https://music.163.com/', headers: got.headers },
+      duration,
+      duration
+    )
+    if (probed.broken || probed.partial) continue
+    return {
+      ...probed,
+      duration,
+      actual: song,
+      lossless: true,
+      ext: 'flac',
+      level,
+      from: 'qing'
+    }
+  }
+  return null
+}
 
 /**
  * 可选的第二个无损来源：ChKSz API（需要用户自己注册拿 apikey）。
@@ -654,6 +804,20 @@ async function testExtraKey(key) {
   return { ok: false, error: j.msg || ('接口返回 code ' + j.code) }
 }
 
+/** 面板上「测试网关」用：领票 + 拿一首固定歌换直链，判断这条线还活着没 */
+async function qingSelfTest() {
+  const t0 = Date.now()
+  try {
+    const ticket = await qingEnsureTicket()
+    if (!ticket) return { ok: false, error: '领不到票（线路不通）' }
+    const got = await qingResolveOnce('wy', '1330348068', 'lossless') // 起风了
+    if (!got || !got.url) return { ok: false, error: '票正常，但换不到直链' }
+    return { ok: true, ms: Date.now() - t0 }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+}
+
 /**
  * 拿无损直链，按「免费优先、花钱的兜底」的顺序试：
  *
@@ -666,6 +830,14 @@ async function testExtraKey(key) {
  */
 async function resolveLossless(song, prefer) {
   const key = extraKey
+
+  // ⓪ 青听网关：四家都支持、还快，先问它。失败就往下走，别处照旧
+  try {
+    const qing = await qingLossless(song, prefer === 'master' ? 'master' : 'lossless')
+    if (qing) return qing
+  } catch (err) {
+    logger('[qing] 解析异常 ' + err.message)
+  }
 
   // ① QQ / 酷狗：只有 ChKSz 能拿（GDStudio 只支持网易）
   if (key && (song.source === 'qq' || song.source === 'kg')) {
@@ -720,8 +892,9 @@ async function resolveLossless(song, prefer) {
  * 「至少要有无损」和「不能因为拿不到无损就放不出来」这两件事都得成立。
  */
 async function getPlayable(song, prefer = 'best', opts = {}) {
-  if (prefer === FLAC_PREFER) {
-    const key = 'flac:' + cacheKey(song, FLAC_PREFER)
+  // lossless / master 都走无损链路，区别只在「要求哪一档」；拿不到都降级
+  if (prefer === FLAC_PREFER || prefer === 'master') {
+    const key = 'flac:' + cacheKey(song, prefer)
     const hit = urlCache.get(key)
     if (hit && Date.now() - hit.at < URL_TTL_MS) {
       return { ...hit, song: hit.actual || song, fallback: false, lossless: true }
@@ -747,7 +920,8 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
     try {
       got = await Promise.race([
         resolveLossless(song, prefer),
-        new Promise((r) => setTimeout(() => r(null), 6000))
+        // QQ 那边偶尔要 5 秒才给链，窗口给足；超过就先用降级结果出声
+        new Promise((r) => setTimeout(() => r(null), 9000))
       ])
     } catch (err) {
       logger('[flac] 解析异常 ' + err.message)
@@ -1034,6 +1208,8 @@ module.exports = {
   setLogger,
   setExtraKey,
   testExtraKey,
+  setQingEnabled,
+  qingSelfTest,
   listSources,
   search,
   getPlayable,

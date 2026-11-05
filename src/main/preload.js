@@ -66,6 +66,9 @@ contextBridge.exposeInMainWorld('api', {
   onlineExtraKeyGet: () => invoke('online:extraKeyGet'),
   onlineExtraKeySet: (key) => invoke('online:extraKeySet', key),
   onlineOpenChksz: () => invoke('online:openChksz'),
+  onlineQingGet: () => invoke('online:qingGet'),
+  onlineQingSet: (on) => invoke('online:qingSet', on),
+  onlineQingTest: () => invoke('online:qingTest'),
   onNowPlaying: (cb) => {
     const h = (_e, p) => cb(p)
     ipcRenderer.on('online:now-playing', h)

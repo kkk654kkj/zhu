@@ -10,6 +10,7 @@
 /** 音质设置的统一出口：主进程只认 lossless / best / 128k 三个值 */
 function qualityKey() {
   const q = state.settings && state.settings.onlineQuality
+  if (q === 'master') return 'master'
   if (q === 'lossless') return 'lossless'
   if (q === '128k') return '128k'
   return 'best'
@@ -112,7 +113,7 @@ const Online = {
     document.getElementById('opQuality').addEventListener('change', (e) => {
       window.api.patchSettings({ onlineQuality: e.target.value }).catch(() => {})
       state.settings.onlineQuality = e.target.value
-      const label = { lossless: '无损优先（拿不到自动降级）', best: '音质优先（320k）', '128k': '省流量（128k）' }
+      const label = { master: '母带（体积很大，拿不到自动降级）', lossless: '无损优先（拿不到自动降级）', best: '音质优先（320k）', '128k': '省流量（128k）' }
       toast('已切换：' + (label[e.target.value] || e.target.value))
     })
 
@@ -278,7 +279,11 @@ const Online = {
     const notes = []
     if (r.fallback) notes.push('已自动换源：' + (this.sources.find((s) => s.id === actual.source)?.name || actual.source))
     if (r.partial) notes.push('仅试听片段')
-    if (r.lossless) notes.push('无损 FLAC' + (r.bitrate ? ' ' + r.bitrate + 'k' : ''))
+    if (r.lossless) {
+      // 档位名不可全信：有的「母带」实际只给 800k 出头的文件，按码率说话更诚实
+      const hi = r.level === 'jymaster' || r.level === 'master' || (r.bitrate || 0) >= 1411
+      notes.push((hi ? '高解析 FLAC' : '无损 FLAC') + (r.bitrate ? ' ' + r.bitrate + 'k' : ''))
+    }
     else if (r.bitrate) notes.push(r.bitrate + 'k')
     this.setStatus(
       `▶ ${esc(actual.title)} — ${esc(actual.artist)}` + (notes.length ? '（' + notes.join(' · ') + '）' : ''),
