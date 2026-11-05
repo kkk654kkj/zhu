@@ -1965,3 +1965,79 @@ body.mini .hifi-badge { display: none; }
 /* 在线列表「音质」列：探测中/探测失败压暗，拿到 flac 时点亮 */
 .op-c-q.dim { color: var(--txt-3); opacity: .55; }
 .op-c-q.lossless { color: #5ad18a; font-weight: 600; }
+
+/* ================= 下载管理面板（v3.3） ================= */
+#dlPanel {
+  position: fixed;
+  right: 12px;
+  bottom: calc(var(--pb-h) + 12px);
+  width: 340px;
+  max-height: 62vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 14px 44px rgba(0,0,0,.55);
+  z-index: 40;
+  overflow: hidden;
+}
+.dl-list {
+  overflow-y: auto;
+  padding: 4px 10px 6px;
+  min-height: 60px;
+}
+.dl-empty { padding: 18px 6px; text-align: center; color: var(--txt-3); font-size: 12px; }
+.dl-item {
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.dl-item:last-child { border-bottom: 0; }
+.dl-top { display: flex; align-items: baseline; gap: 8px; }
+.dl-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--txt);
+}
+.dl-pct { flex: none; font-size: 11px; color: var(--txt-3); font-variant-numeric: tabular-nums; }
+.dl-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--txt-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dl-bar {
+  margin-top: 6px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+.dl-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width .25s linear;
+}
+.dl-bar i.done { background: #5ad18a; }
+.dl-bar i.paused { background: var(--txt-3); }
+.dl-bar i.error { background: #e06666; }
+.dl-acts { display: flex; gap: 6px; margin-top: 6px; }
+.dl-acts button {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--txt-2);
+  cursor: pointer;
+}
+.dl-acts button:hover { color: var(--txt); border-color: var(--accent); }

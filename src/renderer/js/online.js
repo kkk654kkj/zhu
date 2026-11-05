@@ -27,7 +27,7 @@ const Online = {
   sources: [],         // 全部可用源（主进程返回）
   proxyBase: '',       // 本地代理基地址 http://127.0.0.1:<port>
   enabled: new Set(),  // 本次参与搜索的源
-  downloads: new Map(),// key → { received, total }
+  dl: [],             // 下载任务（主进程推过来的快照）
   _ready: false,
 
   async init() {
@@ -53,9 +53,9 @@ const Online = {
 
     this.renderSources()
     this.bind()
-    window.api.onDownloadProgress((p) => this.onProgress(p))
-    window.api.onDownloadDone((p) => this.onDone(p))
+    window.api.onDlUpdate((list) => this.applyDl(list))
     window.api.onNowPlaying((p) => this.onNowPlaying(p))
+    this.applyDl(await window.api.onlineDlList().catch(() => []))
   },
 
   /**
@@ -125,6 +125,24 @@ const Online = {
       if (dir) toast('下载目录：' + dir, 3000)
     })
     document.getElementById('opOpenDir').addEventListener('click', () => window.api.onlineOpenDownloadDir())
+    document.getElementById('opDlBtn').addEventListener('click', () => this.toggleDlPanel())
+    document.getElementById('btnDlClose').addEventListener('click', () => this.toggleDlPanel(false))
+    document.getElementById('dlOpenDir').addEventListener('click', () => window.api.onlineOpenDownloadDir())
+    document.getElementById('dlClearDone').addEventListener('click', async () => {
+      const r = await window.api.onlineDlClearDone().catch(() => null)
+      toast(r && r.removed ? '已移除 ' + r.removed + ' 条记录' : '没有已完成的任务')
+    })
+    document.getElementById('dlList').addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-act]')
+      const item = e.target.closest('.dl-item')
+      if (!btn || !item) return
+      const id = item.dataset.id
+      const act = btn.dataset.act
+      if (act === 'pause') await window.api.onlineDlPause(id)
+      else if (act === 'resume') await window.api.onlineDlResume(id)
+      else if (act === 'delete') await window.api.onlineDlDelete(id)
+      else if (act === 'reveal') await window.api.onlineDlReveal(id)
+    })
 
     document.getElementById('opMore').addEventListener('click', () => this.search(false))
 
@@ -390,53 +408,141 @@ const Online = {
   async downloadAt(i) {
     const song = this.list[i]
     if (!song) return
-    const key = `${song.source}:${song.id}`
-    if (this.downloads.has(key)) { toast('正在下载中…'); return }
-    this.downloads.set(key, { received: 0, total: 0 })
-    this.paintDownload(key)
     const r = await window.api.onlineDownload(song)
     if (!r || !r.ok) {
-      this.downloads.delete(key)
-      this.paintDownload(key)
       toast((r && r.error) || '下载启动失败', 3000)
+      if (r && r.id) this.toggleDlPanel(true)
       return
     }
+    // 有任务就把下载面板打开，让用户看得见进度 / 能暂停
+    this.toggleDlPanel(true)
     toast('开始下载：' + song.title)
   },
 
-  onProgress(p) {
-    const rec = this.downloads.get(p.key)
-    if (!rec) return
-    rec.received = p.received
-    rec.total = p.total
-    this.paintDownload(p.key)
-  },
+  /* ---------------- 下载面板 ---------------- */
 
-  onDone(p) {
-    this.downloads.delete(p.key)
-    this.paintDownload(p.key)
-    if (p.ok) {
-      toast('下载完成：' + (p.path || '').split(/[\\/]/).pop(), 3500)
-    } else {
-      toast('下载失败：' + (p.error || '未知错误'), 3000)
+  toggleDlPanel(show) {
+    const panel = document.getElementById('dlPanel')
+    if (!panel) return
+    panel.hidden = show === undefined ? !panel.hidden : !show
+    if (!panel.hidden) {
+      // 两个面板都在右下角，别叠在一起
+      const cache = document.getElementById('cachePanel')
+      if (cache) cache.hidden = true
+      this.renderDlPanel()
     }
   },
 
-  /** 只改这一行的下载进度，不重绘整张表 */
-  paintDownload(key) {
-    const rec = this.downloads.get(key)
-    const row = document.querySelector(`#opBody .op-tr[data-id="on:${key}"]`)
-    const btn = row && row.querySelector('.op-act-btn[data-act="download"]')
-    if (!btn) return
-    if (!rec) {
-      btn.innerHTML = icon('download')
-      btn.classList.remove('busy')
-      btn.title = '下载到本地'
+  applyDl(list) {
+    const prev = new Map(this.dl.map((t) => [t.id, t]))
+    this.dl = Array.isArray(list) ? list : []
+    for (const t of this.dl) {
+      const old = prev.get(t.id)
+      if (old && old.status !== t.status) {
+        if (t.status === 'done') toast('下载完成：' + (t.path || '').split(/[\\/]/).pop(), 3500)
+        else if (t.status === 'error') toast('下载失败：' + (t.error || '未知错误'), 3500)
+      }
+    }
+    this.renderDlPanel()
+    this.paintDlRows()
+  },
+
+  /** 列表每行的下载按钮：显示百分比 / 已有任务的状态 */
+  paintDlRows() {
+    const byKey = new Map()
+    for (const t of this.dl) {
+      if (t.status === 'done' || t.status === 'error') continue
+      byKey.set(t.key, t)
+    }
+    document.querySelectorAll('#opBody .op-tr').forEach((row) => {
+      const btn = row.querySelector('.op-act-btn[data-act="download"]')
+      if (!btn) return
+      const key = (row.dataset.id || '').replace(/^on:/, '')
+      const t = byKey.get(key)
+      if (!t) {
+        btn.innerHTML = icon('download')
+        btn.classList.remove('busy')
+        btn.title = '下载到本地'
+        return
+      }
+      btn.classList.add('busy')
+      if (t.status === 'paused') {
+        btn.innerHTML = '<span style="font-size:10px;color:var(--txt-3)">暂停</span>'
+        btn.title = '已暂停：' + this.dlHuman(t)
+        return
+      }
+      const pct = t.total ? Math.min(100, Math.round((t.received / t.total) * 100)) : null
+      btn.innerHTML = `<span style="font-size:10px;color:var(--accent)">${pct == null ? '…' : pct + '%'}</span>`
+      btn.title = '下载中 ' + (pct == null ? '' : pct + '%') + ' · ' + this.dlHuman(t)
+    })
+  },
+
+  dlHuman(t) {
+    const mb = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.round(n / 1024) + 'KB')
+    if (t.status === 'done') return mb(t.received)
+    if (!t.total) return mb(t.received)
+    return mb(t.received) + ' / ' + mb(t.total)
+  },
+
+  renderDlPanel() {
+    const panel = document.getElementById('dlPanel')
+    if (!panel || panel.hidden) return
+    const list = document.getElementById('dlList')
+    const sum = document.getElementById('dlSummary')
+    const active = this.dl.filter((t) => t.status === 'downloading' || t.status === 'pausing' || t.status === 'queued').length
+    const paused = this.dl.filter((t) => t.status === 'paused').length
+    const done = this.dl.filter((t) => t.status === 'done').length
+    const bad = this.dl.filter((t) => t.status === 'error').length
+    if (sum) {
+      const parts = []
+      if (active) parts.push(active + ' 个下载中')
+      if (paused) parts.push(paused + ' 个已暂停')
+      if (done) parts.push(done + ' 个已完成')
+      if (bad) parts.push(bad + ' 个失败')
+      sum.textContent = parts.length ? parts.join(' · ') : '还没有下载任务'
+    }
+    if (!this.dl.length) {
+      list.innerHTML = '<div class="dl-empty">点歌曲行尾的 ↓ 就能下载，任务会出现在这里</div>'
       return
     }
-    btn.classList.add('busy')
-    const pct = rec.total ? Math.min(100, Math.round((rec.received / rec.total) * 100)) : null
-    btn.innerHTML = `<span style="font-size:10px;color:var(--accent)">${pct == null ? '…' : pct + '%'}</span>`
-    btn.title = pct == null ? '下载中' : `下载中 ${pct}%`
-  }
+    const mb = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.round(n / 1024) + 'KB')
+    const speed = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + 'MB/s' : Math.round(n / 1024) + 'KB/s')
+    list.innerHTML = this.dl.slice().sort((a, b) => b.at - a.at).map((t) => {
+      const pct = t.total ? Math.min(100, Math.round((t.received / t.total) * 100)) : 0
+      let line = ''
+      let barCls = ''
+      let acts = ''
+      if (t.status === 'done') {
+        line = '已完成 · ' + mb(t.received) + ' · ' + String(t.ext || '').toUpperCase()
+        barCls = ' done'
+        acts = `<button data-act="reveal">打开位置</button><button data-act="delete">移除</button>`
+      } else if (t.status === 'paused') {
+        line = '已暂停 · ' + mb(t.received) + (t.total ? ' / ' + mb(t.total) : '')
+        barCls = ' paused'
+        acts = `<button data-act="resume">继续</button><button data-act="delete">删除</button>`
+      } else if (t.status === 'error') {
+        line = '失败：' + (t.error || '未知原因')
+        barCls = ' error'
+        acts = `<button data-act="resume">重试</button><button data-act="delete">删除</button>`
+      } else if (t.status === 'pausing') {
+        line = '正在暂停…'
+        barCls = ' paused'
+        acts = `<button data-act="delete">删除</button>`
+      } else {
+        line = (t.total ? pct + '% · ' + mb(t.received) + ' / ' + mb(t.total) : mb(t.received)) +
+          (t.speed ? ' · ' + speed(t.speed) : '')
+        acts = `<button data-act="pause">暂停</button><button data-act="delete">删除</button>`
+      }
+      return `<div class="dl-item" data-id="${esc(t.id)}">
+        <div class="dl-top">
+          <span class="dl-name" title="${esc(t.artist + ' - ' + t.title)}">${esc(t.title || '未知歌曲')}</span>
+          <span class="dl-pct">${t.status === 'done' ? '100%' : (t.total ? pct + '%' : '')}</span>
+        </div>
+        <div class="dl-sub">${esc(t.artist || '')} · ${esc(line)}</div>
+        <div class="dl-bar"><i class="${barCls}" style="width:${t.status === 'done' ? 100 : pct}%"></i></div>
+        <div class="dl-acts">${acts}</div>
+      </div>`
+    }).join('')
+  },
+
 }

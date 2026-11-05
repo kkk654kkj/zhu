@@ -57,7 +57,13 @@ contextBridge.exposeInMainWorld('api', {
   onlineProbe: (song) => invoke('online:probe', song),
   onlineLyric: (song) => invoke('online:lyric', song),
   onlineDownload: (song) => invoke('online:download', song),
-  onlineCancelDownload: (key) => invoke('online:cancelDownload', key),
+  onlineCancelDownload: (id) => invoke('online:dlDelete', id),
+  onlineDlList: () => invoke('online:dlList'),
+  onlineDlPause: (id) => invoke('online:dlPause', id),
+  onlineDlResume: (id) => invoke('online:dlResume', id),
+  onlineDlDelete: (id) => invoke('online:dlDelete', id),
+  onlineDlClearDone: () => invoke('online:dlClearDone'),
+  onlineDlReveal: (id) => invoke('online:dlReveal', id),
   onlinePickDownloadDir: () => invoke('online:pickDownloadDir'),
   onlineOpenDownloadDir: () => invoke('online:openDownloadDir'),
   onlineCacheInfo: () => invoke('online:cacheInfo'),
@@ -74,6 +80,11 @@ contextBridge.exposeInMainWorld('api', {
     const h = (_e, p) => cb(p)
     ipcRenderer.on('online:now-playing', h)
     return () => ipcRenderer.removeListener('online:now-playing', h)
+  },
+  onDlUpdate: (cb) => {
+    const h = (e, data) => cb(data)
+    ipcRenderer.on('online:dl-update', h)
+    return () => ipcRenderer.removeListener('online:dl-update', h)
   },
   onDownloadProgress: (cb) => {
     const h = (_e, p) => cb(p)

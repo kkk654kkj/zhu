@@ -1601,8 +1601,203 @@ function downloadDir() {
   }
 }
 
-/** 正在下载的任务：key=源:id → { cancelled } */
-const activeDownloads = new Map()
+/* ---------------- 在线音乐下载管理（v3.3） ---------------- */
+
+/**
+ * 任务表：id → {
+ *   key, song, status: queued|downloading|pausing|paused|done|error,
+ *   received, total, speed, path(目标文件), ext, error, at, abort, deleted
+ * }
+ *
+ * 「暂停」不是取消：abort 掉 fetch，但 .part 留着；「继续」用 Range 从断点续，
+ * 所以暂停一个 200MB 的母带不会把已下的白扔。只有「删除」才清残片。
+ */
+const dlTasks = new Map()
+let dlSeq = 0
+let dlSaveTimer = null
+
+function dlFile() { return path.join(userData, 'downloads.json') }
+
+function dlDto(t) {
+  return {
+    id: t.id,
+    key: t.key,
+    title: (t.song && t.song.title) || '',
+    artist: (t.song && t.song.artist) || '',
+    source: (t.song && t.song.source) || '',
+    status: t.status,
+    received: t.received || 0,
+    total: t.total || 0,
+    speed: t.speed || 0,
+    path: t.path || '',
+    ext: t.ext || '',
+    error: t.error || '',
+    at: t.at || 0
+  }
+}
+
+/** 推给界面；save=false 用于高频进度（别每 250ms 写一次盘） */
+function dlBroadcast(save) {
+  const data = Array.from(dlTasks.values()).map(dlDto)
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send('online:dl-update', data)
+  }
+  if (save !== false) dlSaveSoon()
+}
+
+/** 只持久化「还没完成」的任务，重启后一律按暂停恢复 */
+function dlSaveSoon() {
+  if (dlSaveTimer) return
+  dlSaveTimer = setTimeout(() => {
+    dlSaveTimer = null
+    try {
+      const keep = Array.from(dlTasks.values())
+        .filter((t) => t.status !== 'done' && t.status !== 'error')
+        .map((t) => ({
+          id: t.id, key: t.key, song: t.song, status: 'paused',
+          received: t.received || 0, total: t.total || 0,
+          path: t.path || '', ext: t.ext || '', at: t.at || 0
+        }))
+      fs.writeFileSync(dlFile(), JSON.stringify(keep, null, 1))
+    } catch (err) { /* 写不进去就算了，不影响下载 */ }
+  }, 700)
+}
+
+function dlLoad() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(dlFile(), 'utf8'))
+    if (!Array.isArray(arr)) return
+    for (const r of arr) {
+      if (!r || !r.id || !r.song) continue
+      dlTasks.set(r.id, { ...r, status: 'paused', speed: 0, abort: null, deleted: false })
+    }
+    if (arr.length) logLine('[dl] 恢复', arr.length, '个未完成任务')
+  } catch (err) { /* 没有历史任务 */ }
+}
+
+/** 删残片要重试：Windows 上写流还没 close 时 unlink 会失败（EBUSY/EPERM） */
+function dlUnlinkRetry(p, tries = 0) {
+  if (!p) return
+  try {
+    fs.unlinkSync(p)
+  } catch (err) {
+    if (err.code === 'ENOENT') return
+    if (tries < 10) setTimeout(() => dlUnlinkRetry(p, tries + 1), 400)
+  }
+}
+
+function dlSafeName(s) {
+  return String(s || '').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
+}
+
+/** 定目标文件名；重名加 (2)(3)，也避开同名的 .part */
+function dlPickPath(song, ext) {
+  const dir = downloadDir()
+  fs.mkdirSync(dir, { recursive: true })
+  const base = dlSafeName(`${song.artist} - ${song.title}`).slice(0, 120) || '未知歌曲'
+  let target = path.join(dir, `${base}.${ext}`)
+  let n = 1
+  while (fs.existsSync(target) || fs.existsSync(target + '.part')) {
+    n++
+    target = path.join(dir, `${base} (${n}).${ext}`)
+  }
+  return target
+}
+
+/** 跑一个任务（首次开始 / 继续都走这里） */
+async function dlRun(task) {
+  if (task.status === 'downloading') return
+  task.status = 'downloading'
+  task.error = ''
+  task.deleted = false
+  const ctrl = new AbortController()
+  task.abort = ctrl
+  dlBroadcast(true)
+
+  let ws = null
+  try {
+    let info = null
+    try { info = await online.getPlayable(task.song, qualityPref()) } catch (err) { info = null }
+    if (!info || !info.url) throw new Error('没有可用地址（可能版权限制）')
+
+    if (!task.path) {
+      const ext = info.ext === 'm4a' ? 'm4a' : info.ext === 'flac' ? 'flac' : 'mp3'
+      task.ext = ext
+      task.path = dlPickPath(task.song, ext)
+    }
+    const part = task.path + '.part'
+    let offset = 0
+    try { offset = fs.statSync(part).size } catch (err) { offset = 0 }
+
+    const headers = { 'User-Agent': 'Mozilla/5.0' }
+    if (info.referer) headers.Referer = info.referer
+    if (info.headers && typeof info.headers === 'object') Object.assign(headers, info.headers)
+    if (offset > 0) headers.Range = 'bytes=' + offset + '-'
+
+    const res = await fetch(info.url, { headers, signal: ctrl.signal, redirect: 'follow' })
+    if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status)
+    // 服务端不认 Range 就会回 200 全量，这时只能从头写
+    if (res.status === 200 && offset > 0) offset = 0
+    const cr = res.headers.get('content-range') || ''
+    const len = Number(res.headers.get('content-length')) || 0
+    task.total = /\/\d+/.test(cr) ? Number(cr.split('/')[1]) : (offset + len)
+    task.received = offset
+
+    ws = fs.createWriteStream(part, { flags: offset > 0 ? 'a' : 'w' })
+    const reader = res.body.getReader()
+    let lastT = Date.now()
+    let lastB = task.received
+    let lastEmit = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const buf = Buffer.from(value)
+      task.received += buf.length
+      if (!ws.write(buf)) await new Promise((r) => ws.once('drain', r))
+      const now = Date.now()
+      if (now - lastEmit >= 250) {
+        lastEmit = now
+        const dt = (now - lastT) / 1000
+        if (dt > 0.25) {
+          task.speed = Math.max(0, Math.round((task.received - lastB) / dt))
+          lastB = task.received
+          lastT = now
+        }
+        dlBroadcast(false)
+      }
+      if (task.deleted) { try { ctrl.abort() } catch (err) { /* 忽略 */ } break }
+    }
+    await new Promise((r) => ws.end(r))
+    ws = null
+    if (task.deleted) throw Object.assign(new Error('__deleted'), { name: 'AbortError' })
+    if (task.total && task.received + 1024 < task.total) throw new Error('下载不完整（连接中断）')
+    fs.renameSync(part, task.path)
+    task.status = 'done'
+    task.speed = 0
+    if (task.total) task.received = task.total
+    logLine('[dl] 完成', path.basename(task.path), (task.received / 1048576).toFixed(1) + 'MB')
+    // 落盘后丢给曲库做增量扫描，下载完就能在「最近添加」里看到
+    if (library) library.scan(store.get().settings.musicDirs || []).catch(() => {})
+  } catch (err) {
+    if (ws) { try { ws.destroy() } catch (e) { /* 忽略 */ } }
+    if (task.deleted) {
+      dlTasks.delete(task.id)
+      dlUnlinkRetry(task.path ? task.path + '.part' : '')
+      dlUnlinkRetry(task.path || '')
+    } else if (err && (err.name === 'AbortError' || /abort/i.test(err.message || ''))) {
+      task.status = 'paused'
+      task.speed = 0
+    } else {
+      task.status = 'error'
+      task.error = (err && err.message) || '下载失败'
+      task.speed = 0
+      logLine('[dl] 失败', task.error)
+    }
+  } finally {
+    task.abort = null
+    dlBroadcast(true)
+  }
+}
 
 /** 音质设置 → 各音源认的 prefer 值（只有 lossless / best / 128k 三种） */
 function qualityPref() {
@@ -1938,46 +2133,77 @@ function registerIpc() {
     }
   })
 
+  // —— 在线音乐下载管理（v3.3）：任务可见 / 可暂停 / 可删除 ——
   ipcMain.handle('online:download', async (e, song) => {
     if (!song || !song.source || !song.id) return { ok: false, error: '参数不完整' }
-    const dir = downloadDir()
-    const prefer = qualityPref()
     const key = `${song.source}:${song.id}`
-    if (activeDownloads.has(key)) return { ok: false, error: '这首正在下载中' }
-
-    const task = { cancelled: false }
-    activeDownloads.set(key, task)
-    const sender = e.sender
-
-    // 不阻塞调用方：下载在后台跑，进度通过事件推
-    ;(async () => {
-      try {
-        const dest = await require('fs/promises').mkdir(dir, { recursive: true }).then(() => dir)
-        const r = await online.download(song, prefer, dest, (received, total) => {
-          if (task.cancelled || sender.isDestroyed()) return
-          sender.send('online:download-progress', { key, received, total })
-        })
-        if (task.cancelled) return
-        sender.send('online:download-done', { key, ok: true, path: r.path, size: r.size, ext: r.ext })
-        logLine(`[online] 下载完成 ${r.path} (${(r.size / 1048576).toFixed(1)}MB)`)
-        // 落盘后丢给曲库做一次增量扫描，下载完就能在「最近添加」里看到
-        if (library) library.scan(store.get().settings.musicDirs || []).catch(() => {})
-      } catch (err) {
-        if (!task.cancelled && !sender.isDestroyed()) {
-          sender.send('online:download-done', { key, ok: false, error: err.message || '下载失败' })
-        }
-        logLine('[online] 下载失败', err.message)
-      } finally {
-        activeDownloads.delete(key)
-      }
-    })()
-
-    return { ok: true, dir }
+    for (const t of dlTasks.values()) {
+      if (t.key !== key) continue
+      if (t.status === 'paused') return { ok: false, error: '这首在下载列表里（已暂停），去列表点继续', id: t.id }
+      if (t.status === 'downloading' || t.status === 'queued') return { ok: false, error: '这首正在下载中', id: t.id }
+    }
+    const task = {
+      id: 'd' + Date.now().toString(36) + (++dlSeq),
+      key,
+      song: { source: song.source, id: song.id, title: song.title || '', artist: song.artist || '', duration: song.duration || 0 },
+      status: 'queued',
+      received: 0, total: 0, speed: 0,
+      path: '', ext: '', at: Date.now()
+    }
+    dlTasks.set(task.id, task)
+    dlBroadcast(true)
+    dlRun(task)
+    return { ok: true, id: task.id, dir: downloadDir() }
   })
 
-  ipcMain.handle('online:cancelDownload', (e, key) => {
-    const t = activeDownloads.get(String(key))
-    if (t) t.cancelled = true
+  ipcMain.handle('online:dlList', () => Array.from(dlTasks.values()).map(dlDto))
+
+  ipcMain.handle('online:dlPause', (e, id) => {
+    const t = dlTasks.get(String(id))
+    if (!t || t.status !== 'downloading') return { ok: false }
+    t.status = 'pausing'
+    try { if (t.abort) t.abort.abort() } catch (err) { /* 忽略 */ }
+    dlBroadcast(true)
+    return { ok: true }
+  })
+
+  ipcMain.handle('online:dlResume', (e, id) => {
+    const t = dlTasks.get(String(id))
+    if (!t || t.status === 'downloading' || t.status === 'queued') return { ok: false }
+    t.status = 'paused'
+    dlRun(t)
+    return { ok: true }
+  })
+
+  ipcMain.handle('online:dlDelete', (e, id) => {
+    const t = dlTasks.get(String(id))
+    if (!t) return { ok: false }
+    if (t.status === 'downloading' || t.status === 'queued') {
+      // 让下载线程自己收尾：abort → catch 里发现 deleted → 删残片、摘任务
+      t.deleted = true
+      try { if (t.abort) t.abort.abort() } catch (err) { /* 忽略 */ }
+      return { ok: true }
+    }
+    dlTasks.delete(t.id)
+    // 已完成的文件是用户的音乐，不删；没完成的残片才清（带重试，见 dlUnlinkRetry）
+    if (t.status !== 'done' && t.path) dlUnlinkRetry(t.path + '.part')
+    dlBroadcast(true)
+    return { ok: true }
+  })
+
+  ipcMain.handle('online:dlClearDone', () => {
+    let n = 0
+    for (const [id, t] of dlTasks) {
+      if (t.status === 'done' || t.status === 'error') { dlTasks.delete(id); n++ }
+    }
+    dlBroadcast(true)
+    return { ok: true, removed: n }
+  })
+
+  ipcMain.handle('online:dlReveal', (e, id) => {
+    const t = dlTasks.get(String(id))
+    if (!t || !t.path) return false
+    try { shell.showItemInFolder(t.path) } catch (err) { /* 忽略 */ }
     return true
   })
 
@@ -2469,6 +2695,7 @@ if (gotLock) cleanChromiumCache()
     })
 
     cacheCleanupParts()
+    dlLoad()
     registerFileProtocol()
     registerCoverProtocol()
     online.setLogger(logLine)

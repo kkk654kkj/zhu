@@ -1076,7 +1076,11 @@ function toggleCachePanel(show) {
   const panel = document.getElementById('cachePanel')
   const target = show === undefined ? panel.hidden : !!show
   panel.hidden = !target
-  if (target) refreshCachePanel()
+  if (target) {
+    const dl = document.getElementById('dlPanel')
+    if (dl) dl.hidden = true
+    refreshCachePanel()
+  }
 }
 
 function fmtSize(bytes) {

@@ -154,8 +154,9 @@
               <option value="128k">省流量</option>
             </select>
             <button class="mini-btn" id="opCacheBtn" title="缓存设置（在线音乐缓存目录 / 清理）"><svg><use href="#i-cache"/></svg></button>
-            <button class="mini-btn" id="opDirBtn" title="选择下载目录"><svg><use href="#i-folder-open"/></svg></button>
-            <button class="mini-btn" id="opOpenDir" title="打开下载目录"><svg><use href="#i-download"/></svg></button>
+            <button class="mini-btn" id="opDlBtn" title="下载管理（进度 / 暂停 / 删除）"><svg><use href="#i-download"/></svg></button>
+            <button class="mini-btn" id="opDirBtn" title="选择下载目录"><svg><use href="#i-folder"/></svg></button>
+            <button class="mini-btn" id="opOpenDir" title="打开下载目录"><svg><use href="#i-folder-open"/></svg></button>
           </div>
         </div>
       </div>
@@ -371,6 +372,21 @@
     <span class="cp-path" id="qingState">—</span>
   </div>
   <div class="sp-foot">开着的优先走它：QQ / 酷我 / 酷狗 / 网易 都能直接换 flac，还能要母带档。它是别人的中转服务，挂了就自动退回原来的线路，不影响播放。</div>
+</div>
+
+<!-- 下载管理面板（v3.3）：进度 / 暂停 / 继续 / 删除 -->
+<div id="dlPanel" hidden>
+  <div class="sp-head">
+    <span>下载管理</span>
+    <button class="mini-btn" id="btnDlClose"><svg><use href="#i-close"/></svg></button>
+  </div>
+  <div class="sp-count" id="dlSummary">没有任务</div>
+  <div class="dl-list" id="dlList"></div>
+  <div class="sp-opts">
+    <button class="sp-chip" id="dlOpenDir">打开下载目录</button>
+    <button class="sp-chip" id="dlClearDone">清除已完成</button>
+  </div>
+  <div class="sp-foot">暂停不会丢已下的部分，继续时从断点续传；删除才清残片。已完成的文件不会被删，只是从列表移除。</div>
 </div>
 
 <!-- 独占输出面板（v2.3 设备选择；v2.5 加高精度音量） -->
