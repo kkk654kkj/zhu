@@ -62,6 +62,24 @@ const Diag = {
 
     this.el('btnDiagCopy').addEventListener('click', () => this.copy())
     this.el('btnDiagOpenLog').addEventListener('click', () => window.api.diagOpenLog())
+    // v2.8.6：声卡占用自查 + 一键释放独占。
+    // 用户遇到「开了独占再关掉，别的软件还是没声音」时，在诊断面板里点一下就知道
+    // 声卡到底被谁占着，不用去翻任务管理器。
+    this.el('btnDiagProbeDevice').addEventListener('click', async () => {
+      toast('正在检测声卡…', 1200)
+      const r = await window.api.mpvProbeDevice().catch(() => null)
+      if (!r) { toast('检测失败', 2500); return }
+      if (r.blocked) toast('声卡仍被占用（别人打不开）：' + (r.detail || '未知原因'), 6000)
+      else toast('声卡可用，别的程序可以正常发声', 3000)
+    })
+    this.el('btnDiagRelease').addEventListener('click', async () => {
+      toast('正在释放独占…', 1200)
+      const r = await window.api.mpvRelease().catch(() => null)
+      if (!r) { toast('释放失败', 2500); return }
+      if (r.blocked) toast('已关闭引擎，但声卡仍被别的程序占着', 5000)
+      else toast('已释放：声卡可以给别的程序用了', 3000)
+      this.pollLive(true)
+    })
     this.el('btnDiagRescan').addEventListener('click', async () => {
       this.close()
       if (typeof doScan === 'function') await doScan()

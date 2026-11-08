@@ -1065,16 +1065,27 @@ function onMpvEvent(evt) {
   sendToRenderer('mpv:event', evt)
 }
 
-async function ensureMpv(exclusive) {
+async function ensureMpv(exclusive, opts = {}) {
   if (!mpvEngine) {
     mpvEngine = new MpvEngine({ exePath: mpvExePath(), onEvent: onMpvEvent })
   }
-  if (mpvEngine.running) return { ok: true, exclusive: mpvEngine.exclusive }
   const wantExclusive = exclusive !== false
-  // 输出设备来自设置；空字符串 = 跟随系统默认
   const audioDevice = String(store.get().settings.audioDevice || '').trim()
-  // v2.5：启动音量跟随设置（以前 mpv 固定 --volume=100，重启引擎音量就被重置）
   const startVolume = Math.max(0, Math.min(1, Number(store.get().settings.volume ?? 1)))
+  if (mpvEngine.running) {
+    // v2.8.6：以前只要引擎在跑就直接返回，不管它现在是独占还是共享 ——
+    // 于是「要独占但引擎是共享」时独占根本开不起来（用户看到：开了独占却没位完美），
+    // 「要共享但引擎是独占」时则一直霸着声卡。模式对不上就重启到目标模式。
+    if (opts.forceMode && mpvEngine.exclusive !== wantExclusive) {
+      pushMpvLog('info', '引擎模式与请求不一致（当前 ' + (mpvEngine.exclusive ? '独占' : '共享') + '），重启为' + (wantExclusive ? '独占' : '共享'))
+      const r = await mpvEngine.restart({ exclusive: wantExclusive, audioDevice, volume: startVolume })
+      if (r.ok) startDeviceWatch()
+      return r
+    }
+    return { ok: true, exclusive: mpvEngine.exclusive }
+  }
+  // 输出设备来自设置；空字符串 = 跟随系统默认
+  // v2.5：启动音量跟随设置（以前 mpv 固定 --volume=100，重启引擎音量就被重置）
   pushMpvLog('info', '启动引擎：exclusive=' + wantExclusive + ' ao=' + (process.env.LX_TEST_MUTE === '1' ? 'null(测试静音)' : 'wasapi') + ' device=' + (audioDevice || '(系统默认)') + ' volume=' + Math.round(startVolume * 1000) / 10)
   const r = await mpvEngine.start({ exclusive: wantExclusive, audioDevice, volume: startVolume })
   logLine('[mpv] start exclusive=' + wantExclusive + ' ' + JSON.stringify(r) + ' exe=' + mpvExePath())
@@ -1085,13 +1096,132 @@ async function ensureMpv(exclusive) {
   return r
 }
 
-function stopMpv() {
-  if (mpvEngine) {
-    pushMpvLog('info', '关闭引擎')
-    mpvEngine.kill()
-    mpvEngine = null
-  }
+/**
+ * 关掉引擎，并**确认声卡真的还回来了**。
+ *
+ * v2.8.6：用户报「开了独占再关掉，其他软件还是没声音，播放器自己还能继续放」。
+ * 根因是「关独占」以前只做了两件事：发信号杀进程 + 立刻重载界面，
+ * 既没等进程真退出，也没检查设备是否真的释放，更没扫掉可能残留的孤儿进程。
+ * 现在这条路径做全套：
+ *   1) 等 mpv 进程真正退出（stop()）；
+ *   2) 扫一遍属于本进程却还活着的 mpv（竞态产生的孤儿），一律杀掉；
+ *   3) 用一个共享模式的 mpv 实测设备能不能打开；
+ *   4) 还占着就把结果回报给界面，明确告诉用户，而不是让用户自己猜。
+ */
+async function releaseMpv({ probe = true } = {}) {
+  const eng = mpvEngine
+  mpvEngine = null
   stopDeviceWatch()
+  let exited = true
+  if (eng) {
+    pushMpvLog('info', '关闭引擎')
+    const r = await eng.stop()
+    exited = !!r.exited
+    if (!exited) pushMpvLog('warn', '引擎进程没有正常退出（pid ' + r.pid + '），已强制结束')
+  }
+  // 扫残留：属于本进程（管道名里带本 PID）的 mpv 一定是我们的，活着就是孤儿
+  const leftover = sweepOurMpv()
+  if (leftover.length) {
+    pushMpvLog('warn', '发现残留的 mpv 进程（已强杀）：' + leftover.join(', '))
+    logLine('[mpv] 残留孤儿进程已清理: ' + leftover.join(','))
+  }
+  let blocked = false
+  let detail = ''
+  if (probe) {
+    const p = await probeDeviceFree()
+    blocked = !!p.blocked
+    detail = p.detail || ''
+    pushMpvLog(blocked ? 'warn' : 'info', blocked ? '声卡仍被占用：别的程序可能还是没声音' : '声卡已释放，其他程序可以正常发声')
+  }
+  return { ok: true, exited, leftover, blocked, detail }
+}
+
+/** 列出（并杀掉）属于本进程的残留 mpv —— 竞态产生的孤儿会一直霸着声卡 */
+function sweepOurMpv() {
+  if (process.platform !== 'win32') return []
+  const selfPid = process.pid
+  const script = [
+    'Get-CimInstance Win32_Process -Filter "Name=\'mpv.exe\'" | ForEach-Object {',
+    '  $m = [regex]::Match($_.CommandLine, \'lxmpv-(\\d+)-\')',
+    '  if (-not $m.Success) { return }',
+    '  if ([int]$m.Groups[1].Value -ne ' + selfPid + ') { return }',
+    '  $_.ProcessId',
+    '}'
+  ].join('\n')
+  const pids = []
+  try {
+    const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true, timeout: 8000, encoding: 'utf8' })
+    for (const line of String(stdout || '').split(/\r?\n/)) {
+      const s = line.trim()
+      if (/^\d+$/.test(s)) pids.push(s)
+    }
+  } catch (err) { return [] }
+  for (const pid of pids) {
+    try { execFileSync('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 }) } catch (err) { /* 忽略 */ }
+  }
+  return pids
+}
+
+/** 探测用的 0.5 秒静音 wav（mpv 得有东西播才会去开声卡） */
+let probeWavPath = ''
+function ensureProbeWav() {
+  if (probeWavPath) { try { if (fs.existsSync(probeWavPath)) return probeWavPath } catch {} }
+  try {
+    const rate = 48000
+    const frames = Math.floor(rate * 0.5)
+    const bytes = frames * 2
+    const buf = Buffer.alloc(44 + bytes)
+    buf.write('RIFF', 0); buf.writeUInt32LE(36 + bytes, 4); buf.write('WAVE', 8)
+    buf.write('fmt ', 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(1, 22)
+    buf.writeUInt32LE(rate, 24); buf.writeUInt32LE(rate * 2, 28); buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34)
+    buf.write('data', 36); buf.writeUInt32LE(bytes, 40)
+    probeWavPath = path.join(DATA_DIR, 'probe-silence.wav')
+    fs.writeFileSync(probeWavPath, buf)
+    return probeWavPath
+  } catch (err) {
+    return ''
+  }
+}
+
+/**
+ * 实测声卡现在能不能被别人用：拿共享模式的 mpv 试着打开默认设备。
+ * 打不开（AUDCLNT_E_DEVICE_IN_USE）就说明还被谁占着 —— 这就是「其他软件没声音」的判定依据。
+ * 顺带效果：以共享方式打开一次，Windows 会把端点的独占状态清干净，别人更容易立刻接回来。
+ */
+function probeDeviceFree() {
+  return new Promise((resolve) => {
+    const wav = ensureProbeWav()
+    const exe = mpvExePath()
+    if (!wav || !exe || !fs.existsSync(exe)) {
+      resolve({ blocked: false, detail: 'mpv 不可用，跳过探测' })
+      return
+    }
+    const args = [
+      '--no-config', '--no-video', '--ao=wasapi', '--audio-exclusive=no',
+      '--length=0.4', '--msg-level=all=warn', wav
+    ]
+    // 探测的必须是「用户实际在用的那个设备」：独占是按设备占的，
+    // 探测默认设备而用户选的是 USB DAC，就会漏判（明明还占着却报可用）。
+    const dev = String(store.get().settings.audioDevice || '').trim()
+    if (dev) args.splice(3, 0, '--audio-device=' + dev)
+    execFile(exe, args, { windowsHide: true, timeout: 12000 }, (err, stdout, stderr) => {
+      const out = (stdout || '') + (stderr || '')
+      const blocked = /AUDCLNT_E_DEVICE_IN_USE|0x8889000a|EXCLUSIVE_MODE/i.test(out)
+      const first = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || ''
+      resolve({ blocked, detail: blocked ? first : '' })
+    })
+  })
+}
+
+function stopMpv() {
+  // 保留旧的同步入口（退出流程用），真正等待进程退出的逻辑在 releaseMpv() 里
+  const eng = mpvEngine
+  mpvEngine = null
+  stopDeviceWatch()
+  if (!eng) return Promise.resolve({ ok: true, exited: true })
+  pushMpvLog('info', '关闭引擎')
+  return eng.stop()
 }
 
 /* ---------------- 输出设备热插拔（v2.1） ---------------- */
@@ -1109,13 +1239,19 @@ function startDeviceWatch() {
   if (deviceWatchId || process.platform !== 'win32') return
   deviceWatchId = setInterval(async () => {
     if (!mpvEngine || !mpvEngine.running || !store.get().settings.exclusiveOutput) return
+    // v2.8.6：抓住这一轮的引擎实例。下面 await 期间用户可能已经关了独占
+    // （引擎被换掉/停掉）。这时如果还拿旧实例去 restart()，就会在「关独占」之后
+    // 又起一个新的独占 mpv —— 那个进程没人管，就是一个霸着声卡的孤儿。
+    const eng = mpvEngine
     const cur = String(store.get().settings.audioDevice || '')
     let devs
     try {
-      devs = await mpvEngine.listDevices()
+      devs = await eng.listDevices()
     } catch {
       return
     }
+    // await 之后重新确认：引擎还是同一个、还在跑、独占仍然开着
+    if (mpvEngine !== eng || !eng.running || !store.get().settings.exclusiveOutput) return
     const names = new Set(devs.map((d) => d.name))
     if (cur && !names.has(cur)) {
       lostDevice = cur
@@ -1123,7 +1259,7 @@ function startDeviceWatch() {
       logLine('[device] 设备断开，回退系统默认：' + cur)
       store.patch({ settings: { audioDevice: '' } })
       sendToRenderer('device-lost', { device: cur, restored: false })
-      try { await mpvEngine.restart({ exclusive: true, audioDevice: '' }) } catch {}
+      try { await eng.restart({ exclusive: true, audioDevice: '' }) } catch {}
       return
     }
     if (!cur && lostDevice && names.has(lostDevice)) {
@@ -1133,7 +1269,7 @@ function startDeviceWatch() {
       logLine('[device] 设备接回，自动切回：' + back)
       store.patch({ settings: { audioDevice: back } })
       sendToRenderer('device-lost', { device: back, restored: true })
-      try { await mpvEngine.restart({ exclusive: true, audioDevice: back }) } catch {}
+      try { await eng.restart({ exclusive: true, audioDevice: back }) } catch {}
     }
   }, 8000)
   if (deviceWatchId.unref) deviceWatchId.unref()
@@ -1457,7 +1593,7 @@ function registerIpc() {
   })
 
   // —— 独占输出（mpv 后端） ——
-  ipcMain.handle('mpv:start', (e, exclusive) => ensureMpv(exclusive !== false))
+  ipcMain.handle('mpv:start', (e, exclusive) => ensureMpv(exclusive !== false, { forceMode: true }))
   ipcMain.handle('mpv:load', (e, filePath, opts) => {
     if (mpvEngine) mpvEngine.load(filePath, opts || {})
     return true
@@ -1474,6 +1610,22 @@ function registerIpc() {
     return true
   })
   ipcMain.handle('mpv:quit', () => { stopMpv(); return true })
+  // v2.8.6：完整的「释放独占」流程 —— 等进程真退出 + 扫残留孤儿 + 实测声卡
+  ipcMain.handle('mpv:release', async () => {
+    try {
+      return await releaseMpv({ probe: true })
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+  // 只探测「声卡现在能不能给别人用」，不动引擎（诊断面板用）
+  ipcMain.handle('mpv:probeDevice', async () => {
+    try {
+      return await probeDeviceFree()
+    } catch (err) {
+      return { blocked: false, detail: err.message }
+    }
+  })
   // 开启独占前的确认框（把不可逆的副作用说清楚，避免误触）
   ipcMain.on('win:play-state', (e, playing) => updateThumbar(!!playing))
 
@@ -1803,7 +1955,15 @@ if (gotLock) cleanChromiumCache()
   app.on('before-quit', () => {
     quitting = true
     stopWatching()
+    // v2.8.6：退出时把引擎彻底收掉。
+    // 以前只 kill() 一下就走，进程若没死透（或者有竞态留下的孤儿），
+    // 残留的 mpv 会一直以独占方式霸着声卡 —— 用户看到的是「播放器都关了，
+    // 别的软件还是没声音，而且音乐还在放」。
+    const hadEngine = !!mpvEngine
     stopMpv()
+    if (hadEngine) {
+      try { sweepOurMpv() } catch (err) { /* 忽略 */ }
+    }
     if (store) store.flush()
   })
 
