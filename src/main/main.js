@@ -1453,6 +1453,11 @@ function registerIpc() {
     // v2.5：重启时带上当前音量（重启后不再被重置成 100；播放状态由 restart 内部恢复）
     const startVolume = Math.max(0, Math.min(1, Number(store.get().settings.volume ?? 1)))
     const r = await mpvEngine.restart({ exclusive: true, audioDevice: name, volume: startVolume })
+    // 新设备起不来时 mpv.js 会退回原设备；这时设置也得跟着回退，否则界面显示的和实际用的不一致
+    if (r.ok && r.audioDevice && r.audioDevice !== name) {
+      store.patch({ settings: { ...store.get().settings, audioDevice: r.audioDevice } })
+      return { ok: true, applied: true, reverted: true, device: r.audioDevice, error: '该设备不可用，已退回原设备' }
+    }
     return { ok: !!r.ok, applied: true, error: r.error }
   })
 
