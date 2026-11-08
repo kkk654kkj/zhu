@@ -1075,7 +1075,7 @@ async function ensureMpv(exclusive) {
   const audioDevice = String(store.get().settings.audioDevice || '').trim()
   // v2.5：启动音量跟随设置（以前 mpv 固定 --volume=100，重启引擎音量就被重置）
   const startVolume = Math.max(0, Math.min(1, Number(store.get().settings.volume ?? 1)))
-  pushMpvLog('info', '启动引擎：exclusive=' + wantExclusive + ' device=' + (audioDevice || '(系统默认)') + ' volume=' + Math.round(startVolume * 1000) / 10)
+  pushMpvLog('info', '启动引擎：exclusive=' + wantExclusive + ' ao=' + (process.env.LX_TEST_MUTE === '1' ? 'null(测试静音)' : 'wasapi') + ' device=' + (audioDevice || '(系统默认)') + ' volume=' + Math.round(startVolume * 1000) / 10)
   const r = await mpvEngine.start({ exclusive: wantExclusive, audioDevice, volume: startVolume })
   logLine('[mpv] start exclusive=' + wantExclusive + ' ' + JSON.stringify(r) + ' exe=' + mpvExePath())
   pushMpvLog(r.ok ? 'info' : 'error',

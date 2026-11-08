@@ -82,7 +82,9 @@ class MpvEngine {
       // 采样率（实测 96k 的 FLAC 被按 44.1k 输出），位完美直接失效
       '--gapless-audio=no',
       '--audio-exclusive=' + (this.exclusive ? 'yes' : 'no'),
-      '--ao=wasapi',
+      // 自动化测试时（LX_TEST_MUTE=1）走空输出：进度照走、参数照报，但一点声音都不出。
+      // 独占输出是独立进程，Chromium 的 --mute-audio 管不到它，只能在这里拦。
+      process.env.LX_TEST_MUTE === '1' ? '--ao=null' : '--ao=wasapi',
       '--input-ipc-server=' + this.pipeName
     ]
     // 指定输出设备（如 wasapi/{GUID}）。留空表示跟随系统默认设备。
