@@ -13,7 +13,7 @@
  *
  * 通信：`--input-ipc-server` 命名管道 + 逐行 JSON（mpv 的 JSON IPC 协议）。
  */
-const { spawn } = require('child_process')
+const { spawn, execFileSync } = require('child_process')
 const net = require('net')
 const fs = require('fs')
 const path = require('path')
@@ -42,6 +42,17 @@ class MpvEngine {
     this._pending = new Map()      // request_id → {resolve, reject, timer}
     this._lastFile = null
     this._lastPos = 0
+    // v2.8.6 / v3.3.6：启动代次。kill() 会把代次 +1，
+    // 于是「正在连接 IPC 的 start()」会发现自己已经过期 → 立刻把刚起的进程收掉。
+    // 以前没有这道闸：kill() 之后若还有一个 start() 在途，它会在 kill 之后**再 spawn 一个**，
+    // 而那个进程已经没人管了 —— 变成孤儿独占进程：声卡一直被占，别人全都没声音，
+    // 而播放器自己还在放（用户看到的正是「关了独占，别人还是没声音，播放器还能继续播放」）。
+    this._gen = 0
+    // v2.8.6 / v3.3.6：「已释放」标记。
+    // stop()（= 关独占 / 退出）之后，这个引擎对象就不要再起来了 ——
+    // 否则正在进行的 restart() 会在释放之后又起一个新的独占 mpv，
+    // 那个进程没人管，于是变成一个霸着声卡、还在放歌的孤儿。
+    this._disposed = false
   }
 
   get running() {
@@ -50,6 +61,10 @@ class MpvEngine {
 
   /** 启动引擎进程（幂等）。返回 {ok, exclusive, error} */
   async start({ exclusive = true, audioDevice = '', volume = 1 } = {}) {
+    if (this._disposed) {
+      // 已经释放过了（关独占/退出）——不能再起进程，否则会留下没人管的孤儿独占进程
+      return { ok: false, error: '引擎已释放' }
+    }
     if (this.running) {
       return { ok: true, exclusive: this.exclusive }
     }
@@ -65,6 +80,8 @@ class MpvEngine {
     this._queue = []
     this.ready = false
     this.pipeName = PIPE_PREFIX + process.pid + '-' + Date.now().toString(36)
+    // 代次闸门：kill() 会 +1，在途的 start() 发现自己过期就自我作废（见构造函数注释）
+    const gen = ++this._gen
 
     const args = [
       '--no-config',
@@ -128,6 +145,14 @@ class MpvEngine {
     })
 
     const connected = await this._connectWithRetry(20, 120)
+    // v2.8.6 / v3.3.6：连接期间可能已经被 kill()（关独占、切设备、退出）了。
+    // 这时不能再往下走 —— 必须把**自己刚起的这个进程**收掉，
+    // 否则它会变成没人管的孤儿独占进程，一直霸着声卡。
+    if (gen !== this._gen) {
+      try { proc.kill() } catch (err) { /* 忽略 */ }
+      try { if (proc.exitCode === null) proc.kill('SIGKILL') } catch (err) { /* 忽略 */ }
+      return { ok: false, error: '引擎启动已被取消' }
+    }
     if (!connected) {
       this.kill()
       return { ok: false, error: 'mpv IPC 连接失败（可能是引擎启动异常）' + (stderrTail ? '：' + stderrTail.trim().slice(-200) : '') }
@@ -337,7 +362,10 @@ class MpvEngine {
     const pos = this._lastPos
     const prevDevice = this._audioDevice || ''
     const vol = volume != null ? volume : (this._volume01 != null ? this._volume01 : 1)
-    this.kill()
+    // v2.8.6 / v3.3.6：重启前要**等旧进程真的退出**再起新的。
+    // 以前是 kill() 完就立刻 spawn：旧的还占着声卡（独占），新的又去抢同一个设备，
+    // 于是新进程起不来（独占模式尤其明显），表现就是「切设备/切模式没反应」。
+    await this._stopProcess()
     let r = await this.start({ exclusive, audioDevice, volume: vol })
     // 新设备被别的程序独占 / 拔掉了：退回上一次能用的设备，至少别变成哑巴
     if (!r.ok && audioDevice && audioDevice !== prevDevice) {
@@ -368,6 +396,9 @@ class MpvEngine {
   }
 
   kill() {
+    // 代次 +1：让所有「在途的 start()」知道自己过期了（见构造函数注释）。
+    // 没有这一步，kill 之后仍可能有 start() 接着 spawn 出没人管的孤儿独占进程。
+    this._gen++
     this.ready = false
     this._rejectPending('mpv 已关闭')
     if (this.sock) { try { this.sock.destroy() } catch {} }
@@ -381,6 +412,51 @@ class MpvEngine {
     setTimeout(() => {
       try { if (p.exitCode === null && !p.killed) p.kill('SIGKILL') } catch (err) { /* 忽略 */ }
     }, 800)
+  }
+
+  /**
+   * 停止引擎并**等进程真正退出**。
+   *
+   * v2.8.6 / v3.3.6 新增：以前只有 kill()（发信号就返回），调用方根本不知道
+   * 声卡什么时候被还回来。独占模式下这个时间差很要命：紧接着起一个新引擎，
+   * 新进程会撞上「设备还被旧进程占着」，于是切设备/切模式失败；
+   * 而「关独占」后如果立刻让别人来用，别的程序可能还打不开设备。
+   * 这里等到 exit 事件真的来了再返回，超时则用 taskkill 强杀兜底。
+   *
+   * 这一步同时把引擎标记为「已释放」：之后任何迟到的 start() 都会自我作废，
+   * 不会再造出一个没人管的孤儿独占进程。
+   */
+  async stop({ timeout = 3000 } = {}) {
+    this._disposed = true
+    return this._stopProcess({ timeout })
+  }
+
+  /** 内部：停掉进程并等它真的退出（不改变「已释放」状态，restart 用） */
+  async _stopProcess({ timeout = 3000 } = {}) {
+    const p = this.proc
+    if (!p) {
+      this.kill()
+      return { ok: true, exited: true, pid: null }
+    }
+    const exited = new Promise((resolve) => {
+      let done = false
+      const onExit = () => { if (!done) { done = true; resolve(true) } }
+      p.once('exit', onExit)
+      // 进程可能在我们挂监听之前就退出了
+      if (p.exitCode !== null) onExit()
+    })
+    this.kill()
+    const ok = await Promise.race([
+      exited,
+      new Promise((resolve) => setTimeout(() => resolve(false), timeout))
+    ])
+    if (ok) return { ok: true, exited: true, pid: p.pid }
+    // 最后一刀：任务管理器式的强杀，保证不留占着声卡的孤儿
+    try {
+      execFileSync('taskkill', ['/PID', String(p.pid), '/F'], { windowsHide: true, timeout: 5000 })
+    } catch (err) { /* 忽略 */ }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    return { ok: false, exited: false, pid: p.pid }
   }
 
   _teardown() {

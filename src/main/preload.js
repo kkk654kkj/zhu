@@ -183,6 +183,10 @@ contextBridge.exposeInMainWorld('api', {
   mpvVolume: (v) => invoke('mpv:volume', v),
   mpvMute: (m) => invoke('mpv:mute', m),
   mpvQuit: () => invoke('mpv:quit'),
+  /** 完整释放独占：等进程退出 + 扫残留 + 实测声卡 → {ok, exited, leftover[], blocked, detail} */
+  mpvRelease: () => invoke('mpv:release'),
+  /** 只探测声卡现在能不能给别人用 → {blocked, detail} */
+  mpvProbeDevice: () => invoke('mpv:probeDevice'),
   mpvConfirmEnable: () => invoke('mpv:confirmEnable'),
   /** 枚举 WASAPI 输出设备 → {ok, devices:[{name,description}], error?} */
   mpvDevices: () => invoke('mpv:devices'),

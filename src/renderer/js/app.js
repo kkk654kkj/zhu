@@ -139,6 +139,7 @@ async function boot() {
   UI.setLyricPanelVisible(settings.showLyricPanel !== false)
   UI.setNorm(settings.normalizeVolume === true)
   updateHifiBadge()
+  showReleaseNotice()
   window.api.dlyricIsOpen().then((open) => {
     UI.setDLyric(open, open && settings.desktopLyric && settings.desktopLyric.locked)
   })
@@ -1028,7 +1029,12 @@ async function toggleExclusiveOutput() {  if (state.settings.exclusiveOutput) {
     state.settings.exclusiveOutput = false
     await window.api.patchSettings({ exclusiveOutput: false }).catch(() => {})
     saveSession()
-    await window.api.mpvQuit().catch(() => {})
+    // v3.3.6 / v2.8.6：关独占要走完整的「释放」流程 ——
+    // 等 mpv 进程真退出、扫掉可能残留的孤儿、实测声卡能不能被别人打开。
+    // 以前只发个信号就重载界面，设备可能还被占着，用户看到的是
+    // 「关了独占，别的软件还是没声音，播放器自己还能继续放」。
+    const rel = await window.api.mpvRelease().catch(() => null)
+    try { sessionStorage.setItem('lx_release_notice', JSON.stringify(rel || {})) } catch (err) { /* 忽略 */ }
     location.reload()
     return
   }
@@ -1038,6 +1044,28 @@ async function toggleExclusiveOutput() {  if (state.settings.exclusiveOutput) {
   await window.api.patchSettings({ exclusiveOutput: true }).catch(() => {})
   saveSession()
   location.reload()
+}
+
+/**
+ * 重载之后把「释放独占」的结果告诉用户（sessionStorage 传话，重载会清空内存）。
+ * 声卡确实被还回来了 → 说明别的程序可能需要重新点一下播放才恢复；
+ * 还被占着 → 直说，别让用户自己猜。
+ */
+function showReleaseNotice() {
+  let raw = ''
+  try { raw = sessionStorage.getItem('lx_release_notice') || '' } catch (err) { return }
+  if (!raw) return
+  try { sessionStorage.removeItem('lx_release_notice') } catch (err) { /* 忽略 */ }
+  let rel = null
+  try { rel = JSON.parse(raw) } catch (err) { return }
+  if (!rel) return
+  if (rel.blocked) {
+    toast('声卡仍被占用，其它程序可能还是没声音。已清理本程序的残留进程，若仍无声请重启声卡设备。', 6000)
+  } else if (rel.leftover && rel.leftover.length) {
+    toast('已关闭独占输出，并清理了 ' + rel.leftover.length + ' 个残留进程。其它程序若没声音，重新播放一下即可。', 5000)
+  } else {
+    toast('已关闭独占输出，声卡已释放。其它程序若没声音，重新播放一下即可。', 4000)
+  }
 }
 
 /* ================= 独占输出设备面板（v2.3：从隐藏的右键菜单升级为正式面板） ================= */

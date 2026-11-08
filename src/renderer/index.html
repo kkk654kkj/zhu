@@ -503,6 +503,8 @@
           <span class="grow"></span>
           <button class="mini-btn active" data-mpv="live" title="本次运行期间的 mpv 事件">实时</button>
           <button class="mini-btn" data-mpv="file" title="data\lx-player.log 尾部">日志文件</button>
+          <button class="mini-btn" id="btnDiagProbeDevice" title="实测声卡现在能不能被别的程序打开">检测声卡</button>
+          <button class="mini-btn" id="btnDiagRelease" title="关闭引擎、清掉残留进程并确认声卡已释放">释放独占</button>
           <button class="mini-btn" id="btnDiagMpvRefresh" title="刷新">刷新</button>
         </div>
         <pre class="diag-log" id="diagLog"></pre>
