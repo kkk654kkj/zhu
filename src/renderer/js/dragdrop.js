@@ -15,6 +15,7 @@ function bindDragAndDrop() {
   if (!queueBody || !tableBody || !sidebar) return
 
   let dragQi = null          // 正在拖的队列索引
+  let dragQId = null         // v3.3.9：被拖项的曲目 id —— 拖拽期间队列可能重渲染，索引会过期
   let dragTrackIds = null    // 正在拖的曲目 id（多选时是整批）
   let dropEl = null          // 当前高亮的放置目标
 
@@ -30,6 +31,7 @@ function bindDragAndDrop() {
   }
   const endDrag = () => {
     dragQi = null
+    dragQId = null
     dragTrackIds = null
     clearDropMark()
     document.querySelectorAll('.qp-item.dragging').forEach((el) => el.classList.remove('dragging'))
@@ -40,6 +42,8 @@ function bindDragAndDrop() {
     const item = e.target.closest('.qp-item')
     if (!item || item.dataset.qi == null) return
     dragQi = Number(item.dataset.qi)
+    // v3.3.9：同时快照曲目 id，drop 时按 id 换算当前索引（自动连播/切歌都会重渲染队列）
+    dragQId = (typeof player !== 'undefined' && player && player.tracks[dragQi]) ? player.tracks[dragQi].id : null
     dragTrackIds = null
     item.classList.add('dragging')
     e.dataTransfer.effectAllowed = 'move'
@@ -59,8 +63,14 @@ function bindDragAndDrop() {
     const item = e.target.closest('.qp-item')
     if (!item || item.dataset.qi == null) { endDrag(); return }
     e.preventDefault()
-    const from = dragQi
     const to = Number(item.dataset.qi)
+    // v3.3.9：起点按 id 换算成当前索引 —— 以前用拖拽开始时的快照索引，
+    // 队列重渲染后会移错行
+    let from = dragQi
+    if (dragQId && player) {
+      const i = player.tracks.findIndex((t) => t.id === dragQId)
+      if (i >= 0) from = i
+    }
     endDrag()
     // 播放器按 id 重新定位 index，拖过当前曲目也不会串位
     player.moveInQueue(from, to)

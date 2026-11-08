@@ -97,6 +97,9 @@ const AudioFx = {
       return true
     } catch (err) {
       console.warn('[audiofx] WebAudio 接入失败，均衡器不可用:', err && err.message)
+      // v3.3.9：元素一旦被 AudioContext 捕获，链路没连 destination 就是整机静音 ——
+      // 兜底直连一次（createMediaElementSource 只能调一次，不能再重建）
+      try { if (typeof src !== 'undefined' && src && ctx) src.connect(ctx.destination) } catch (e2) { /* 真没辙 */ }
       this.failed = true
       this.ctx = null
       return false
@@ -204,7 +207,10 @@ const AudioFx = {
     const fMax = 16000
     const gap = w / barCount > 14 ? 2 : 1
     const barW = (w - gap * (barCount - 1)) / barCount
-    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#31c27c'
+    // v3.3.9：accent+'55' 只对 6 位 hex 成立 —— 主题色若被设成 rgba()/8位hex/命名色，
+    // addColorStop 每帧抛 SyntaxError，频谱永久卡死
+    const accentRaw = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#31c27c'
+    const accent = /^#[0-9a-fA-F]{6}$/.test(accentRaw) ? accentRaw : '#31c27c'
 
     for (let i = 0; i < barCount; i++) {
       const f0 = fMin * Math.pow(fMax / fMin, i / barCount)

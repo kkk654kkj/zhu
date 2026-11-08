@@ -35,6 +35,11 @@ app.setPath('sessionData', DATA_DIR)
 
 // 启动日志：无控制台时也能定位崩溃点
 const LOG_FILE = process.env.LX_LOG || path.join(DATA_DIR, 'lx-player.log')
+// v2.8.8：日志超 5MB 就轮转成 .old.log —— 以前无限增长且每条都是同步追加
+try {
+  const _st = fs.statSync(LOG_FILE)
+  if (_st.size > 5 * 1024 * 1024) fs.renameSync(LOG_FILE, LOG_FILE.replace(/\.log$/, '.old.log'))
+} catch (err) { /* 首次运行没有日志 */ }
 function logLine(...args) {
   const line = `[${new Date().toISOString()}] ` + args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')
   try { fs.appendFileSync(LOG_FILE, line + '\n') } catch {}
@@ -196,8 +201,18 @@ function registerFileProtocol() {
 
       if (range) {
         const m = /bytes=(\d*)-(\d*)/.exec(range)
-        let start = m && m[1] ? parseInt(m[1], 10) : 0
-        let end = m && m[2] ? parseInt(m[2], 10) : total - 1
+        let start = 0
+        let end = total - 1
+        if (m) {
+          if (m[1]) {
+            start = parseInt(m[1], 10)
+            end = m[2] ? parseInt(m[2], 10) : total - 1
+          } else if (m[2]) {
+            // v2.8.8：后缀区间 bytes=-N = 最后 N 字节（以前解析成开头 N 字节）
+            start = Math.max(0, total - parseInt(m[2], 10))
+            end = total - 1
+          }
+        }
         if (Number.isNaN(start)) start = 0
         if (Number.isNaN(end) || end >= total) end = total - 1
         if (start > end) return new Response('bad range', { status: 416 })
@@ -605,6 +620,7 @@ function cancelPowerAction() {
   powerPending = null
   try { execFile('shutdown', ['/a']) } catch {}
   logLine('[power] 已取消')
+  refreshTrayMenu()   // v2.8.8：不然「⚠ 取消关机」菜单项一直残留
   sendToRenderer('power-action', { kind: null })
   return true
 }
@@ -886,6 +902,7 @@ async function readEmbeddedCached(trackId, audioPath, audioMtime) {
   const hit = embLyricCache.get(trackId)
   if (hit && hit.audioMtime === audioMtime) return hit.text
   const text = await readEmbeddedLyric(audioPath)
+  embLyricCache.delete(trackId)   // v2.8.8：先删再插，淘汰才真的是「最久未用」
   embLyricCache.set(trackId, { audioMtime, text })
   // v2.8.7：加上限 —— 几千首全听一遍会攒几十 MB 歌词全文，不能无限涨
   if (embLyricCache.size > 500) embLyricCache.delete(embLyricCache.keys().next().value)
@@ -1131,7 +1148,7 @@ async function releaseMpv({ probe = true } = {}) {
     if (!exited) pushMpvLog('warn', '引擎进程没有正常退出（pid ' + r.pid + '），已强制结束')
   }
   // 扫残留：属于本进程（管道名里带本 PID）的 mpv 一定是我们的，活着就是孤儿
-  const leftover = sweepOurMpv()
+  const leftover = await sweepOurMpv()
   if (leftover.length) {
     pushMpvLog('warn', '发现残留的 mpv 进程（已强杀）：' + leftover.join(', '))
     logLine('[mpv] 残留孤儿进程已清理: ' + leftover.join(','))
@@ -1148,7 +1165,7 @@ async function releaseMpv({ probe = true } = {}) {
 }
 
 /** 列出（并杀掉）属于本进程的残留 mpv —— 竞态产生的孤儿会一直霸着声卡 */
-function sweepOurMpv() {
+async function sweepOurMpv() {
   if (process.platform !== 'win32') return []
   const selfPid = process.pid
   const script = [
@@ -1159,18 +1176,20 @@ function sweepOurMpv() {
     '  $_.ProcessId',
     '}'
   ].join('\n')
-  const pids = []
-  try {
-    const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
-      { windowsHide: true, timeout: 8000, encoding: 'utf8' })
-    for (const line of String(stdout || '').split(/\r?\n/)) {
-      const s = line.trim()
-      if (/^\d+$/.test(s)) pids.push(s)
-    }
-  } catch (err) { return [] }
-  for (const pid of pids) {
-    try { execFileSync('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 }) } catch (err) { /* 忽略 */ }
-  }
+  // v2.8.8：改异步 —— 同步版（execFileSync 8 秒 + 逐个 taskkill 各 5 秒）会把主进程
+  // 事件循环卡到 13 秒，期间所有 IPC 全部停摆
+  const listPids = () => new Promise((resolve) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true, timeout: 8000 }, (err, stdout) => {
+        if (err || !stdout) return resolve([])
+        resolve(String(stdout).split(/\r?\n/).map((x) => x.trim()).filter((x) => /^\d+$/.test(x)))
+      })
+  })
+  const killPid = (pid) => new Promise((resolve) => {
+    execFile('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 }, () => resolve())
+  })
+  const pids = await listPids()
+  for (const pid of pids) await killPid(pid)
   return pids
 }
 
@@ -1331,9 +1350,18 @@ function registerIpc() {
   ipcMain.handle('settings:get', () => store.get().settings)
   ipcMain.handle('settings:patch', (e, patch) => {
     const before = store.get().settings || {}
+    // v2.8.8：键白名单 —— 只放行默认设置里已有的键，挡住未知键注入
+    const allowed = new Set(Object.keys(before))
+    const filtered = {}
+    const blocked = []
+    for (const [k, v] of Object.entries(patch && typeof patch === 'object' ? patch : {})) {
+      if (allowed.has(k)) filtered[k] = v
+      else blocked.push(k)
+    }
+    if (blocked.length) logLine('[settings] 拒绝未知设置键:', blocked.join(', '))
     const prevDirs = JSON.stringify(before.musicDirs || [])
     const prevWatch = before.watchFolders
-    const next = store.patch({ settings: patch }).settings
+    const next = store.patch({ settings: filtered }).settings
     // 目录列表或监视开关变了 → 重新挂 watcher（v1.7）
     if (JSON.stringify(next.musicDirs || []) !== prevDirs || next.watchFolders !== prevWatch) {
       startWatching()
@@ -1540,8 +1568,18 @@ function registerIpc() {
     })
     return res.canceled ? [] : res.filePaths
   })
+  // v2.8.8：路径收口 —— 只允许曲库目录 / 数据目录之内的文件
+  function isAllowedMediaPath(p) {
+    const abs = path.resolve(String(p || ''))
+    const roots = [
+      ...(store.get().settings.musicDirs || []),
+      DATA_DIR
+    ].map((r) => path.resolve(r).toLowerCase() + path.sep)
+    const low = abs.toLowerCase() + path.sep
+    return roots.some((r) => low.startsWith(r))
+  }
   ipcMain.handle('shell:showItem', (e, filePath) => {
-    if (filePath && fs.existsSync(filePath)) shell.showItemInFolder(filePath)
+    if (filePath && fs.existsSync(filePath) && isAllowedMediaPath(filePath)) shell.showItemInFolder(filePath)
   })
 
   // —— 窗口控制 ——
@@ -1611,6 +1649,11 @@ function registerIpc() {
   ipcMain.handle('mpv:load', (e, filePath, opts) => {
     // v2.8.7：引擎没跑起来还返回 true，渲染层会以为加载成功，界面假「播放中」
     if (!mpvEngine || !mpvEngine.running) return false
+    // v2.8.8：本地文件只放行曲库/数据目录之内
+    if (!/^https?:\/\//i.test(filePath) && !isAllowedMediaPath(filePath)) {
+      logLine('[mpv] 拒绝加载曲库目录之外的文件:', filePath)
+      return false
+    }
     mpvEngine.load(filePath, opts || {})
     return true
   })
@@ -1673,21 +1716,23 @@ function registerIpc() {
    */
   ipcMain.handle('mpv:devices', async () => {
     let startedHere = false
+    let eng = null
     try {
       if (!mpvEngine || !mpvEngine.running) {
         const r = await ensureMpv(false)
         if (!r.ok) return { ok: false, devices: [], error: r.error || '引擎未启动' }
         startedHere = true
       }
-      const devices = await mpvEngine.listDevices()
+      eng = mpvEngine
+      const devices = await eng.listDevices()
       return { ok: true, devices }
     } catch (err) {
       return { ok: false, devices: [], error: err.message }
     } finally {
       // 只为枚举而临时拉起的引擎用完即关，不留空闲进程。
-      // v2.8.7：以前 exclusiveOutput=true 但引擎恰好没跑时这个共享引擎会被留下，
-      // 一直挂着不干活也不受设备监视管 —— 既然只为枚举，就一律关掉。
-      if (startedHere) stopMpv()
+      // v2.8.8：但枚举的几百毫秒里用户可能点了播放（引擎被复用加载了文件），
+      // 这时不能杀 —— 用「引擎还是同一个且从未加载过文件」作判据。
+      if (startedHere && mpvEngine === eng && !eng._lastFile) stopMpv()
     }
   })
 
@@ -1980,12 +2025,20 @@ if (gotLock) cleanChromiumCache()
     quitting = true
     stopWatching()
     const hadEngine = !!mpvEngine
-    stopMpv().catch(() => {}).finally(() => {
-      if (hadEngine) { try { sweepOurMpv() } catch (err) { /* 忽略 */ } }
-      try { if (store) store.flush() } catch (err) { /* 忽略 */ }
+    try {
+      stopMpv().catch(() => {}).finally(() => {
+        (async () => {
+          if (hadEngine) { try { await sweepOurMpv() } catch (err) { /* 忽略 */ } }
+          try { if (store) store.flush() } catch (err) { /* 忽略 */ }
+          quitCleanupDone = true
+          app.quit()
+        })()
+      })
+    } catch (err) {
+      // v2.8.8：stopMpv 若同步抛错也不能把退出卡死
       quitCleanupDone = true
       app.quit()
-    })
+    }
   })
 
   app.on('will-quit', () => globalShortcut.unregisterAll())

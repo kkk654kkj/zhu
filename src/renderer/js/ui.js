@@ -210,8 +210,10 @@ const UI = {
     }
     // v3.3.7：同一首歌重复调用（播放/暂停都会触发）不再重建封面 <img> ——
     // 以前每次暂停/恢复都新建三处 <img>，浏览器重新解码加载，肉眼可见闪烁
-    const npChanged = track.id !== this._npKey
-    this._npKey = track.id
+    // v3.3.9：键带 cover —— 播放中后台扫描补到封面（同 id、cover 变了）也要刷新
+    const npKey = track.id + '|' + (track.cover || '')
+    const npChanged = npKey !== this._npKey
+    this._npKey = npKey
     this.els.pbTitle.textContent = track.title
     this.els.pbTitle.title = track.title
     this.els.pbArtist.textContent = track.artist || '未知歌手'
@@ -417,6 +419,12 @@ const UI = {
   setLyricPanelVisible(visible) {
     this.els.lyricPanel.classList.toggle('hidden', !visible)
     this.els.btnLyricToggle.classList.toggle('on', visible)
+    // v3.3.9：面板隐藏时停掉频谱 rAF 循环（画布缩到 0，循环每帧空转）；
+    // 显示且有分析器时重启
+    if (typeof AudioFx !== 'undefined') {
+      if (visible && AudioFx.analyser) AudioFx.startSpectrum(this.els.spectrum)
+      else AudioFx.stopSpectrum()
+    }
   },
 
   /* ---------------- 歌词 ---------------- */

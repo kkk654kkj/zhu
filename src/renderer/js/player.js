@@ -91,11 +91,13 @@ class Player extends Emitter {
     if (!track) return
     if (next && this.index >= 0) {
       this.tracks.splice(this.index + 1, 0, track)
-      this._buildShufflePool()
+      this._buildShufflePool()   // 插入会移动后续索引，重建池
       this.emit('queue-change', this.tracks, this.index)
     } else {
       this.tracks.push(track)
-      this._buildShufflePool()
+      // v3.3.9：队尾追加不重建洗牌池 —— 以前任何加歌都整轮重洗，
+      // 随机模式同一「轮」里听过的歌可能再出现
+      this._shufflePool.push(this.tracks.length - 1)
       this.emit('queue-change', this.tracks, this.index)
     }
   }
@@ -273,6 +275,9 @@ class Player extends Emitter {
     this._endingHandled = true
     this.emit('ended', this.current)
     if (this.mode === 'single') {
+      // v3.3.9：必须把 _endingHandled 复位 —— 以前只有第一遍能触发 ended，
+      // 第二遍播完事件被吞，单曲循环卡在曲末（不循环、不切歌）
+      this._endingHandled = false
       this.seek(0)
       this.play()
       return
@@ -305,9 +310,10 @@ class Player extends Emitter {
 
   setVolume(v, silent = false) {
     this.volume = Math.max(0, Math.min(1, v))
-    // 正在淡入时不要直写 audio.volume：渐变 tick 会跟随 this.volume，
-    // 直写反而被下一次 tick 按旧曲线覆盖（表现为拖音量弹回去）
-    if (!this.muted && this._fadeDir !== 'in') this.audio.volume = this.volume
+    // 淡入/淡出进行中都不要直写 audio.volume：渐变 tick 会按自己的曲线覆盖直写
+    // （淡入期直写表现为「拖音量弹回去」，淡出期直写表现为「音量先跳新值再被拉回 0」）
+    // v3.3.9：把淡出也纳入
+    if (!this.muted && !this._fadeDir) this.audio.volume = this.volume
     if (!silent) this.emit('vol-change', this.volume, this.muted)
   }
 
@@ -366,7 +372,9 @@ class Player extends Emitter {
 
   _fadeIn() {
     // 独占输出（mpv）：任何软件音量渐变都会破坏位完美，直接跳过
-    if (this.audio.noFade || this.muted) return
+    // v3.3.9：早退分支也要清 _fadeTimeout —— 暂停→静音→播放的序列里，
+    // 残留的「淡完即暂停」定时器会在 fadeMs+30ms 后把刚点的播放按下去
+    if (this.audio.noFade || this.muted) { this._clearFade(); return }
     this.audio.volume = 0
     this._fadeTo(this.volume, 'in')
   }

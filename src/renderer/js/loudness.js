@@ -54,6 +54,9 @@ function analyzeBuffer(buf, targetLufs) {
   const n = buf.length
   const nCh = Math.min(buf.numberOfChannels, 2) // BS.1770 对立体声求和；环绕声罕见，取前两声道
   if (!n || !nCh) throw new Error('空音频')
+  // v3.3.9：长音轨直接拒绝 —— decodeAudioData 整段解码 + 每声道再拷一份，
+  // 1 小时立体声内存峰值约 2.8GB，整库分析遇到有声书必 OOM（调用方按失败跳过）
+  if (n / sr > 1800) throw new Error('音轨超过 30 分钟，跳过响度分析')
 
   // 1) 峰值（滤波前）+ 每声道 K 滤波后的副本
   const filtered = []
