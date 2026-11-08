@@ -850,6 +850,19 @@ function sendToRenderer(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
 }
 
+/** 只盯当前这首的 lrc：外面改了立刻通知渲染层重读，切歌时自动换监听 */
+let lyricWatch = null
+function watchLyricFile(file, trackId) {
+  if (lyricWatch) { try { lyricWatch.close() } catch (err) { /* 忽略 */ } lyricWatch = null }
+  if (!file) return
+  try {
+    lyricWatch = fs.watch(file, { persistent: false }, () => {
+      sendToRenderer('lyric:changed', trackId)
+    })
+    lyricWatch.on('error', () => { /* 文件被删/改名，下次读的时候重建 */ })
+  } catch (err) { /* 监视不了就算了，mtime 兜底 */ }
+}
+
 /* ---------------- 桌面歌词浮窗 ---------------- */
 
 let dlyricWin = null
@@ -1309,12 +1322,22 @@ function registerIpc() {
   })
 
   // —— 歌词 ——
+  /**
+   * v2.8.3：返回值从纯文本改成 { text, mtimeMs }，并顺手监听这个 lrc 文件。
+   * 之前渲染层按 trackId 永久缓存解析结果，外面改完 .lrc 不重启就一直是旧词。
+   */
   ipcMain.handle('lyric:read', async (e, trackId) => {
     const track = library.get(trackId)
-    if (!track || !track.lyric) return null
+    if (!track || !track.lyric) {
+      watchLyricFile(null)
+      return null
+    }
     try {
       const buf = await fsp.readFile(track.lyric)
-      return decodeText(buf)
+      let mtimeMs = 0
+      try { mtimeMs = fs.statSync(track.lyric).mtimeMs } catch (err) { /* 忽略 */ }
+      watchLyricFile(track.lyric, trackId)
+      return { text: decodeText(buf), mtimeMs }
     } catch (err) {
       return null
     }

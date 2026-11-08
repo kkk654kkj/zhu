@@ -47,6 +47,11 @@ contextBridge.exposeInMainWorld('api', {
 
   // 歌词
   readLyric: (trackId) => invoke('lyric:read', trackId),
+  onLyricChanged: (cb) => {
+    const h = (e, id) => cb(id)
+    ipcRenderer.on('lyric:changed', h)
+    return () => ipcRenderer.removeListener('lyric:changed', h)
+  },
 
   // 系统
   pickDirs: () => invoke('dialog:pickDirs'),
