@@ -1323,9 +1323,9 @@ async function runWatchScan() {
   } finally {
     // v3.3.7：必须条件清空 —— watch 扫描运行中用户手动扫了库，activeScan 已被
     // 换成手动任务的 promise，这里无条件置 null 会让 lib:list 不再等手动扫描。
-    // 清空后（本次真的跑完了）顺带补一次防抖，别让文件变化事件停在空档期。
-    if (activeScan === run) { activeScan = null; scheduleWatchScan() }
-    else scheduleWatchScan()
+    // 注意不能再 scheduleWatchScan()：它是文件事件驱动的，这里无条件排一次
+    // 会变成「每 16 秒空扫一遍全库」的死循环；扫描期间来的文件事件本来就有挂起的定时器兜底
+    if (activeScan === run) activeScan = null
   }
 }
 
