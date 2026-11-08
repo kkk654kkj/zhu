@@ -221,22 +221,30 @@ const Diag = {
   },
 
   async pollLive(reset) {
+    // v3.3.7：加 in-flight 防护 —— IPC 偶发慢于 1.2s 时两次请求并行，
+    // 同一批日志行会入列两次（「复制」会输出重复行）
+    if (this._polling) return
     if (reset) {
       this.liveLines = []
       this.lastSeq = 0
       this._renderedSeq = 0
     }
-    const r = await window.api.diagMpvLog(this.lastSeq).catch(() => null)
-    if (!r || !r.ok) return
-    if (r.entries && r.entries.length) {
-      this.liveLines.push(...r.entries)
-      if (this.liveLines.length > this.MAX_LIVE) {
-        this.liveLines.splice(0, this.liveLines.length - this.MAX_LIVE)
+    this._polling = true
+    try {
+      const r = await window.api.diagMpvLog(this.lastSeq).catch(() => null)
+      if (!r || !r.ok) return
+      if (r.entries && r.entries.length) {
+        this.liveLines.push(...r.entries)
+        if (this.liveLines.length > this.MAX_LIVE) {
+          this.liveLines.splice(0, this.liveLines.length - this.MAX_LIVE)
+        }
+        this.lastSeq = r.seq
+        if (this.mpvMode === 'live' && this.tab === 'mpv') this.renderLive(true)
       }
-      this.lastSeq = r.seq
-      if (this.mpvMode === 'live' && this.tab === 'mpv') this.renderLive(true)
+      this.renderMpvState(r.running, r.exclusive)
+    } finally {
+      this._polling = false
     }
-    this.renderMpvState(r.running, r.exclusive)
   },
 
   renderMpvState(running, exclusive) {

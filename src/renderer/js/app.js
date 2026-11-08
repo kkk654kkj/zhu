@@ -1,6 +1,12 @@
 'use strict'
 /* 应用主控：状态、视图切换、交互接线 */
 
+function lyricCachePut(id, entry) {
+  state.lyricCache.set(id, entry)
+  // v2.8.7：加上限，长会话不再无限增长
+  if (state.lyricCache.size > 50) state.lyricCache.delete(state.lyricCache.keys().next().value)
+}
+
 const state = {
   tracks: [],            // 全部曲目（client 结构）
   byId: new Map(),
@@ -141,7 +147,7 @@ async function boot() {
   showReleaseNotice()
   window.api.dlyricIsOpen().then((open) => {
     UI.setDLyric(open, open && settings.desktopLyric && settings.desktopLyric.locked)
-  })
+  }).catch(() => {})
   // 歌词窗口那边改了锁定/自行关闭，主进程会推最新状态过来
   window.api.onDlyricOpenState((st) => {
     const open = st && typeof st === 'object' ? !!st.open : !!st
@@ -196,7 +202,7 @@ async function boot() {
     toast('睡眠定时已到，播放已暂停', 4000)
   })
   // 睡眠定时状态（v2.2：入口从托盘移到 app 内播放条）
-  window.api.getSleepState().then((st) => renderSleepState(st))
+  window.api.getSleepState().then((st) => renderSleepState(st)).catch(() => {})
   window.api.onSleepState((st) => renderSleepState(st))
   // 托盘/快捷键改迷你状态时，主进程会推过来，界面跟着切
   window.api.onMiniState((st) => {
@@ -207,7 +213,10 @@ async function boot() {
   window.addEventListener('beforeunload', saveSession)
   setInterval(saveSession, 10000)
 
-  document.getElementById('btnMax').innerHTML = icon(window.api.isMaximized ? 'restore' : 'max')
+  // v2.8.7：isMaximized 是 IPC 函数，直接放条件里恒为真 —— 必须真的调一次
+  window.api.isMaximized().then((max) => {
+    document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
+  }).catch(() => {})
 }
 
 /** 当前曲目的歌词偏移（v1.7）：优先本曲设置，没有则用全局默认 */
@@ -795,6 +804,9 @@ function bindPlayer() {
   player.on('track-change', (track) => {
     state.currentId = track.id
     state.counted = false
+    // v2.8.7：上一首报错排下的「自动跳下一首」定时器要取消，否则会跳掉刚选的歌
+    if (state.skipTimer) { clearTimeout(state.skipTimer); state.skipTimer = null }
+    state.lastErrKey = null
     resetAb()                       // A-B 是"这一首之内"的事，换歌就作废
     updateMediaSession(track)
     applyTrackGain(track.id)
@@ -803,7 +815,7 @@ function bindPlayer() {
     UI.setFavorite(state.favorites.has(track.id))
     UI.setRowPlaying(track.id, true)
     loadLyric(track)
-    window.api.addHistory(track.id)
+    window.api.addHistory(track.id).catch(() => {})
     state.history = [{ id: track.id, at: Date.now() }]
       .concat(state.history.filter((h) => h.id !== track.id)).slice(0, 300)
     updateNavCounts()
@@ -824,8 +836,9 @@ function bindPlayer() {
 
   player.on('state-change', (playing) => {
     UI.setPlayIcon(playing)
+    // v2.8.7：renderQueue 的输出只跟 tracks/index/currentId 有关，播放/暂停
+    // 不改变它 —— 以前每次暂停/恢复都全量重建队列 innerHTML（滚动位置丢失）
     if (player.current) UI.renderNowPlaying(player.current, playing)
-    UI.renderQueue(player.tracks, player.index, state.currentId)
     pushDesktopLyric()
     if (!playing) saveSession()
     // 任务栏缩略图的播放/暂停按钮要跟着变
@@ -852,7 +865,7 @@ function bindPlayer() {
           state.playCounts[id] = n
           // 正在看「最常播放」时顺序会变，立即重排
           if (state.view === 'most') renderView()
-        })
+        }).catch(() => {})
       }
     }
   })
@@ -879,6 +892,10 @@ function bindPlayer() {
   })
 
   player.on('error', () => {
+    // v2.8.7：同一首歌的重复报错只处理一次（mpvaudio 对同一文件可能连发两类错误）
+    const errCur = player.current
+    if (errCur && state.lastErrKey === errCur.id && Date.now() - state.lastErrAt < 2000) return
+    if (errCur) { state.lastErrKey = errCur.id; state.lastErrAt = Date.now() }
     // 独占模式下多半是声卡/引擎问题（设备被占用、格式不支持），不是这个文件坏了：
     // 此时绝不能自动跳曲，否则会一路把整个队列跳完
     if (state.exclusive) {
@@ -892,7 +909,8 @@ function bindPlayer() {
     toast(cur && cur.isDsd
       ? 'DSD 文件需要独占输出才能播放：点标题栏波形按钮开启（已跳过）'
       : '该歌曲无法播放，已跳过', cur && cur.isDsd ? 4000 : 1800)
-    setTimeout(() => player.next(true), 400)
+    // v2.8.7：定时器存下来，track-change 时取消
+    state.skipTimer = setTimeout(() => { state.skipTimer = null; player.next(true) }, 400)
   })
 }
 
@@ -1120,9 +1138,12 @@ async function toggleMini(on) {
   const next = on == null ? !state.mini : !!on
   if (next === state.mini) return
   // 进迷你/回完整之前把浮层都收掉，免得面板卡在窄窗口里
+  // v2.8.7：以前漏了音频设备/睡眠定时两个面板
   UI.toggleQueue(false)
   UI.toggleEq(false)
   UI.hideContextMenu()
+  toggleAudioPanel(false)
+  toggleSleepPanel(false)
   state.mini = next
   UI.setMini(next)
   try {
@@ -1139,7 +1160,9 @@ async function toggleMini(on) {
 
 async function toggleFavoriteCurrent() {
   if (!state.currentId) return
-  const favs = await window.api.toggleFavorite(state.currentId)
+  let favs
+  try { favs = await window.api.toggleFavorite(state.currentId) }
+  catch (err) { toast('操作失败：' + (err.message || err), 2500); return }
   state.favorites = new Set(favs)
   UI.setFavorite(state.favorites.has(state.currentId))
   updateNavCounts()
@@ -1150,7 +1173,9 @@ async function toggleFavoriteCurrent() {
 /* ================= 歌词 ================= */
 
 async function loadLyric(track) {
-  state.lyricOffset = state.settings.lyricOffset || 0
+  // v2.8.7：用这首歌自己的偏移（没有才落回全局）。以前写死全局值，
+  // 「外部改 .lrc → lyric:changed → loadLyric」会把单独设过的偏移覆盖掉
+  state.lyricOffset = offsetFor(track ? track.id : null)
   UI.setLyricOffset(state.lyricOffset)
   // v2.8.3：不再用扫描时的 hasLyric 决定「有没有词」——扫描之后才放进去的 .lrc
   // 会让这个标记一直是 false，歌词永远出不来。直接读文件，没有就是没有。
@@ -1163,7 +1188,7 @@ async function loadLyric(track) {
     parsed = hit.parsed
   } else {
     parsed = res && res.text ? parseLrc(res.text) : null
-    state.lyricCache.set(track.id, { parsed, mtime: res ? res.mtimeMs : 0 })
+    lyricCachePut(track.id, { parsed, mtime: res ? res.mtimeMs : 0 })
   }
   if (track.id !== state.currentId) return
   UI.renderLyric(parsed, track.title)
@@ -1205,7 +1230,9 @@ function bindUI() {
   // 新建歌单
   document.getElementById('btnNewPlaylist').addEventListener('click', async () => {
     const name = '新歌单 ' + (state.playlists.length + 1)
-    const pl = await window.api.createPlaylist(name)
+    let pl
+    try { pl = await window.api.createPlaylist(name) }
+    catch (err) { toast('新建歌单失败：' + (err.message || err), 2500); return }
     state.playlists.push(pl)
     renderPlaylists()
     switchView(pl.id)
@@ -1769,7 +1796,9 @@ async function handleCtxAction(act, arg) {
     }
     case 'add-pl': {
       const ids = (currentMenuTracks.length ? currentMenuTracks : [track]).map((t) => t.id)
-      const pl = await window.api.addToPlaylist(arg, ids)
+      let pl
+      try { pl = await window.api.addToPlaylist(arg, ids) }
+      catch (err) { toast('加入歌单失败：' + (err.message || err), 2500); break }
       if (pl) {
         const i = state.playlists.findIndex((p) => p.id === pl.id)
         if (i >= 0) state.playlists[i] = pl
@@ -1780,7 +1809,9 @@ async function handleCtxAction(act, arg) {
     }
     case 'remove-pl': {
       const ids = (currentMenuTracks.length ? currentMenuTracks : [track]).map((t) => t.id)
-      const pl = await window.api.removeFromPlaylist(state.view, ids)
+      let pl
+      try { pl = await window.api.removeFromPlaylist(state.view, ids) }
+      catch (err) { toast('移除失败：' + (err.message || err), 2500); break }
       if (pl) {
         const i = state.playlists.findIndex((p) => p.id === pl.id)
         if (i >= 0) state.playlists[i] = pl
@@ -1840,7 +1871,9 @@ async function confirmRename() {
   const pl = state.playlists.find((p) => p.id === plId)
   closeRenameModal()
   if (!pl || !name || name === pl.name) return
-  const updated = await window.api.updatePlaylist(plId, { name })
+  let updated
+  try { updated = await window.api.updatePlaylist(plId, { name }) }
+  catch (err) { toast('重命名失败：' + (err.message || err), 2500); return }
   if (updated) {
     const i = state.playlists.findIndex((p) => p.id === plId)
     if (i >= 0) state.playlists[i] = updated
@@ -1853,7 +1886,8 @@ async function confirmRename() {
 async function deletePlaylist(id) {
   const pl = state.playlists.find((p) => p.id === id)
   if (!pl) return
-  await window.api.removePlaylist(id)
+  try { await window.api.removePlaylist(id) }
+  catch (err) { toast('删除歌单失败：' + (err.message || err), 2500); return }
   state.playlists = state.playlists.filter((p) => p.id !== id)
   renderPlaylists()
   if (state.view === id) switchView('all')
@@ -2245,9 +2279,20 @@ function bindGlobalKeys() {
 
 /* ================= 持久化 ================= */
 
-const saveSettings = debounce((patch) => {
-  window.api.patchSettings(patch).then((s) => { state.settings = s }).catch(() => {})
+// v2.8.7：debounce 是「尾触发、参数整体替换」语义 —— 300ms 内两类设置
+// 只有最后一类会落盘。改成先合并再统一发。
+let saveSettingsPending = null
+const _flushSaveSettings = debounce(() => {
+  const patch = saveSettingsPending
+  saveSettingsPending = null
+  if (patch && Object.keys(patch).length) {
+    window.api.patchSettings(patch).then((s) => { state.settings = s }).catch(() => {})
+  }
 }, 300)
+function saveSettings(patch) {
+  saveSettingsPending = Object.assign({}, saveSettingsPending || {}, patch || {})
+  _flushSaveSettings()
+}
 
 /* ================= 长音轨断点续播见 js/resume.js ================= */
 

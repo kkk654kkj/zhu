@@ -375,16 +375,42 @@ class MpvEngine {
     }
     if (r.ok && file) {
       this.load(file, { paused: true })
-      if (pos > 0.3) {
-        setTimeout(() => {
+      // v2.8.7 / v3.3.7：等 file-loaded 再 seek/play。以前固定 120ms 后就发 seek，
+      // 文件加载慢（在线直链、网络盘）时 mpv 还在 idle，seek 直接失败，续播位置就丢了。
+      this._waitLoaded(2500).then((loaded) => {
+        if (pos > 0.3 && loaded) {
           this.seek(pos)
           if (wasPlaying) setTimeout(() => this.play(), 80)
-        }, 120)
-      } else if (wasPlaying) {
-        setTimeout(() => this.play(), 120)
-      }
+        } else if (wasPlaying) {
+          this.play()
+        }
+      })
     }
     return r
+  }
+
+  /**
+   * 等 file-loaded 事件（restart 续播用）。超时返回 false，Promise 一定 resolve。
+   * 临时包一层 onEvent 来等事件，原回调照常执行，不影响日志/上报。
+   */
+  _waitLoaded(timeout = 2500) {
+    return new Promise((resolve) => {
+      if (!this.ready) return resolve(false)
+      const orig = this.onEvent
+      let done = false
+      const timer = setTimeout(() => finish(false), timeout)
+      const finish = (v) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        this.onEvent = orig
+        resolve(v)
+      }
+      this.onEvent = (evt) => {
+        if (evt && evt.type === 'loaded') finish(true)
+        try { orig(evt) } catch (err) { /* 原回调自己兜 */ }
+      }
+    })
   }
 
   _rejectPending(reason) {

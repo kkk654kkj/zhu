@@ -671,7 +671,15 @@ class Library {
     try {
       await fsp.mkdir(path.dirname(this.cacheFile), { recursive: true })
       const tmp = this.cacheFile + '.tmp'
-      await fsp.writeFile(tmp, JSON.stringify({ version: PARSE_VERSION, tracks: this.list() }), 'utf8')
+      // v2.8.7：写完先 fsync 再 rename。原子写（tmp+rename）只防「写一半」，
+      // 不防「rename 生效了但内容还在页缓存里没落盘」的断电丢数据
+      const fh = await fsp.open(tmp, 'w')
+      try {
+        await fh.writeFile(JSON.stringify({ version: PARSE_VERSION, tracks: this.list() }), 'utf8')
+        await fh.sync()
+      } finally {
+        await fh.close()
+      }
       await fsp.rename(tmp, this.cacheFile)
     } catch (err) {
       console.error('[library] 缓存写入失败:', err.message)
@@ -683,7 +691,7 @@ class Library {
    * 增量：mtime+size 未变则复用缓存记录（但每次仍校验封面/歌词是否存在）
    */
   async scan(dirs, onProgress = () => {}) {
-    if (this.scanning) return { added: 0, updated: 0, total: this.tracks.size }
+    if (this.scanning) return { skipped: true, added: 0, updated: 0, removed: 0, failed: 0, total: this.tracks.size }
     this.scanning = true
     const started = Date.now()
     try {
@@ -717,6 +725,7 @@ class Library {
       let done = 0
       let added = 0
       let updated = 0
+      let dirty = false   // v2.8.7：零变更就不写盘（几千首的全量 JSON 不便宜）
       const total = unique.length
 
       await mapLimit(unique, 4, async (filePath) => {
@@ -727,7 +736,9 @@ class Library {
           st = await fsp.stat(filePath)
         } catch (err) {
           // 收集阶段还在、解析时读不到（被占用 / 权限 / 刚被删）
-          if (err.code !== 'ENOENT') this.recordFailure(filePath, '读取文件信息失败：' + err.message, 'stat')
+          // v2.8.7：文件确实已经没了（ENOENT）就从 seen 里拿掉，别挡住后面的清理阶段
+          if (err.code === 'ENOENT') seen.delete(id)
+          else this.recordFailure(filePath, '读取文件信息失败：' + err.message, 'stat')
           done++
           return
         }
@@ -744,7 +755,12 @@ class Library {
           if (cover && cover !== COVER_EMBEDDED) {
             const absCover = resolveCoverPath(cover, this.coverDir)
             if (!absCover || !fs.existsSync(absCover)) cover = await findCover(filePath, cached)
+          } else if (!cover) {
+            // v2.8.7：首扫时目录里还没有封面文件（cover=null）的，事后往目录里
+            // 放了 cover.jpg 也要能拾到 —— 以前整个分支被跳过，永远拿不到新封面
+            cover = await findCover(filePath, cached)
           }
+          if (lyric !== cached.lyric || cover !== cached.cover) dirty = true
           track = { ...cached, lyric, cover }
           if (!track.addedAt) track.addedAt = cached.mtime || Date.now()
         } else {
@@ -795,6 +811,7 @@ class Library {
             }
             this.tracks.delete(id)
             removed++
+            dirty = true
           }
         }
         // 失败记录同样要清理：文件已被删掉的条目留着就是脏数据（目录不可达时一并跳过）
@@ -803,7 +820,8 @@ class Library {
         }
       }
 
-      await this.persist()
+      // v2.8.7：零变更直接跳过写盘（原来每次扫描都全量重写 library.json）
+      if (dirty || added || updated || removed) await this.persist()
       await this.persistFailures()
       return {
         added, updated, removed, total: this.tracks.size,

@@ -100,7 +100,8 @@ function killOrphanMpv() {
     '  $owner = [int]$m.Groups[1].Value',
     '  if ($owner -eq ' + selfPid + ') { return }',
     '  $p = Get-Process -Id $owner -ErrorAction SilentlyContinue',
-    "  if ($p -and $p.ProcessName -like '猪专属播放器*') { return }",
+    "  if ($p -and ($p.ProcessName -like '猪专属播放器*' -or $p.Path -like '*lx-dev*')) { return }",
+    // 开发模式主进程是 electron.exe（进程名匹配不到），按路径放行开发镜像
     '  $_.ProcessId',
     '}'
   ].join("\n")
@@ -494,7 +495,8 @@ function createWindow() {
   })
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    // v2.8.7：只放行网页链接。file:// 等任何协议都交给系统打开是不必要的攻击面
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
 
@@ -581,6 +583,9 @@ function runPowerAction() {
   logLine('[power] 队列结束，执行 ' + kind + '（15 秒内可在托盘取消）')
 
   // 给用户 15 秒反悔时间：误触关机比少关一次机难受得多
+  // v2.8.7：先清掉可能还挂着的旧定时器 —— 反悔窗口内重新设置、队列又播完一次时，
+  // 直接覆盖会让第一个定时器到点照常执行（届时「取消」只能取消第二个）
+  if (powerPending) { clearTimeout(powerPending); powerPending = null }
   powerPending = setTimeout(() => {
     powerPending = null
     if (kind === 'quit') { quitting = true; app.quit(); return }
@@ -792,7 +797,11 @@ async function runWatchScan() {
   } catch (err) {
     logLine('[watch] 扫描失败 ' + err.message)
   } finally {
-    activeScan = null
+    // v2.8.7：必须条件清空 —— watch 扫描运行中用户手动扫了库，activeScan 已被
+    // 换成手动任务的 promise，这里无条件置 null 会让 lib:list 不再等手动扫描。
+    // 注意不能再 scheduleWatchScan()：它是文件事件驱动的，这里无条件排一次
+    // 会变成「每 16 秒空扫一遍全库」的死循环；扫描期间来的文件事件本来就有挂起的定时器兜底
+    if (activeScan === run) activeScan = null
   }
 }
 
@@ -878,6 +887,8 @@ async function readEmbeddedCached(trackId, audioPath, audioMtime) {
   if (hit && hit.audioMtime === audioMtime) return hit.text
   const text = await readEmbeddedLyric(audioPath)
   embLyricCache.set(trackId, { audioMtime, text })
+  // v2.8.7：加上限 —— 几千首全听一遍会攒几十 MB 歌词全文，不能无限涨
+  if (embLyricCache.size > 500) embLyricCache.delete(embLyricCache.keys().next().value)
   return text
 }
 
@@ -1537,9 +1548,12 @@ function registerIpc() {
   ipcMain.handle('win:minimize', () => win && win.minimize())
   ipcMain.handle('win:toggleMaximize', () => {
     if (!win) return false
-    if (win.isMaximized()) win.unmaximize()
+    // v2.8.7：unmaximize 在 Windows 上是异步的，紧接着 isMaximized() 拿到的是
+    // 切换前的旧值，渲染层图标会和实际状态相反 —— 返回「切换意图」
+    const wasMax = win.isMaximized()
+    if (wasMax) win.unmaximize()
     else win.maximize()
-    return win.isMaximized()
+    return !wasMax
   })
   ipcMain.handle('win:close', () => win && win.close())
   ipcMain.handle('win:isMaximized', () => (win ? win.isMaximized() : false))
@@ -1595,7 +1609,9 @@ function registerIpc() {
   // —— 独占输出（mpv 后端） ——
   ipcMain.handle('mpv:start', (e, exclusive) => ensureMpv(exclusive !== false, { forceMode: true }))
   ipcMain.handle('mpv:load', (e, filePath, opts) => {
-    if (mpvEngine) mpvEngine.load(filePath, opts || {})
+    // v2.8.7：引擎没跑起来还返回 true，渲染层会以为加载成功，界面假「播放中」
+    if (!mpvEngine || !mpvEngine.running) return false
+    mpvEngine.load(filePath, opts || {})
     return true
   })
   ipcMain.handle('mpv:play', () => { if (mpvEngine) mpvEngine.play(); return true })
@@ -1668,8 +1684,10 @@ function registerIpc() {
     } catch (err) {
       return { ok: false, devices: [], error: err.message }
     } finally {
-      // 只为枚举而临时拉起的引擎（当前并非独占输出）用完即关，不留空闲进程
-      if (startedHere && !store.get().settings.exclusiveOutput) stopMpv()
+      // 只为枚举而临时拉起的引擎用完即关，不留空闲进程。
+      // v2.8.7：以前 exclusiveOutput=true 但引擎恰好没跑时这个共享引擎会被留下，
+      // 一直挂着不干活也不受设备监视管 —— 既然只为枚举，就一律关掉。
+      if (startedHere) stopMpv()
     }
   })
 
@@ -1952,19 +1970,22 @@ if (gotLock) cleanChromiumCache()
     })
   })
 
-  app.on('before-quit', () => {
+  // v2.8.7：退出前必须等清理真正做完再退 ——
+  // 以前 stopMpv 的 Promise 没 await，后面的同步清扫还会阻塞事件循环，
+  // 让「等 mpv 进程退出」形同虚设；进程万一没死透就退出，声卡就被孤儿占着。
+  let quitCleanupDone = false
+  app.on('before-quit', (event) => {
+    if (quitCleanupDone) return
+    event.preventDefault()
     quitting = true
     stopWatching()
-    // v2.8.6：退出时把引擎彻底收掉。
-    // 以前只 kill() 一下就走，进程若没死透（或者有竞态留下的孤儿），
-    // 残留的 mpv 会一直以独占方式霸着声卡 —— 用户看到的是「播放器都关了，
-    // 别的软件还是没声音，而且音乐还在放」。
     const hadEngine = !!mpvEngine
-    stopMpv()
-    if (hadEngine) {
-      try { sweepOurMpv() } catch (err) { /* 忽略 */ }
-    }
-    if (store) store.flush()
+    stopMpv().catch(() => {}).finally(() => {
+      if (hadEngine) { try { sweepOurMpv() } catch (err) { /* 忽略 */ } }
+      try { if (store) store.flush() } catch (err) { /* 忽略 */ }
+      quitCleanupDone = true
+      app.quit()
+    })
   })
 
   app.on('will-quit', () => globalShortcut.unregisterAll())
