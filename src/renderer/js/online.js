@@ -121,13 +121,13 @@ const Online = {
     document.getElementById('opCacheBtn').addEventListener('click', () => toggleCachePanel())
 
     document.getElementById('opDirBtn').addEventListener('click', async () => {
-      const dir = await window.api.onlinePickDownloadDir()
+      const dir = await window.api.onlinePickDownloadDir().catch((err) => { toast('选择目录失败：' + (err.message || err), 2500); return null })
       if (dir) toast('下载目录：' + dir, 3000)
     })
-    document.getElementById('opOpenDir').addEventListener('click', () => window.api.onlineOpenDownloadDir())
+    document.getElementById('opOpenDir').addEventListener('click', () => window.api.onlineOpenDownloadDir().catch(() => {}))
     document.getElementById('opDlBtn').addEventListener('click', () => this.toggleDlPanel())
     document.getElementById('btnDlClose').addEventListener('click', () => this.toggleDlPanel(false))
-    document.getElementById('dlOpenDir').addEventListener('click', () => window.api.onlineOpenDownloadDir())
+    document.getElementById('dlOpenDir').addEventListener('click', () => window.api.onlineOpenDownloadDir().catch(() => {}))
     document.getElementById('dlClearDone').addEventListener('click', async () => {
       const r = await window.api.onlineDlClearDone().catch(() => null)
       toast(r && r.removed ? '已移除 ' + r.removed + ' 条记录' : '没有已完成的任务')
@@ -138,10 +138,11 @@ const Online = {
       if (!btn || !item) return
       const id = item.dataset.id
       const act = btn.dataset.act
-      if (act === 'pause') await window.api.onlineDlPause(id)
-      else if (act === 'resume') await window.api.onlineDlResume(id)
-      else if (act === 'delete') await window.api.onlineDlDelete(id)
-      else if (act === 'reveal') await window.api.onlineDlReveal(id)
+      // v3.3.7：补 catch —— 面板按钮失败不再静默刷 unhandled rejection
+      if (act === 'pause') await window.api.onlineDlPause(id).catch(() => {})
+      else if (act === 'resume') await window.api.onlineDlResume(id).catch(() => {})
+      else if (act === 'delete') await window.api.onlineDlDelete(id).catch(() => {})
+      else if (act === 'reveal') await window.api.onlineDlReveal(id).catch(() => {})
     })
 
     document.getElementById('opMore').addEventListener('click', () => this.search(false))
@@ -285,7 +286,9 @@ const Online = {
       })
       const list = (r && r.list) || []
       this.list = reset ? list : this.list.concat(list)
-      this.hasMore = list.length >= 20
+      // v3.3.7：hasMore 跟请求的 limit（30）对齐。以前用 20 判断，
+      // 某页返回 20~29 条且后面其实还有结果时，「加载更多」会被错误隐藏
+      this.hasMore = list.length >= 30
       this.render()
       const ms = Math.round(performance.now() - t0)
       const counts = {}
@@ -301,6 +304,9 @@ const Online = {
       )
       if (!this.list.length) this.setStatus('没搜到结果，换个关键词试试', false)
     } catch (err) {
+      // v3.3.7：失败要回滚 page —— 以前 page 已经 +1，下次「加载更多」
+      // 直接请求下下页，中间一页结果永久丢失
+      if (!reset) this.page = Math.max(1, this.page - 1)
       this.setStatus('搜索失败：' + esc(err.message || '网络异常'), false)
     } finally {
       this.loading = false
@@ -321,9 +327,16 @@ const Online = {
   },
 
   async play(song) {
+    // v3.3.7：加并发 token + 记下发起时的列表 ——
+    // 解析要 1~7 秒，期间连点别的歌或执行新搜索都会让 this.list 变成别人的结果，
+    // 以前「后解析完成的赢」，队列还可能新旧混着拼
+    const token = (this._playToken || 0) + 1
+    this._playToken = token
+    const listAtStart = this.list
     const key = `${song.source}:${song.id}`
     this.setStatus('正在解析「' + esc(song.title) + '」…', this.hasMore)
     const r = await window.api.onlinePlayable(song).catch((err) => ({ ok: false, error: err.message }))
+    if (token !== this._playToken) return   // 已被新的播放请求取代，这次作废
     if (!r || !r.ok) {
       this.setStatus('❌ ' + esc((r && r.error) || '解析失败'), this.hasMore)
       toast((r && r.error) || '解析失败', 3000)
@@ -332,7 +345,7 @@ const Online = {
     const actual = r.song || song
     const track = this.toTrack(song, r)
     // 队列取「用户点的那个源」这一批，跟界面上看到的列表一致
-    const queue = this.list
+    const queue = listAtStart
       .filter((s) => s.source === song.source)
       .map((s) => this.toTrack(s, null))
     const idx = queue.findIndex((t) => t.id === track.id)
@@ -408,7 +421,9 @@ const Online = {
   async downloadAt(i) {
     const song = this.list[i]
     if (!song) return
-    const r = await window.api.onlineDownload(song)
+    let r
+    try { r = await window.api.onlineDownload(song) }
+    catch (err) { toast('下载启动失败：' + (err.message || err), 3000); return }
     if (!r || !r.ok) {
       toast((r && r.error) || '下载启动失败', 3000)
       if (r && r.id) this.toggleDlPanel(true)

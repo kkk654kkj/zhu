@@ -32,9 +32,24 @@ async function req(url, opts = {}) {
       redirect: 'follow',
       signal: ctrl.signal
     })
+    // v3.3.7：超时必须覆盖到**正文**。以前拿到响应头就 clearTimeout，
+    // 之后 res.text()/json() 挂起时毫无约束（undici 默认 bodyTimeout 300 秒），
+    // 一个慢源能把整次搜索拖死。把清计时器挂到正文消费完成之后。
+    const done = () => clearTimeout(timer)
+    const origText = res.text.bind(res)
+    res.text = () => origText().finally(done)
+    const origJson = res.json.bind(res)
+    res.json = () => origJson().finally(done)
+    if (res.arrayBuffer) {
+      const origAb = res.arrayBuffer.bind(res)
+      res.arrayBuffer = () => origAb().finally(done)
+    }
+    // 注意：不消费正文的调用（只看响应头的探测）会让计时器活着，
+    // 超时后 abort 掉连接反而是对的（顺带防了 socket 泄漏）
     return res
-  } finally {
+  } catch (err) {
     clearTimeout(timer)
+    throw err
   }
 }
 
@@ -514,6 +529,16 @@ async function search(keyword, page = 1, limit = 30, sourceIds = null) {
 const URL_TTL_MS = 20 * 60 * 1000
 const urlCache = new Map()   // key: src:id:prefer → { url, ext, bitrate, duration, at }
 
+/** v3.3.7：直链缓存加上限淘汰 —— 以前只进不出，长会话缓慢膨胀 */
+function urlCachePut(key, rec) {
+  if (urlCache.size > 300) {
+    const now = Date.now()
+    for (const [k, v] of urlCache) { if (now - v.at > URL_TTL_MS) urlCache.delete(k) }
+    while (urlCache.size > 300) urlCache.delete(urlCache.keys().next().value)
+  }
+  urlCachePut(key, rec)
+}
+
 function cacheKey(song, prefer) {
   return `${song.source}:${song.id}:${prefer}`
 }
@@ -528,6 +553,9 @@ function cacheKey(song, prefer) {
  * ② 接口给的片段时长明显短于歌曲时长（<70%）→ 试听。
  */
 async function probeStream(info, realDuration, expectDuration = 0) {
+  // v3.3.7：探测失败重试一次 —— 网络抖动一次就不给结果，
+  // 会让试听片段被当成完整版进缓存
+  for (let attempt = 0; attempt < 2; attempt++) {
   try {
     const headers = { Range: 'bytes=0-1' }
     if (info.referer) headers.Referer = info.referer
@@ -550,7 +578,12 @@ async function probeStream(info, realDuration, expectDuration = 0) {
       partial: kbps < 40 || tooShort
     }
   } catch (err) {
-    return info
+    if (attempt === 1) {
+      // 再失败只能原样放行，但必须标记 unverified ——
+      // 否则 30 秒试听片段会被当成完整版写进 20 分钟直链缓存
+      return { ...info, unverified: true }
+    }
+  }
   }
 }
 
@@ -909,7 +942,7 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
         const res = await resolvePlayable(song, 'best', opts)
         if (!res) return null
         const up = await maybeUpgrade(res, song, 'best')
-        urlCache.set(cacheKey(song, 'best'), { ...up, at: Date.now() })
+        urlCachePut(cacheKey(song, 'best'), { ...up, at: Date.now() })
         return up
       })()
       return fbPromise
@@ -930,7 +963,7 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
     }
     if (got) {
       const rec = { ...got, at: Date.now() }
-      urlCache.set(key, rec)
+      urlCachePut(key, rec)
       return { ...rec, song: got.actual || song, fallback: false, lossless: true }
     }
     // 降级：注意这里必须把 prefer 换回 best，各家 getUrl 只认 best / 128k
@@ -940,8 +973,11 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
   }
   const res = await resolvePlayable(song, prefer, opts)
   if (!res) return null
+  // v3.3.7：缓存命中不重写时间戳 —— 以前每次命中都续期，平台签名直链
+  // 过期后反而拿不到新链，死链被无限续命
+  if (res.fromCache) return res
   const up = await maybeUpgrade(res, song, prefer)
-  urlCache.set(cacheKey(song, prefer), { ...up, at: Date.now() })
+  urlCachePut(cacheKey(song, prefer), { ...up, at: Date.now() })
   return up
 }
 
@@ -968,7 +1004,7 @@ async function maybeUpgrade(res, song, prefer) {
         if (probed.broken || probed.partial) continue
         if ((probed.bitrate || 0) < 128) continue
         const rec = { ...probed, at: Date.now() }
-        urlCache.set(cacheKey(cand, prefer), rec)
+        urlCachePut(cacheKey(cand, prefer), rec)
         logger('[online] 音质补救 ' + res.song.source + ' ' + (res.bitrate||0) + 'k → ' + id + ' ' + probed.bitrate + 'k')
         return { ...rec, song: cand, fallback: true, upgraded: true }
       }
@@ -987,7 +1023,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
   if (hit && Date.now() - hit.at < URL_TTL_MS) {
     // hit.song 是「实际发声的那首」（可能换过源），别用用户点的这首覆盖掉
     const real = hit.song || song
-    return { ...hit, song: real, fallback: real.source !== song.source || real.id !== song.id }
+    return { ...hit, song: real, fallback: real.source !== song.source || real.id !== song.id, fromCache: true }
   }
 
   let partial = null
@@ -1000,7 +1036,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
         const probed = await probeStream(got, song.duration || got.duration)
         if (!probed.partial && !probed.broken) {
           const rec = { ...probed, at: Date.now() }
-          urlCache.set(key, rec)
+          urlCachePut(key, rec)
           return { ...rec, song, fallback: false }
         }
         if (probed.partial) partial = { ...probed, at: Date.now(), song }
@@ -1030,7 +1066,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
         continue
       }
       const rec = { ...probed, at: Date.now() }
-      urlCache.set(cacheKey(cand, prefer), rec)
+      urlCachePut(cacheKey(cand, prefer), rec)
       return { ...rec, song: cand, fallback: cand.source !== song.source }
     }
     return null
@@ -1103,11 +1139,15 @@ function pickBestMatch(list, song) {
 
 /* ---------------- 歌词 ---------------- */
 
-const lyricCache = new Map()
+const lyricCache = new Map()   // key → { lrc, at }
 
 async function getLyric(song) {
   const key = `${song.source}:${song.id}`
-  if (lyricCache.has(key)) return lyricCache.get(key)
+  const hit = lyricCache.get(key)
+  if (hit) {
+    // v3.3.7：空结果只缓存 1 分钟 —— 网络抖动不该让一首歌整场都没词
+    if (hit.lrc || Date.now() - hit.at < 60000) return hit.lrc
+  }
   const src = SOURCES[song.source]
   let lrc = null
   if (src) {
@@ -1128,51 +1168,9 @@ async function getLyric(song) {
       } catch (err) { /* 下一个 */ }
     }
   }
-  if (lyricCache.size > 200) lyricCache.clear()
-  lyricCache.set(key, lrc)
+  if (lyricCache.size > 200) lyricCache.delete(lyricCache.keys().next().value)
+  lyricCache.set(key, { lrc, at: Date.now() })
   return lrc
-}
-
-/* ---------------- 下载 ---------------- */
-
-/**
- * 流式下载到目标文件。
- * @param {object} song
- * @param {string} filePath 完整目标路径（含扩展名由调用方按 ext 决定）
- * @param {(received:number, total:number)=>void} onProgress
- */
-async function download(song, prefer, dir, onProgress) {
-  const info = await getPlayable(song, prefer)
-  if (!info) throw new Error('所有音源都没有这首歌的可用地址')
-
-  const ext = info.ext === 'm4a' ? 'm4a' : info.ext === 'flac' ? 'flac' : 'mp3'
-  const safe = (s) => String(s || '').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
-  const base = safe(`${song.artist} - ${song.title}`).slice(0, 120) || '未知歌曲'
-  let target = require('path').join(dir, `${base}.${ext}`)
-  // 重名自动加 (2)(3)…
-  const fs = require('fs')
-  let n = 1
-  while (fs.existsSync(target)) {
-    n++
-    target = require('path').join(dir, `${base} (${n}).${ext}`)
-  }
-
-  const res = await req(info.url, { headers: { Referer: 'https://www.kugou.com/' }, timeout: 60000 })
-  if (!res.ok) throw new Error('下载失败：HTTP ' + res.status)
-  const total = Number(res.headers.get('content-length')) || 0
-  const chunks = []
-  let received = 0
-  const reader = res.body.getReader()
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    chunks.push(Buffer.from(value))
-    received += value.length
-    if (onProgress) onProgress(received, total)
-  }
-  await fs.promises.mkdir(dir, { recursive: true })
-  await fs.promises.writeFile(target, Buffer.concat(chunks))
-  return { path: target, size: received, ext, fallbackSong: info.fallback ? info.song : null }
 }
 
 /* ---------------- 直链解析给协议/mpv 用 ---------------- */
@@ -1214,7 +1212,6 @@ module.exports = {
   search,
   getPlayable,
   getLyric,
-  download,
   resolveStreamUrl,
   fmtDur
 }

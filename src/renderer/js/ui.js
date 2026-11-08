@@ -104,7 +104,7 @@ const UI = {
     for (let i = 0; i < tracks.length; i++) {
       const t = tracks[i]
       const isCur = t.id === ctx.currentId
-      rows[i] = `<div class="tr${isCur ? ' playing' : ''}" data-id="${t.id}" data-index="${i}">
+      rows[i] = `<div class="tr${isCur ? ' playing' : ''}" data-id="${esc(t.id)}" data-index="${i}">
           <div class="c-idx">
             <span class="num" draggable="true" title="拖到左侧歌单可加入歌单">${i + 1}</span>
             <span class="btn-play-row">${icon('play')}</span>
@@ -204,9 +204,14 @@ const UI = {
       this.els.mvTitle.title = ''
       this.els.mvCover.innerHTML = icon('music')
       this.els.mvLyric.textContent = ''
+      this._npKey = null
       this.setPlayIcon(false)
       return
     }
+    // v3.3.7：同一首歌重复调用（播放/暂停都会触发）不再重建封面 <img> ——
+    // 以前每次暂停/恢复都新建三处 <img>，浏览器重新解码加载，肉眼可见闪烁
+    const npChanged = track.id !== this._npKey
+    this._npKey = track.id
     this.els.pbTitle.textContent = track.title
     this.els.pbTitle.title = track.title
     this.els.pbArtist.textContent = track.artist || '未知歌手'
@@ -215,17 +220,19 @@ const UI = {
     this.els.mvTitle.textContent = track.title
     this.els.mvTitle.title = track.title + (track.artist ? ' — ' + track.artist : '')
     this.els.mvArtist.textContent = track.artist || '未知歌手'
-    if (track.cover) {
-      const img = `<img src="${esc(track.cover)}" alt="" onerror="this.remove()" />`
-      this.els.pbCover.innerHTML = img
-      this.els.lpCover.innerHTML = img
-      this.els.mvCover.innerHTML = img
-    } else {
-      this.els.pbCover.innerHTML = icon('music')
-      this.els.lpCover.innerHTML = icon('music')
-      this.els.mvCover.innerHTML = icon('music')
+    if (npChanged) {
+      if (track.cover) {
+        const img = `<img src="${esc(track.cover)}" alt="" onerror="this.remove()" />`
+        this.els.pbCover.innerHTML = img
+        this.els.lpCover.innerHTML = img
+        this.els.mvCover.innerHTML = img
+      } else {
+        this.els.pbCover.innerHTML = icon('music')
+        this.els.lpCover.innerHTML = icon('music')
+        this.els.mvCover.innerHTML = icon('music')
+      }
+      this.els.tDur.textContent = fmtDuration(track.duration)
     }
-    this.els.tDur.textContent = fmtDuration(track.duration)
     this.setPlayIcon(playing)
   },
 
@@ -582,7 +589,9 @@ const UI = {
       document.removeEventListener('click', handler, true)
       document.removeEventListener('contextmenu', cleanup, true)
       window.removeEventListener('blur', cleanup)
+      this._ctxCleanup = null
     }
+    this._ctxCleanup = cleanup
     setTimeout(() => {
       document.addEventListener('click', handler, true)
       document.addEventListener('contextmenu', cleanup, true)
@@ -592,6 +601,9 @@ const UI = {
 
   hideContextMenu() {
     this.els.ctxMenu.hidden = true
+    // v3.3.7：外部点击关菜单的路径也要清掉 document 级监听 ——
+    // 否则残留的 handler 会让下一次菜单的动作触发两次（重复添加歌单/双 toast）
+    if (this._ctxCleanup) { const c = this._ctxCleanup; this._ctxCleanup = null; c() }
   },
 
   /* ---------------- 音乐文件夹弹窗 ---------------- */

@@ -106,7 +106,8 @@ function killOrphanMpv() {
     '  $owner = [int]$m.Groups[1].Value',
     '  if ($owner -eq ' + selfPid + ') { return }',
     '  $p = Get-Process -Id $owner -ErrorAction SilentlyContinue',
-    "  if ($p -and $p.ProcessName -like '猪专属播放器*') { return }",
+    "  if ($p -and ($p.ProcessName -like '猪专属播放器*' -or $p.Path -like '*lx-dev*')) { return }",
+    // 开发模式主进程是 electron.exe（进程名匹配不到），按路径放行开发镜像
     '  $_.ProcessId',
     '}'
   ].join("\n")
@@ -322,6 +323,14 @@ function cacheSave() {
   }
 }
 
+/** LRU 刷新/失效清理用去抖落盘：命中本身很频繁，不能每次都同步写盘 */
+let cacheSaveTimer = null
+function cacheSaveSoon() {
+  if (cacheSaveTimer) return
+  cacheSaveTimer = setTimeout(() => { cacheSaveTimer = null; cacheSave() }, 1000)
+  if (cacheSaveTimer.unref) cacheSaveTimer.unref()
+}
+
 /**
  * 缓存按「实际拿到的音质」分类，不能按「请求的音质」。
  * 否则无损没取到时降级下来的 128k mp3 会被存成 flac，
@@ -355,9 +364,11 @@ function cacheTry(song, cls) {
     const st = fs.statSync(fp)
     if (!st.isFile() || st.size !== rec.size) {
       delete idx[key]
+      cacheSaveSoon()
       return null
     }
     rec.at = Date.now() // 命中即刷新，做 LRU
+    cacheSaveSoon()
     return { path: fp, rec, cls }
   } catch (err) {
     delete idx[key]
@@ -406,7 +417,13 @@ function cacheEvict() {
   let removed = 0
   for (const it of items) {
     if (total <= target) break
-    try { fs.unlinkSync(path.join(cacheDirPath(), it.v.file)) } catch (err) { /* 已经没了 */ }
+    try {
+      fs.unlinkSync(path.join(cacheDirPath(), it.v.file))
+    } catch (err) {
+      // v3.3.7：删不掉（文件正被播放占用）就留给下次 ——
+      // 以前无条件删索引条目，文件留在磁盘上成了永远没人回收的孤儿
+      continue
+    }
     delete idx[it.k]
     total -= Number(it.v.size) || 0
     removed++
@@ -468,11 +485,30 @@ function serveLocalFile(filePath, req, res) {
     'Access-Control-Allow-Origin': '*',
     'Cache-Control': 'no-store'
   }
+  // v3.3.7：客户端断开（切歌/拖进度条）时把读流一起销毁 ——
+  // 以前 .pipe(res) 之后读流会继续把文件读到 EOF 才释放句柄，
+  // 白读几十 MB IO，而且这段时间句柄被占，缓存淘汰的 unlink 会失败
+  const pipe = (rs) => {
+    res.on('close', () => { try { rs.destroy() } catch (e) { /* 已结束 */ } })
+    rs.on('error', () => { try { res.end() } catch (e) { /* 已断开 */ } })
+    rs.pipe(res)
+  }
   const range = req.headers.range
   if (range) {
     const m = /bytes=(\d*)-(\d*)/.exec(range)
-    let start = m && m[1] ? parseInt(m[1], 10) : 0
-    let end = m && m[2] ? parseInt(m[2], 10) : total - 1
+    let start = 0
+    let end = total - 1
+    if (m) {
+      if (m[1]) {
+        start = parseInt(m[1], 10)
+        end = m[2] ? parseInt(m[2], 10) : total - 1
+      } else if (m[2]) {
+        // v3.3.7：后缀区间 bytes=-N 的正确语义是「最后 N 字节」，
+        // 以前解析成开头 N 字节，拿到的是错数据
+        start = Math.max(0, total - parseInt(m[2], 10))
+        end = total - 1
+      }
+    }
     if (!Number.isFinite(start) || start < 0) start = 0
     if (!Number.isFinite(end) || end >= total) end = total - 1
     if (start > end) {
@@ -485,11 +521,11 @@ function serveLocalFile(filePath, req, res) {
       'Content-Length': String(end - start + 1),
       'Content-Range': `bytes ${start}-${end}/${total}`
     })
-    fs.createReadStream(filePath, { start, end }).pipe(res)
+    pipe(fs.createReadStream(filePath, { start, end }))
     return
   }
   res.writeHead(200, { ...base, 'Content-Length': String(total) })
-  fs.createReadStream(filePath).pipe(res)
+  pipe(fs.createReadStream(filePath))
 }
 
 function startStreamServer() {
@@ -720,7 +756,12 @@ function startStreamServer() {
       try { res.writeHead(500).end('proxy error') } catch (e) { /* 已断开 */ }
     }
   })
-  streamServer.on('error', (err) => logLine('[online] 代理服务错误', err.message))
+  streamServer.on('error', (err) => {
+    logLine('[online] 代理服务错误', err.message)
+    // v3.3.7：监听失败（端口被占/被安全软件拦）时必须把等待方放出来，
+    // 否则 ensureStreamBase() 永久 pending，所有在线播放无声无息挂死且无提示
+    if (!streamBase) { try { readyResolve('') } catch (e) { /* 已 resolve */ } }
+  })
   streamServer.listen(0, '127.0.0.1', () => {
     const port = streamServer.address().port
     streamBase = `http://127.0.0.1:${port}`
@@ -978,7 +1019,8 @@ function createWindow() {
   })
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    // v3.3.7：只放行网页链接。file:// 等任何协议都交给系统打开是不必要的攻击面
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
 
@@ -1065,6 +1107,9 @@ function runPowerAction() {
   logLine('[power] 队列结束，执行 ' + kind + '（15 秒内可在托盘取消）')
 
   // 给用户 15 秒反悔时间：误触关机比少关一次机难受得多
+  // v3.3.7：先清掉可能还挂着的旧定时器 —— 反悔窗口内重新设置、队列又播完一次时，
+  // 直接覆盖会让第一个定时器到点照常执行（届时「取消」只能取消第二个）
+  if (powerPending) { clearTimeout(powerPending); powerPending = null }
   powerPending = setTimeout(() => {
     powerPending = null
     if (kind === 'quit') { quitting = true; app.quit(); return }
@@ -1276,7 +1321,11 @@ async function runWatchScan() {
   } catch (err) {
     logLine('[watch] 扫描失败 ' + err.message)
   } finally {
-    activeScan = null
+    // v3.3.7：必须条件清空 —— watch 扫描运行中用户手动扫了库，activeScan 已被
+    // 换成手动任务的 promise，这里无条件置 null 会让 lib:list 不再等手动扫描。
+    // 清空后（本次真的跑完了）顺带补一次防抖，别让文件变化事件停在空档期。
+    if (activeScan === run) { activeScan = null; scheduleWatchScan() }
+    else scheduleWatchScan()
   }
 }
 
@@ -1365,6 +1414,8 @@ async function readEmbeddedCached(trackId, audioPath, audioMtime) {
   if (hit && hit.audioMtime === audioMtime) return hit.text
   const text = await readEmbeddedLyric(audioPath)
   embLyricCache.set(trackId, { audioMtime, text })
+  // v3.3.7：加上限 —— 几千首全听一遍会攒几十 MB 歌词全文，不能无限涨
+  if (embLyricCache.size > 500) embLyricCache.delete(embLyricCache.keys().next().value)
   return text
 }
 
@@ -1832,17 +1883,23 @@ function dlSaveSoon() {
   if (dlSaveTimer) return
   dlSaveTimer = setTimeout(() => {
     dlSaveTimer = null
-    try {
-      const keep = Array.from(dlTasks.values())
-        .filter((t) => t.status !== 'done' && t.status !== 'error')
-        .map((t) => ({
-          id: t.id, key: t.key, song: t.song, status: 'paused',
-          received: t.received || 0, total: t.total || 0,
-          path: t.path || '', ext: t.ext || '', at: t.at || 0
-        }))
-      fs.writeFileSync(dlFile(), JSON.stringify(keep, null, 1))
-    } catch (err) { /* 写不进去就算了，不影响下载 */ }
+    dlSaveNow()
   }, 700)
+}
+
+/** 立即落盘（退出前调用；平时走去抖） */
+function dlSaveNow() {
+  dlSaveTimer = null
+  try {
+    const keep = Array.from(dlTasks.values())
+      .filter((t) => t.status !== 'done' && t.status !== 'error')
+      .map((t) => ({
+        id: t.id, key: t.key, song: t.song, status: 'paused',
+        received: t.received || 0, total: t.total || 0,
+        path: t.path || '', ext: t.ext || '', at: t.at || 0
+      }))
+    fs.writeFileSync(dlFile(), JSON.stringify(keep, null, 1))
+  } catch (err) { /* 写不进去就算了，不影响下载 */ }
 }
 
 function dlLoad() {
@@ -2334,6 +2391,12 @@ function registerIpc() {
         size: info.size || 0
       }
       probeCache.set(ck, { at: Date.now(), data })
+      // v3.3.7：加上限淘汰，长会话不再缓慢膨胀
+      if (probeCache.size > 500) {
+        const now = Date.now()
+        for (const [k, v] of probeCache) { if (now - v.at > PROBE_TTL) probeCache.delete(k) }
+        while (probeCache.size > 500) probeCache.delete(probeCache.keys().next().value)
+      }
       return data
     }
     try {
@@ -2359,7 +2422,7 @@ function registerIpc() {
     for (const t of dlTasks.values()) {
       if (t.key !== key) continue
       if (t.status === 'paused') return { ok: false, error: '这首在下载列表里（已暂停），去列表点继续', id: t.id }
-      if (t.status === 'downloading' || t.status === 'queued') return { ok: false, error: '这首正在下载中', id: t.id }
+      if (t.status === 'downloading' || t.status === 'queued' || t.status === 'pausing') return { ok: false, error: '这首正在下载中', id: t.id }
     }
     const task = {
       id: 'd' + Date.now().toString(36) + (++dlSeq),
@@ -2538,9 +2601,12 @@ function registerIpc() {
   ipcMain.handle('win:minimize', () => win && win.minimize())
   ipcMain.handle('win:toggleMaximize', () => {
     if (!win) return false
-    if (win.isMaximized()) win.unmaximize()
+    // v3.3.7：unmaximize 在 Windows 上是异步的，紧接着 isMaximized() 拿到的是
+    // 切换前的旧值，渲染层图标会和实际状态相反 —— 返回「切换意图」
+    const wasMax = win.isMaximized()
+    if (wasMax) win.unmaximize()
     else win.maximize()
-    return win.isMaximized()
+    return !wasMax
   })
   ipcMain.handle('win:close', () => win && win.close())
   ipcMain.handle('win:isMaximized', () => (win ? win.isMaximized() : false))
@@ -2606,7 +2672,9 @@ function registerIpc() {
       }
       target = info.url
     }
-    if (mpvEngine) mpvEngine.load(target, opts || {})
+    // v3.3.7：引擎没跑起来还返回 true，渲染层会以为加载成功，界面假「播放中」
+    if (!mpvEngine || !mpvEngine.running) return false
+    mpvEngine.load(target, opts || {})
     return true
   })
   ipcMain.handle('mpv:play', () => { if (mpvEngine) mpvEngine.play(); return true })
@@ -2679,8 +2747,10 @@ function registerIpc() {
     } catch (err) {
       return { ok: false, devices: [], error: err.message }
     } finally {
-      // 只为枚举而临时拉起的引擎（当前并非独占输出）用完即关，不留空闲进程
-      if (startedHere && !store.get().settings.exclusiveOutput) stopMpv()
+      // 只为枚举而临时拉起的引擎用完即关，不留空闲进程。
+      // v3.3.7：以前 exclusiveOutput=true 但引擎恰好没跑时这个共享引擎会被留下，
+      // 一直挂着不干活也不受设备监视管 —— 既然只为枚举，就一律关掉。
+      if (startedHere) stopMpv()
     }
   })
 
@@ -2980,19 +3050,23 @@ if (gotLock) cleanChromiumCache()
     })
   })
 
-  app.on('before-quit', () => {
+  // v3.3.7：退出前必须等清理真正做完再退 ——
+  // 以前 stopMpv 的 Promise 没 await，后面的同步清扫还会阻塞事件循环，
+  // 让「等 mpv 进程退出」形同虚设；进程万一没死透就退出，声卡就被孤儿占着。
+  let quitCleanupDone = false
+  app.on('before-quit', (event) => {
+    if (quitCleanupDone) return
+    event.preventDefault()
     quitting = true
     stopWatching()
-    // v3.3.6 / v2.8.6：退出时把引擎彻底收掉。
-    // 以前只 kill() 一下就走，进程若没死透（或者有竞态留下的孤儿），
-    // 残留的 mpv 会一直以独占方式霸着声卡 —— 用户看到的是「播放器都关了，
-    // 别的软件还是没声音，而且音乐还在放」。
     const hadEngine = !!mpvEngine
-    stopMpv()
-    if (hadEngine) {
-      try { sweepOurMpv() } catch (err) { /* 忽略 */ }
-    }
-    if (store) store.flush()
+    stopMpv().catch(() => {}).finally(() => {
+      if (hadEngine) { try { sweepOurMpv() } catch (err) { /* 忽略 */ } }
+      try { dlSaveNow() } catch (err) { /* 忽略 */ }
+      try { if (store) store.flush() } catch (err) { /* 忽略 */ }
+      quitCleanupDone = true
+      app.quit()
+    })
   })
 
   app.on('will-quit', () => globalShortcut.unregisterAll())

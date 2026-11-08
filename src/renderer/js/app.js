@@ -1,6 +1,12 @@
 'use strict'
 /* 应用主控：状态、视图切换、交互接线 */
 
+function lyricCachePut(id, entry) {
+  state.lyricCache.set(id, entry)
+  // v3.3.7：加上限，长会话不再无限增长
+  if (state.lyricCache.size > 50) state.lyricCache.delete(state.lyricCache.keys().next().value)
+}
+
 const state = {
   tracks: [],            // 全部曲目（client 结构）
   byId: new Map(),
@@ -142,7 +148,7 @@ async function boot() {
   showReleaseNotice()
   window.api.dlyricIsOpen().then((open) => {
     UI.setDLyric(open, open && settings.desktopLyric && settings.desktopLyric.locked)
-  })
+  }).catch(() => {})
   // 歌词窗口那边改了锁定/自行关闭，主进程会推最新状态过来
   window.api.onDlyricOpenState((st) => {
     const open = st && typeof st === 'object' ? !!st.open : !!st
@@ -197,7 +203,7 @@ async function boot() {
     toast('睡眠定时已到，播放已暂停', 4000)
   })
   // 睡眠定时状态（v2.2：入口从托盘移到 app 内播放条）
-  window.api.getSleepState().then((st) => renderSleepState(st))
+  window.api.getSleepState().then((st) => renderSleepState(st)).catch(() => {})
   window.api.onSleepState((st) => renderSleepState(st))
   // 托盘/快捷键改迷你状态时，主进程会推过来，界面跟着切
   window.api.onMiniState((st) => {
@@ -208,7 +214,10 @@ async function boot() {
   window.addEventListener('beforeunload', saveSession)
   setInterval(saveSession, 10000)
 
-  document.getElementById('btnMax').innerHTML = icon(window.api.isMaximized ? 'restore' : 'max')
+  // v3.3.7：isMaximized 是 IPC 函数，直接放条件里恒为真 —— 必须真的调一次
+  window.api.isMaximized().then((max) => {
+    document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
+  }).catch(() => {})
 }
 
 /** 当前曲目的歌词偏移（v1.7）：优先本曲设置，没有则用全局默认 */
@@ -816,7 +825,11 @@ function bindPlayer() {
   player.on('track-change', (track) => {
     state.currentId = track.id
     state.counted = false
-    state.onlineFails = 0          // 能切到这首说明上一首没失败
+    // v3.3.7：这里不能再清 onlineFails —— track-change 在「开始尝试加载」时就发，
+    // 清零会让 error 回调里「连跳 3 首就停」的保底永远凑不满（整队被一路跳光）。
+    // 改成真的播出声了（time 事件 > 3 秒）才清，见下面 time 处理器。
+    if (state.skipTimer) { clearTimeout(state.skipTimer); state.skipTimer = null }
+    state.lastErrKey = null        // 换曲后允许重新记错误
     if (track.online) Online.markPlaying(track.id)
     resetAb()                       // A-B 是"这一首之内"的事，换歌就作废
     updateMediaSession(track)
@@ -826,7 +839,7 @@ function bindPlayer() {
     UI.setFavorite(state.favorites.has(track.id))
     UI.setRowPlaying(track.id, true)
     loadLyric(track)
-    window.api.addHistory(track.id)
+    window.api.addHistory(track.id).catch(() => {})
     state.history = [{ id: track.id, at: Date.now() }]
       .concat(state.history.filter((h) => h.id !== track.id)).slice(0, 300)
     updateNavCounts()
@@ -847,8 +860,9 @@ function bindPlayer() {
 
   player.on('state-change', (playing) => {
     UI.setPlayIcon(playing)
+    // v3.3.7：renderQueue 的输出只跟 tracks/index/currentId 有关，播放/暂停
+    // 不改变它 —— 以前每次暂停/恢复都全量重建队列 innerHTML（滚动位置丢失）
     if (player.current) UI.renderNowPlaying(player.current, playing)
-    UI.renderQueue(player.tracks, player.index, state.currentId)
     pushDesktopLyric()
     if (!playing) saveSession()
     // 任务栏缩略图的播放/暂停按钮要跟着变
@@ -859,6 +873,8 @@ function bindPlayer() {
   })
 
   player.on('time', (cur, dur) => {
+    // v3.3.7：播过 3 秒 = 真的在出声，在线连跳保护清零（防连跳的计数只认「没播出来」）
+    if (cur > 3 && state.onlineFails) state.onlineFails = 0
     UI.setProgress(cur, dur)
     UI.updateLyricIndex(cur + state.lyricOffset)
     pushDesktopLyric()
@@ -875,7 +891,7 @@ function bindPlayer() {
           state.playCounts[id] = n
           // 正在看「最常播放」时顺序会变，立即重排
           if (state.view === 'most') renderView()
-        })
+        }).catch(() => {})
       }
     }
   })
@@ -903,6 +919,10 @@ function bindPlayer() {
 
   player.on('error', () => {
     const cur = player.current
+    // v3.3.7：同一首歌的重复报错只处理一次（mpvaudio 对同一文件可能
+    // 连发 error / file-error 两类事件，不去重会一次失败跳两首）
+    if (cur && state.lastErrKey === cur.id && Date.now() - state.lastErrAt < 2000) return
+    if (cur) { state.lastErrKey = cur.id; state.lastErrAt = Date.now() }
     // 在线曲目失败和本地文件不同：多半是版权/直链失效，跳过才有意义。
     // 但不能无脑连跳——连跳 3 首就停，否则一路把搜索结果的队列跳光。
     if (cur && cur.online) {
@@ -914,7 +934,9 @@ function bindPlayer() {
         return
       }
       toast('这首在线歌曲放不出来（版权或音源失效），已跳过', 2500)
-      setTimeout(() => player.next(true), 500)
+      // v3.3.7：定时器存下来，track-change 时取消 —— 用户在 500ms 内手动切歌，
+      // 不能被这个定时器把刚选的歌又跳掉
+      state.skipTimer = setTimeout(() => { state.skipTimer = null; player.next(true) }, 500)
       return
     }
     state.onlineFails = 0
@@ -930,7 +952,7 @@ function bindPlayer() {
     toast(cur && cur.isDsd
       ? 'DSD 文件需要独占输出才能播放：点标题栏波形按钮开启（已跳过）'
       : '该歌曲无法播放，已跳过', cur && cur.isDsd ? 4000 : 1800)
-    setTimeout(() => player.next(true), 400)
+    state.skipTimer = setTimeout(() => { state.skipTimer = null; player.next(true) }, 400)
   })
 }
 
@@ -1120,12 +1142,6 @@ function toggleCachePanel(show) {
   }
 }
 
-function fmtSize(bytes) {
-  const b = Number(bytes) || 0
-  if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'
-  if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB'
-  return Math.max(0, Math.round(b / 1024)) + ' KB'
-}
 
 /** 面板上的「共几首 / 占多少」+ 目录 + 开关状态 */
 async function refreshCachePanel() {
@@ -1296,9 +1312,14 @@ async function toggleMini(on) {
   const next = on == null ? !state.mini : !!on
   if (next === state.mini) return
   // 进迷你/回完整之前把浮层都收掉，免得面板卡在窄窗口里
+  // v3.3.7：以前漏了音频设备/睡眠定时/缓存/下载四个面板
   UI.toggleQueue(false)
   UI.toggleEq(false)
   UI.hideContextMenu()
+  toggleAudioPanel(false)
+  toggleSleepPanel(false)
+  toggleCachePanel(false)
+  if (typeof Online !== 'undefined' && Online.toggleDlPanel) Online.toggleDlPanel(false)
   state.mini = next
   UI.setMini(next)
   try {
@@ -1315,7 +1336,9 @@ async function toggleMini(on) {
 
 async function toggleFavoriteCurrent() {
   if (!state.currentId) return
-  const favs = await window.api.toggleFavorite(state.currentId)
+  let favs
+  try { favs = await window.api.toggleFavorite(state.currentId) }
+  catch (err) { toast('操作失败：' + (err.message || err), 2500); return }
   state.favorites = new Set(favs)
   UI.setFavorite(state.favorites.has(state.currentId))
   updateNavCounts()
@@ -1326,7 +1349,9 @@ async function toggleFavoriteCurrent() {
 /* ================= 歌词 ================= */
 
 async function loadLyric(track) {
-  state.lyricOffset = state.settings.lyricOffset || 0
+  // v3.3.7：用这首歌自己的偏移（没有才落回全局）。以前写死全局值，
+  // 「外部改 .lrc → lyric:changed → loadLyric」会把单独设过的偏移覆盖掉
+  state.lyricOffset = offsetFor(track ? track.id : null)
   UI.setLyricOffset(state.lyricOffset)
   const isOnline = !!track.online
   // v2.8.3：不再用扫描时的 hasLyric 决定「有没有词」——扫描之后才放进去的 .lrc
@@ -1340,7 +1365,8 @@ async function loadLyric(track) {
       const text = await window.api.onlineLyric(track.online).catch(() => null)
       if (track.id !== state.currentId) return
       parsed = text ? parseLrc(text) : null
-      state.lyricCache.set(track.id, { parsed, mtime: 0 })
+      // v3.3.7：在线取词失败（null）不写缓存，下次播还有机会拿到词
+      if (parsed) lyricCachePut(track.id, { parsed, mtime: 0 })
     }
   } else {
     // 本地曲目：每次都读一次小文件（几 KB），带 mtime 校验，外面改完歌词不用重启
@@ -1351,7 +1377,7 @@ async function loadLyric(track) {
       parsed = hit.parsed
     } else {
       parsed = res && res.text ? parseLrc(res.text) : null
-      state.lyricCache.set(track.id, { parsed, mtime: res ? res.mtimeMs : 0 })
+      lyricCachePut(track.id, { parsed, mtime: res ? res.mtimeMs : 0 })
     }
   }
   if (track.id !== state.currentId) return
@@ -1394,7 +1420,9 @@ function bindUI() {
   // 新建歌单
   document.getElementById('btnNewPlaylist').addEventListener('click', async () => {
     const name = '新歌单 ' + (state.playlists.length + 1)
-    const pl = await window.api.createPlaylist(name)
+    let pl
+    try { pl = await window.api.createPlaylist(name) }
+    catch (err) { toast('新建歌单失败：' + (err.message || err), 2500); return }
     state.playlists.push(pl)
     renderPlaylists()
     switchView(pl.id)
@@ -1959,7 +1987,9 @@ async function handleCtxAction(act, arg) {
     }
     case 'add-pl': {
       const ids = (currentMenuTracks.length ? currentMenuTracks : [track]).map((t) => t.id)
-      const pl = await window.api.addToPlaylist(arg, ids)
+      let pl
+      try { pl = await window.api.addToPlaylist(arg, ids) }
+      catch (err) { toast('加入歌单失败：' + (err.message || err), 2500); break }
       if (pl) {
         const i = state.playlists.findIndex((p) => p.id === pl.id)
         if (i >= 0) state.playlists[i] = pl
@@ -1970,7 +2000,9 @@ async function handleCtxAction(act, arg) {
     }
     case 'remove-pl': {
       const ids = (currentMenuTracks.length ? currentMenuTracks : [track]).map((t) => t.id)
-      const pl = await window.api.removeFromPlaylist(state.view, ids)
+      let pl
+      try { pl = await window.api.removeFromPlaylist(state.view, ids) }
+      catch (err) { toast('移除失败：' + (err.message || err), 2500); break }
       if (pl) {
         const i = state.playlists.findIndex((p) => p.id === pl.id)
         if (i >= 0) state.playlists[i] = pl
@@ -2030,7 +2062,9 @@ async function confirmRename() {
   const pl = state.playlists.find((p) => p.id === plId)
   closeRenameModal()
   if (!pl || !name || name === pl.name) return
-  const updated = await window.api.updatePlaylist(plId, { name })
+  let updated
+  try { updated = await window.api.updatePlaylist(plId, { name }) }
+  catch (err) { toast('重命名失败：' + (err.message || err), 2500); return }
   if (updated) {
     const i = state.playlists.findIndex((p) => p.id === plId)
     if (i >= 0) state.playlists[i] = updated
@@ -2043,7 +2077,8 @@ async function confirmRename() {
 async function deletePlaylist(id) {
   const pl = state.playlists.find((p) => p.id === id)
   if (!pl) return
-  await window.api.removePlaylist(id)
+  try { await window.api.removePlaylist(id) }
+  catch (err) { toast('删除歌单失败：' + (err.message || err), 2500); return }
   state.playlists = state.playlists.filter((p) => p.id !== id)
   renderPlaylists()
   if (state.view === id) switchView('all')
@@ -2155,9 +2190,11 @@ async function onScanDone() {
   try {
     const tracks = await window.api.listTracks()
     setTracks(tracks)
-    // 队列里已失效的曲目要剔除，否则点播放会指向不存在的文件
+    // 队列里已失效的曲目要剔除，否则点播放会指向不存在的文件。
+    // v3.3.7：在线曲目（id 形如 on:src:id）永远不在 byId 里，必须放行 ——
+    // 以前任何一次后台扫描都会把在线歌整批踢出队列、打断正在播的在线音乐
     if (player && player.tracks.length) {
-      const kept = player.tracks.filter((t) => state.byId.has(t.id))
+      const kept = player.tracks.filter((t) => state.byId.has(t.id) || t.online)
       if (kept.length !== player.tracks.length) {
         const curId = player.current ? player.current.id : null
         const idx = Math.max(0, kept.findIndex((t) => t.id === curId))
@@ -2435,9 +2472,21 @@ function bindGlobalKeys() {
 
 /* ================= 持久化 ================= */
 
-const saveSettings = debounce((patch) => {
-  window.api.patchSettings(patch).then((s) => { state.settings = s }).catch(() => {})
+// v3.3.7：debounce 是「尾触发、参数整体替换」语义 —— 300ms 内两类设置
+// （比如 mode-change 后马上拖音量）只有最后一类会落盘，前一类永远丢失。
+// 改成先合并再统一发。
+let saveSettingsPending = null
+const _flushSaveSettings = debounce(() => {
+  const patch = saveSettingsPending
+  saveSettingsPending = null
+  if (patch && Object.keys(patch).length) {
+    window.api.patchSettings(patch).then((s) => { state.settings = s }).catch(() => {})
+  }
 }, 300)
+function saveSettings(patch) {
+  saveSettingsPending = Object.assign({}, saveSettingsPending || {}, patch || {})
+  _flushSaveSettings()
+}
 
 /* ================= 长音轨断点续播见 js/resume.js ================= */
 
