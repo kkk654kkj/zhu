@@ -11,7 +11,7 @@ const { pathToFileURL } = require('url')
 const { Readable } = require('stream')
 
 const { Store } = require('./store')
-const { Library, fileId, MIME_BY_EXT, resolveCoverPath, COVER_EMBEDDED } = require('./library')
+const { Library, fileId, MIME_BY_EXT, resolveCoverPath, COVER_EMBEDDED, readEmbeddedLyric } = require('./library')
 const { MpvEngine } = require('./mpv')
 const online = require('./online')
 
@@ -1338,16 +1338,34 @@ function sendToRenderer(channel, payload) {
  * 只盯当前这首的 lrc 文件：用户在外面改了歌词，立刻告诉渲染层重新读，
  * 不用切歌也不用重启。切到下一首会自动把上一个监听关掉。
  */
-let lyricWatch = null
-function watchLyricFile(file, trackId) {
-  if (lyricWatch) { try { lyricWatch.close() } catch (err) { /* 忽略 */ } lyricWatch = null }
-  if (!file) return
-  try {
-    lyricWatch = fs.watch(file, { persistent: false }, () => {
-      sendToRenderer('lyric:changed', trackId)
-    })
-    lyricWatch.on('error', () => { /* 文件被删/改名，下次读的时候重建 */ })
-  } catch (err) { /* 监视不了就算了，mtime 兜底 */ }
+let lyricWatch = []
+function watchLyricFile(files, trackId) {
+  for (const w of lyricWatch) { try { w.close() } catch (err) { /* 忽略 */ } }
+  lyricWatch = []
+  const list = (Array.isArray(files) ? files : [files]).filter(Boolean)
+  if (!list.length) return
+  for (const f of list) {
+    try {
+      const w = fs.watch(f, { persistent: false }, () => {
+        sendToRenderer('lyric:changed', trackId)
+      })
+      w.on('error', () => { /* 文件被删/改名，下次读的时候重建 */ })
+      lyricWatch.push(w)
+    } catch (err) { /* 监视不了就算了，mtime 兜底 */ }
+  }
+}
+
+/* ---------------- 内嵌歌词（按音频 mtime 缓存） ---------------- */
+
+/** trackId → { audioMtime, text }：同一份文件没被改过就不重复解析标签 */
+const embLyricCache = new Map()
+async function readEmbeddedCached(trackId, audioPath, audioMtime) {
+  if (!audioPath || !audioMtime) return null
+  const hit = embLyricCache.get(trackId)
+  if (hit && hit.audioMtime === audioMtime) return hit.text
+  const text = await readEmbeddedLyric(audioPath)
+  embLyricCache.set(trackId, { audioMtime, text })
+  return text
 }
 
 /* ---------------- 桌面歌词浮窗 ---------------- */
@@ -2059,19 +2077,43 @@ function registerIpc() {
    */
   ipcMain.handle('lyric:read', async (e, trackId) => {
     const track = library.get(trackId)
-    if (!track || !track.lyric) {
+    if (!track) {
       watchLyricFile(null)
       return null
     }
-    try {
-      const buf = await fsp.readFile(track.lyric)
-      let mtimeMs = 0
-      try { mtimeMs = fs.statSync(track.lyric).mtimeMs } catch (err) { /* 忽略 */ }
-      watchLyricFile(track.lyric, trackId)
-      return { text: decodeText(buf), mtimeMs }
-    } catch (err) {
-      return null
+
+    const lrc = track.lyric || null
+    const audio = track.path || null
+    const mtimeOf = (p) => { try { return p ? fs.statSync(p).mtimeMs : 0 } catch (err) { return 0 } }
+    const lrcMtime = mtimeOf(lrc)
+    const audioMtime = mtimeOf(audio)
+
+    // v3.3.4：外置 .lrc 与内嵌 LYRICS 谁改得新用谁。
+    // 只比「文件修改时间」：改 .lrc 会让 lrc 变新，改标签（Mp3tag 等）会让音频文件变新，
+    // 两边都不用手动选。之前固定外置优先，才出现「标签改了但界面还是旧词」。
+    if (lrc && lrcMtime && lrcMtime >= audioMtime) {
+      try {
+        const buf = await fsp.readFile(lrc)
+        watchLyricFile([lrc, audio], trackId)
+        return { text: decodeText(buf), mtimeMs: lrcMtime, source: 'lrc' }
+      } catch (err) { /* 读不到就往下试内嵌 */ }
     }
+
+    const emb = await readEmbeddedCached(trackId, audio, audioMtime)
+    if (emb) {
+      watchLyricFile([audio], trackId)
+      return { text: emb, mtimeMs: audioMtime, source: 'embedded' }
+    }
+
+    if (lrc) {
+      try {
+        const buf = await fsp.readFile(lrc)
+        watchLyricFile([lrc], trackId)
+        return { text: decodeText(buf), mtimeMs: lrcMtime, source: 'lrc' }
+      } catch (err) { /* 忽略 */ }
+    }
+    watchLyricFile(null)
+    return null
   })
 
   // —— 联网版：在线音乐 ——

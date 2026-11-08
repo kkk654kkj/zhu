@@ -231,6 +231,31 @@ function lyricsToLrc(common) {
   return null
 }
 
+/** 懒加载 music-metadata（只有需要读内嵌歌词时才用） */
+let MM_PROMISE = null
+function getMM () {
+  if (!MM_PROMISE) MM_PROMISE = import('music-metadata')
+  return MM_PROMISE
+}
+
+/**
+ * v2.8.4 / v3.3.4：运行时读内嵌歌词。
+ *
+ * 以前只有扫描时才解析标签，于是「用 Mp3tag 之类改完 FLAC 内嵌 LYRICS 后」
+ * 播放器永远读不到新词——它只认外置 .lrc。这里给主进程一个按需读取的入口，
+ * 配合 mtime 比较就能做到「改哪边都生效」。
+ */
+async function readEmbeddedLyric (filePath) {
+  if (!filePath) return null
+  try {
+    const mm = await getMM()
+    const parsed = await mm.parseFile(filePath, { duration: false, skipCovers: true })
+    return lyricsToLrc(parsed.common || {})
+  } catch (err) {
+    return null
+  }
+}
+
 /** 把内嵌歌词落到 data\lyrics\<id>.lrc，让下游（lyric:read / LRC 解析）完全不用改。
  *  只在「没有同名 .lrc」且「标签里确实有歌词」时才写，数量受真实数据限制。 */
 async function writeEmbeddedLyric(text, lyricDir, id) {
@@ -796,6 +821,6 @@ class Library {
 }
 
 module.exports = {
-  Library, fileId, AUDIO_EXT, MIME_BY_EXT, resolveCoverPath, COVER_EMBEDDED,
+  Library, fileId, AUDIO_EXT, MIME_BY_EXT, resolveCoverPath, COVER_EMBEDDED, readEmbeddedLyric,
   __test: { splitFileNameSegments, resolveNameSegments, normName, readLrcMeta, parseTrack }
 }
