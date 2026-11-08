@@ -89,11 +89,13 @@ class MpvEngine {
     // 有独占需求的人通常接了 USB DAC，默认设备经常不是它。
     if (audioDevice) args.push('--audio-device=' + audioDevice)
 
+    let proc = null
     try {
-      this.proc = spawn(this.exePath, args, {
+      proc = spawn(this.exePath, args, {
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'pipe']
       })
+      this.proc = proc
     } catch (err) {
       this.proc = null
       return { ok: false, error: '启动 mpv 失败：' + err.message }
@@ -101,19 +103,25 @@ class MpvEngine {
 
     let stderrTail = ''
     this._stderr = ''
-    if (this.proc.stderr) {
-      this.proc.stderr.on('data', (d) => {
+    if (proc.stderr) {
+      proc.stderr.on('data', (d) => {
         stderrTail = (stderrTail + d.toString()).slice(-800)
         this._stderr = stderrTail
       })
     }
-    this.proc.on('exit', (code) => {
+    proc.on('exit', (code) => {
+      // v3.3.1 关键修复：切设备/回退共享时会 kill 旧进程再起新的，
+      // 而旧进程的 exit 事件往往晚于新进程 spawn 才到。以前这里无条件 _teardown()，
+      // 会把**新引擎**的 proc/ready 一起清空 —— 于是引擎还在放歌，主进程却以为它没运行：
+      // 暂停/停止/关独占全部变成空操作，音乐停不下来；再切设备也因为 !running 直接跳过。
+      if (this.proc !== proc) return
       const wasRunning = this.ready
       this._teardown()
       this.onEvent({ type: 'engine-exit', code, stderr: stderrTail.trim() })
       if (wasRunning) this.onEvent({ type: 'error', message: 'mpv 引擎已退出（code ' + code + '）' })
     })
-    this.proc.on('error', (err) => {
+    proc.on('error', (err) => {
+      if (this.proc !== proc) return
       this.onEvent({ type: 'error', message: 'mpv 进程错误：' + err.message })
     })
 
@@ -325,12 +333,16 @@ class MpvEngine {
     try { wasPlaying = (await this.request(['get_property', 'pause'], 800)) === false } catch {}
     const file = this._lastFile
     const pos = this._lastPos
+    const prevDevice = this._audioDevice || ''
+    const vol = volume != null ? volume : (this._volume01 != null ? this._volume01 : 1)
     this.kill()
-    const r = await this.start({
-      exclusive,
-      audioDevice,
-      volume: volume != null ? volume : (this._volume01 != null ? this._volume01 : 1)
-    })
+    let r = await this.start({ exclusive, audioDevice, volume: vol })
+    // 新设备被别的程序独占 / 拔掉了：退回上一次能用的设备，至少别变成哑巴
+    if (!r.ok && audioDevice && audioDevice !== prevDevice) {
+      this.onEvent({ type: 'error', message: '切换到该设备失败，已退回原设备：' + (r.error || '') })
+      r = await this.start({ exclusive, audioDevice: prevDevice, volume: vol })
+      if (r.ok) r.audioDevice = prevDevice
+    }
     if (r.ok && file) {
       this.load(file, { paused: true })
       if (pos > 0.3) {
@@ -358,11 +370,15 @@ class MpvEngine {
     this._rejectPending('mpv 已关闭')
     if (this.sock) { try { this.sock.destroy() } catch {} }
     this.sock = null
-    if (this.proc) {
-      const p = this.proc
-      this.proc = null
-      try { p.kill() } catch {}
-    }
+    const p = this.proc
+    this.proc = null
+    if (!p) return
+    try { p.kill() } catch (err) { /* 忽略 */ }
+    // Windows 上 TerminateProcess 一般立刻生效；万一卡在 WASAPI 里，800ms 后再补一刀，
+    // 免得留下一个还在出声的孤儿进程（独占时它会把设备一直占着）
+    setTimeout(() => {
+      try { if (p.exitCode === null && !p.killed) p.kill('SIGKILL') } catch (err) { /* 忽略 */ }
+    }, 800)
   }
 
   _teardown() {
