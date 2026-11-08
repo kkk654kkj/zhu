@@ -87,11 +87,23 @@ function killOrphanMpv() {
   // 不能无条件扫所有 lxmpv-*：启动后渲染层会在 1~2 秒内拉起自己的 mpv，
   // 而这一步恰好也是异步的，会把刚起的引擎当孤儿杀掉。
   // （v1.6.0 实测踩到：日志里 killed-orphan-mpv 之后紧跟 mpv IPC 连接失败）
-  const selfTag = 'lxmpv-' + process.pid + '-'
-  const script =
-    'Get-CimInstance Win32_Process -Filter "Name=\'mpv.exe\'" | ' +
-    'Where-Object { $_.CommandLine -like \'*lxmpv-*\' -and $_.CommandLine -notlike \'*' + selfTag + '*\' } | ' +
-    'Select-Object -ExpandProperty ProcessId'
+  // v2.8.2 关键修复：以前只排除「本进程」的管道名，于是两个实例同时开着时，
+  // 后启动的那个会把前一个正在用的 mpv 当孤儿杀掉 —— 前一个立刻失声，
+  // 而进度条还在按插值往前走（用户看到「没声音但还在放」）。
+  // 现在从管道名 lxmpv-<归属PID>- 里解析出主进程 PID：
+  // 归属进程还活着（且是播放器自己）就绝不动它，只有 owner 已经死了才算孤儿。
+  const selfPid = process.pid
+  const script = [
+    'Get-CimInstance Win32_Process -Filter "Name=\'mpv.exe\'" | ForEach-Object {',
+    '  $m = [regex]::Match($_.CommandLine, \'lxmpv-(\\d+)-\')',
+    '  if (-not $m.Success) { return }',
+    '  $owner = [int]$m.Groups[1].Value',
+    '  if ($owner -eq ' + selfPid + ') { return }',
+    '  $p = Get-Process -Id $owner -ErrorAction SilentlyContinue',
+    "  if ($p -and $p.ProcessName -like '猪专属播放器*') { return }",
+    '  $_.ProcessId',
+    '}'
+  ].join("\n")
   execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
     { windowsHide: true, timeout: 8000 },
     (err, stdout) => {
