@@ -350,7 +350,17 @@ class Player extends Emitter {
       const remain = Math.max(1, steps - i + 1)
       const next = this.audio.volume + (goal - this.audio.volume) / remain
       this.audio.volume = Math.max(0, Math.min(1, next))
-      if (i >= steps) this._clearFade()
+      // 这里只能收掉自己的 interval。
+      // 早先调的是 _clearFade()，它顺手把 _fadeOut 排好的"淡完就暂停"定时器也清了：
+      // 淡出 350ms 的 interval 在 360ms 收尾，而暂停定时器排在 380ms，
+      // 于是一定先被取消 —— 共享输出下按暂停只会静音，歌其实还在跑。
+      // （独占输出 fadeMs=0 走的是直接暂停的短路，所以这个问题一直没暴露。
+      //   联网版 v3.0.0 就修了，这里补上，两边保持一致。）
+      if (i >= steps) {
+        clearInterval(this._fadeTimer)
+        this._fadeTimer = null
+        this._fadeDir = null
+      }
     }, stepMs)
   }
 
