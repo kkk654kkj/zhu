@@ -181,6 +181,15 @@ async function boot() {
   window.api.onScanProgress(onScanProgress)
   window.api.onScanDone(onScanDone)
   window.api.onShortcut((action) => handleShortcut(action))
+  // 外面改了当前这首的 .lrc（main 进程 fs.watch 推过来）→ 立刻重读重画，不用切歌/重启
+  if (window.api.onLyricChanged) {
+    window.api.onLyricChanged((id) => {
+      if (id !== state.currentId) return
+      state.lyricCache.delete(id)
+      const cur = player && player.current
+      if (cur && cur.id === id) loadLyric(cur)
+    })
+  }
   // 睡眠定时到点：player.pause() 会走正常的淡出，不会突然静音（v1.7）
   window.api.onSleepTimer(() => {
     if (player && player.isPlaying) player.pause()
@@ -1292,20 +1301,30 @@ async function loadLyric(track) {
   state.lyricOffset = state.settings.lyricOffset || 0
   UI.setLyricOffset(state.lyricOffset)
   const isOnline = !!track.online
-  if (!isOnline && !track.hasLyric) {
-    if (track.id === state.currentId) UI.renderLyric(null, track.title)
-    return
-  }
-  let parsed = state.lyricCache.get(track.id)
-  if (parsed === undefined) {
-    // 在线曲目走主进程取词（本源没词会自动换源找同一首）
-    const text = isOnline
-      ? await window.api.onlineLyric(track.online).catch(() => null)
-      : await window.api.readLyric(track.id)
-    // 读文件/取词是异步的：等待期间用户可能已经切歌，慢返回的旧歌词不能覆盖新歌
+  // v2.8.3：不再用扫描时的 hasLyric 决定「有没有词」——扫描之后才放进去的 .lrc
+  // 会让这个标记一直是 false，歌词永远出不来。直接把文件读一次，没有就是没有。
+  let parsed = null
+  if (isOnline) {
+    const hit = state.lyricCache.get(track.id)
+    if (hit) parsed = hit.parsed
+    else {
+      // 在线曲目走主进程取词（本源没词会自动换源找同一首）
+      const text = await window.api.onlineLyric(track.online).catch(() => null)
+      if (track.id !== state.currentId) return
+      parsed = text ? parseLrc(text) : null
+      state.lyricCache.set(track.id, { parsed, mtime: 0 })
+    }
+  } else {
+    // 本地曲目：每次都读一次小文件（几 KB），带 mtime 校验，外面改完歌词不用重启
+    const res = await window.api.readLyric(track.id).catch(() => null)
     if (track.id !== state.currentId) return
-    parsed = text ? parseLrc(text) : null
-    state.lyricCache.set(track.id, parsed)
+    const hit = state.lyricCache.get(track.id)
+    if (res && hit && hit.mtime === res.mtimeMs) {
+      parsed = hit.parsed
+    } else {
+      parsed = res && res.text ? parseLrc(res.text) : null
+      state.lyricCache.set(track.id, { parsed, mtime: res ? res.mtimeMs : 0 })
+    }
   }
   if (track.id !== state.currentId) return
   UI.renderLyric(parsed, track.title)

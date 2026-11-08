@@ -1334,6 +1334,22 @@ function sendToRenderer(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
 }
 
+/**
+ * 只盯当前这首的 lrc 文件：用户在外面改了歌词，立刻告诉渲染层重新读，
+ * 不用切歌也不用重启。切到下一首会自动把上一个监听关掉。
+ */
+let lyricWatch = null
+function watchLyricFile(file, trackId) {
+  if (lyricWatch) { try { lyricWatch.close() } catch (err) { /* 忽略 */ } lyricWatch = null }
+  if (!file) return
+  try {
+    lyricWatch = fs.watch(file, { persistent: false }, () => {
+      sendToRenderer('lyric:changed', trackId)
+    })
+    lyricWatch.on('error', () => { /* 文件被删/改名，下次读的时候重建 */ })
+  } catch (err) { /* 监视不了就算了，mtime 兜底 */ }
+}
+
 /* ---------------- 桌面歌词浮窗 ---------------- */
 
 let dlyricWin = null
@@ -2034,12 +2050,25 @@ function registerIpc() {
   })
 
   // —— 歌词 ——
+  /**
+   * v3.3.3：返回值从「纯文本」改成 { text, mtimeMs }，并顺手监听这个 lrc 文件。
+   *
+   * 之前渲染层按 trackId 永久缓存解析结果，用户在资源管理器里改完 .lrc，
+   * 不重启播放器就一直是旧歌词（用户反馈的「改了歌词软件里还是旧的」）。
+   * 现在渲染层用 mtime 判断要不要重新读；文件一改还会推 lyric:changed 让它立刻刷新。
+   */
   ipcMain.handle('lyric:read', async (e, trackId) => {
     const track = library.get(trackId)
-    if (!track || !track.lyric) return null
+    if (!track || !track.lyric) {
+      watchLyricFile(null)
+      return null
+    }
     try {
       const buf = await fsp.readFile(track.lyric)
-      return decodeText(buf)
+      let mtimeMs = 0
+      try { mtimeMs = fs.statSync(track.lyric).mtimeMs } catch (err) { /* 忽略 */ }
+      watchLyricFile(track.lyric, trackId)
+      return { text: decodeText(buf), mtimeMs }
     } catch (err) {
       return null
     }
