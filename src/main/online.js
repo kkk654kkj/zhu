@@ -536,7 +536,7 @@ function urlCachePut(key, rec) {
     for (const [k, v] of urlCache) { if (now - v.at > URL_TTL_MS) urlCache.delete(k) }
     while (urlCache.size > 300) urlCache.delete(urlCache.keys().next().value)
   }
-  urlCachePut(key, rec)
+  urlCache.set(key, rec)
 }
 
 function cacheKey(song, prefer) {
@@ -561,6 +561,9 @@ async function probeStream(info, realDuration, expectDuration = 0) {
     if (info.referer) headers.Referer = info.referer
     if (info.headers && typeof info.headers === 'object') Object.assign(headers, info.headers)
     const res = await req(info.url, { headers, timeout: 8000 })
+    // v3.3.8：先看状态码 —— 404/503 的直链以前只要 content-type 不是 html
+    // 就被当有效结果放行（content-range 为空 → total=0 → 原样返回），进 20 分钟缓存
+    if (!res.ok && res.status !== 206) return { ...info, broken: true }
     const cr = res.headers.get('content-range') || ''
     const total = Number(cr.split('/')[1]) || 0
     const type = res.headers.get('content-type') || ''
@@ -681,7 +684,11 @@ async function qingEnsureTicket() {
         const j = await r.json().catch(() => null)
         if (j && j.ticket) {
           qingTicket = j.ticket
-          qingTicketExp = Number(j.expiresAt) > 0 ? Number(j.expiresAt) - 600000 : Date.now() + 3600000
+          // v3.3.8：expiresAt 单位防御 —— 若服务端返回秒（<1e12），按毫秒比会
+          // 让票据永远「已过期」，每次解析都白跑一趟领票接口
+          let exp = Number(j.expiresAt)
+          if (exp > 0 && exp < 1e12) exp *= 1000
+          qingTicketExp = exp > 0 ? exp - 600000 : Date.now() + 3600000
           return qingTicket
         }
       } catch (err) { /* 换下一条线路 */ }
@@ -693,7 +700,7 @@ async function qingEnsureTicket() {
 
 /** 换一次直链；返回 { url } 或 null */
 async function qingResolveOnce(source, rid, level) {
-  const ticket = await qingEnsureTicket()
+  let ticket = await qingEnsureTicket()
   if (!ticket) return null
   const body = JSON.stringify({ source, rid, level })
   for (const base of QING_BASES) {
@@ -719,8 +726,11 @@ async function qingResolveOnce(source, rid, level) {
         if (d.url) return { url: d.url, headers: d.playbackHeaders || d.headers || null }
         return null
       }
-      // 票过期就作废重领一次
-      if (/TICKET|AUTH|TOKEN/i.test(String(j.code || ''))) qingTicket = ''
+      // 票过期就作废并**当场重领**：继续用捕获的旧票跑剩下的线路必然全挂
+      if (/TICKET|AUTH|TOKEN/i.test(String(j.code || ''))) {
+        qingTicket = ''
+        ticket = await qingEnsureTicket()
+      }
     } catch (err) { /* 换下一条线路 */ }
   }
   return null
@@ -1001,7 +1011,7 @@ async function maybeUpgrade(res, song, prefer) {
         const got = await SOURCES[id].getUrl(cand, prefer)
         if (!got || !got.url) continue
         const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0)
-        if (probed.broken || probed.partial) continue
+        if (probed.broken || probed.partial || probed.unverified) continue
         if ((probed.bitrate || 0) < 128) continue
         const rec = { ...probed, at: Date.now() }
         urlCachePut(cacheKey(cand, prefer), rec)
@@ -1034,6 +1044,10 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
       const got = await src.getUrl(song, prefer)
       if (got && got.url) {
         const probed = await probeStream(got, song.duration || got.duration)
+        if (probed.unverified) {
+          // v3.3.8：探测两次都失败的结果不进 20 分钟直链缓存
+          return { ...probed, song, fallback: false }
+        }
         if (!probed.partial && !probed.broken) {
           const rec = { ...probed, at: Date.now() }
           urlCachePut(key, rec)
@@ -1060,7 +1074,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
       const got = await SOURCES[id].getUrl(cand, prefer)
       if (!got || !got.url) continue
       const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0)
-      if (probed.broken) continue
+      if (probed.broken || probed.unverified) continue
       if (probed.partial) {
         if (!partial || (probed.size || 0) > (partial.size || 0)) partial = { ...probed, at: Date.now(), song: cand }
         continue
