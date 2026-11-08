@@ -222,6 +222,18 @@ class MpvAudio {
         if (this._wantPlaying) window.api.mpvPlay()
         break
       }
+      case 'engine-exit': {
+        // v3.3.2：引擎进程没了（被别的实例误杀 / 崩溃）时，以前什么都不做——
+        // currentTime 是按「上次上报 + 本地经过时间」插值的，于是进度条继续走、
+        // 却一点声音都没有。这里立刻按暂停处理，界面能如实变成「已暂停」并给出原因。
+        this._paused = true
+        this._wantPlaying = false
+        this.lastError = '音频引擎已退出（code ' + (e.code == null ? '?' : e.code) + '）'
+        console.error('[mpvaudio]', this.lastError)
+        this._emit('pause')
+        this._emit('error')
+        break
+      }
       case 'error': {
         this.lastError = e.message || 'mpv 错误'
         console.error('[mpvaudio]', this.lastError)
