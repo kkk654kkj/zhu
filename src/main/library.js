@@ -288,9 +288,14 @@ function readLrcMeta(lyricPath) {
   if (!lyricPath) return null
   try {
     const fd = fs.openSync(lyricPath, 'r')
-    const buf = Buffer.alloc(8192)
-    const n = fs.readSync(fd, buf, 0, buf.length, 0)
-    fs.closeSync(fd)
+    // v3.3.9：readSync 抛错时原来不会 close —— 句柄滞留到 GC
+    let n = 0
+    try {
+      const buf = Buffer.alloc(8192)
+      n = fs.readSync(fd, buf, 0, buf.length, 0)
+    } finally {
+      try { fs.closeSync(fd) } catch (e) { /* 已关 */ }
+    }
     const head = decodeLrcBuffer(buf.subarray(0, n))
     const pick = (tag) => {
       const m = new RegExp('\\[' + tag + ':([^\\]]*)\\]', 'i').exec(head)
@@ -647,16 +652,26 @@ class Library {
     if (hit) return hit
     const t = this.tracks.get(id)
     if (!t || t.cover !== COVER_EMBEDDED || !t.path) return null
-    try {
-      const parsed = await this.mm.parseFile(t.path, { duration: false, skipCovers: false })
-      const pic = parsed.common && parsed.common.picture && parsed.common.picture[0]
-      const pb = pictureToBuf(pic)
-      if (!pb) return null
-      coverCacheSet(id, pb.buf, pb.mime)
-      return pb
-    } catch (err) {
-      return null
-    }
+    // v3.3.9：封面墙首屏会并发请求同一 id —— 加 in-flight 去重，
+    // 以前每个请求都完整 parseFile 一遍（要读整个音频文件）
+    if (this._coverInFlight && this._coverInFlight.has(id)) return this._coverInFlight.get(id)
+    const run = (async () => {
+      try {
+        const parsed = await this.mm.parseFile(t.path, { duration: false, skipCovers: false })
+        const pic = parsed.common && parsed.common.picture && parsed.common.picture[0]
+        const pb = pictureToBuf(pic)
+        if (!pb) return null
+        coverCacheSet(id, pb.buf, pb.mime)
+        return pb
+      } catch (err) {
+        return null
+      } finally {
+        if (this._coverInFlight) this._coverInFlight.delete(id)
+      }
+    })()
+    if (!this._coverInFlight) this._coverInFlight = new Map()
+    this._coverInFlight.set(id, run)
+    return run
   }
 
   list() {

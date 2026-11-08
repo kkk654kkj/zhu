@@ -19,7 +19,8 @@ function parseLrc(text) {
     if (!line) continue
 
     // 元信息标签 [ti:xxx]
-    const metaMatch = /^\[(ti|ar|al|by|offset|tool|re|ve):(.*)\]$/i.exec(line)
+    // v3.3.9：去掉结尾锚 —— `[ti:标题] 备注` 这种行以前被当纯文本丢掉
+    const metaMatch = /^\[(ti|ar|al|by|offset|tool|re|ve):(.*)\]/i.exec(line)
     if (metaMatch) {
       const key = metaMatch[1].toLowerCase()
       const val = metaMatch[2].trim()
@@ -38,7 +39,9 @@ function parseLrc(text) {
     let m
     let lastEnd = 0
     while ((m = timeRe.exec(line))) {
-      if (m.index !== lastEnd) break
+      // v3.3.9：时间戳之间允许空白 —— `[00:10.00] [00:20.00]词` 这种真实写法
+      // 以前第二个时间戳起全部失效，原始标签文本还混进歌词里
+      if (line.slice(lastEnd, m.index).trim()) break
       lastEnd = timeRe.lastIndex
       const min = parseInt(m[1], 10)
       const sec = parseInt(m[2], 10)

@@ -103,23 +103,35 @@ function debounce(fn, ms) {
 function throttle(fn, ms) {
   let last = 0
   let timer = null
+  // v3.3.9：尾随触发要用**最后一次**调用的参数 —— 以前保留的是排定时器那次
+  // 的闭包参数，搜索输入节流时最后敲的字不会被搜
+  let pendingArgs = null
+  let pendingThis = null
+  const run = function () {
+    timer = null
+    last = Date.now()
+    const a = pendingArgs
+    const t = pendingThis
+    pendingArgs = null
+    pendingThis = null
+    fn.apply(t, a)
+  }
   return function (...args) {
     const now = Date.now()
     const gap = now - last
     if (gap >= ms) {
       last = now
       fn.apply(this, args)
-    } else if (!timer) {
-      timer = setTimeout(() => {
-        timer = null
-        last = Date.now()
-        fn.apply(this, args)
-      }, ms - gap)
+    } else {
+      pendingArgs = args
+      pendingThis = this
+      if (!timer) timer = setTimeout(run, ms - gap)
     }
   }
 }
 
 let toastTimer = null
+let toastHideTimer = null
 function toast(msg, ms = 1800) {
   const el = $('#toast')
   if (!el) return
@@ -127,9 +139,12 @@ function toast(msg, ms = 1800) {
   el.hidden = false
   el.classList.add('show')
   clearTimeout(toastTimer)
+  // v3.3.9：内层隐藏定时器也要管理 —— 以前上一条的 200ms 隐藏定时器
+  // 会把新弹的 toast 提前 hidden
+  if (toastHideTimer) { clearTimeout(toastHideTimer); toastHideTimer = null }
   toastTimer = setTimeout(() => {
     el.classList.remove('show')
-    setTimeout(() => { el.hidden = true }, 200)
+    toastHideTimer = setTimeout(() => { el.hidden = true }, 200)
   }, ms)
 }
 

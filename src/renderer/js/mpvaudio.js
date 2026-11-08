@@ -54,6 +54,10 @@ class MpvAudio {
     this._pos = sec
     this._posStamp = performance.now()
     this._ended = false
+    // v3.3.9：seek 回去之后 mpv 会再发一次 eof（属性翻回 false 再翻 true），
+    // 不清 _endedFired 的话第二次播到结尾的 ended 事件会被吞 ——
+    // 单曲循环第二遍卡死 / 播完回拖重播不切歌，都是它
+    this._endedFired = false
     window.api.mpvSeek(sec)
     this._emit('timeupdate')
   }
@@ -101,7 +105,16 @@ class MpvAudio {
 
   play() {
     this._wantPlaying = true
+    // v3.3.9：整队播完停在曲末后再点播放，要真的从头播 ——
+    // 以前只翻状态位，界面「播放中」、进度条顶死、无声
+    if (this._ended && this._srcPath) {
+      this._ended = false
+      this._endedFired = false
+      this.load()
+      return Promise.resolve()
+    }
     this._ended = false
+    this._endedFired = false
     this._paused = false
     this._posStamp = performance.now()
     window.api.mpvPlay()
@@ -189,6 +202,9 @@ class MpvAudio {
       case 'pause': {
         const paused = e.paused !== false
         if (paused !== this._paused) {
+          // v3.3.9：暂停时把「上次上报 → 实际暂停」之间的插值增量折进 _pos，
+          // 否则 currentTime 回跳最多 0.5~1 秒（进度条往回跳一下）
+          if (paused && !this._paused) this._pos = this.currentTime
           this._paused = paused
           this._posStamp = performance.now()
           this._emit(paused ? 'pause' : 'play')

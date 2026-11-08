@@ -41,6 +41,11 @@ app.setPath('sessionData', DATA_DIR)
 
 // 启动日志：无控制台时也能定位崩溃点
 const LOG_FILE = process.env.LX_LOG || path.join(DATA_DIR, 'lx-player.log')
+// v3.3.9：日志超 5MB 就轮转成 .old.log —— 以前无限增长且每条都是同步追加
+try {
+  const _st = fs.statSync(LOG_FILE)
+  if (_st.size > 5 * 1024 * 1024) fs.renameSync(LOG_FILE, LOG_FILE.replace(/\.log$/, '.old.log'))
+} catch (err) { /* 首次运行没有日志 */ }
 function logLine(...args) {
   const line = `[${new Date().toISOString()}] ` + args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')
   try { fs.appendFileSync(LOG_FILE, line + '\n') } catch {}
@@ -202,8 +207,19 @@ function registerFileProtocol() {
 
       if (range) {
         const m = /bytes=(\d*)-(\d*)/.exec(range)
-        let start = m && m[1] ? parseInt(m[1], 10) : 0
-        let end = m && m[2] ? parseInt(m[2], 10) : total - 1
+        let start = 0
+        let end = total - 1
+        if (m) {
+          if (m[1]) {
+            start = parseInt(m[1], 10)
+            end = m[2] ? parseInt(m[2], 10) : total - 1
+          } else if (m[2]) {
+            // v3.3.9：后缀区间 bytes=-N = 最后 N 字节（以前解析成开头 N 字节，
+            // 拖尾元数据/某些下载器会拿到错数据）
+            start = Math.max(0, total - parseInt(m[2], 10))
+            end = total - 1
+          }
+        }
         if (Number.isNaN(start)) start = 0
         if (Number.isNaN(end) || end >= total) end = total - 1
         if (start > end) return new Response('bad range', { status: 416 })
@@ -638,7 +654,9 @@ function startStreamServer() {
           const uniq = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
           partPath = path.join(cacheDirPath(), `${cKey}.${uniq}.part`)
           partStream = fs.createWriteStream(partPath)
-          partStream.on('error', () => { partStream = null })
+          // v3.3.9：出错时连 .part 文件一起清 —— 以前只清流不清路径，
+          // 磁盘满时半截残片留在缓存目录，容量统计与淘汰都收不回它
+          partStream.on('error', () => dropPart())
         } catch (err) {
           partPath = null
           partStream = null
@@ -1129,6 +1147,7 @@ function cancelPowerAction() {
   powerPending = null
   try { execFile('shutdown', ['/a']) } catch {}
   logLine('[power] 已取消')
+  refreshTrayMenu()   // v3.3.9：不然「⚠ 取消关机」菜单项一直残留
   sendToRenderer('power-action', { kind: null })
   return true
 }
@@ -1413,6 +1432,7 @@ async function readEmbeddedCached(trackId, audioPath, audioMtime) {
   const hit = embLyricCache.get(trackId)
   if (hit && hit.audioMtime === audioMtime) return hit.text
   const text = await readEmbeddedLyric(audioPath)
+  embLyricCache.delete(trackId)   // v3.3.9：先删再插，淘汰才真的是「最久未用」
   embLyricCache.set(trackId, { audioMtime, text })
   // v3.3.7：加上限 —— 几千首全听一遍会攒几十 MB 歌词全文，不能无限涨
   if (embLyricCache.size > 500) embLyricCache.delete(embLyricCache.keys().next().value)
@@ -1658,7 +1678,7 @@ async function releaseMpv({ probe = true } = {}) {
     if (!exited) pushMpvLog('warn', '引擎进程没有正常退出（pid ' + r.pid + '），已强制结束')
   }
   // 扫残留：属于本进程（管道名里带本 PID）的 mpv 一定是我们的，活着就是孤儿
-  const leftover = sweepOurMpv()
+  const leftover = await sweepOurMpv()
   if (leftover.length) {
     pushMpvLog('warn', '发现残留的 mpv 进程（已强杀）：' + leftover.join(', '))
     logLine('[mpv] 残留孤儿进程已清理: ' + leftover.join(','))
@@ -1675,7 +1695,7 @@ async function releaseMpv({ probe = true } = {}) {
 }
 
 /** 列出（并杀掉）属于本进程的残留 mpv —— 竞态产生的孤儿会一直霸着声卡 */
-function sweepOurMpv() {
+async function sweepOurMpv() {
   if (process.platform !== 'win32') return []
   const selfPid = process.pid
   const script = [
@@ -1686,18 +1706,20 @@ function sweepOurMpv() {
     '  $_.ProcessId',
     '}'
   ].join('\n')
-  const pids = []
-  try {
-    const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
-      { windowsHide: true, timeout: 8000, encoding: 'utf8' })
-    for (const line of String(stdout || '').split(/\r?\n/)) {
-      const s = line.trim()
-      if (/^\d+$/.test(s)) pids.push(s)
-    }
-  } catch (err) { return [] }
-  for (const pid of pids) {
-    try { execFileSync('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 }) } catch (err) { /* 忽略 */ }
-  }
+  // v3.3.9：改异步 —— 同步版（execFileSync 8 秒 + 逐个 taskkill 各 5 秒）会把主进程
+  // 事件循环卡到 13 秒，期间流代理和所有 IPC 全部停摆
+  const listPids = () => new Promise((resolve) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true, timeout: 8000 }, (err, stdout) => {
+        if (err || !stdout) return resolve([])
+        resolve(String(stdout).split(/\r?\n/).map((x) => x.trim()).filter((x) => /^\d+$/.test(x)))
+      })
+  })
+  const killPid = (pid) => new Promise((resolve) => {
+    execFile('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 }, () => resolve())
+  })
+  const pids = await listPids()
+  for (const pid of pids) await killPid(pid)
   return pids
 }
 
@@ -1983,6 +2005,17 @@ async function dlRun(task) {
     task.received = offset
 
     ws = fs.createWriteStream(part, { flags: offset > 0 ? 'a' : 'w' })
+    // v3.3.9：写流必须有 error 监听 + drain 要与「写错误/abort」竞速 ——
+    // 以前磁盘满/文件被锁时：error 无人处理直接 uncaughtException，
+    // 而循环卡在 await drain 上永远出不来（abort 只作用于下一次 read），
+    // 任务永久停在 downloading，暂停/删除全部失效
+    const wsError = new Promise((resolve) => ws.once('error', (e) => resolve(e)))
+    const abortedEv = new Promise((resolve) => {
+      if (ctrl.signal) {
+        if (ctrl.signal.aborted) resolve({ aborted: true })
+        else ctrl.signal.addEventListener('abort', () => resolve({ aborted: true }), { once: true })
+      }
+    })
     const reader = res.body.getReader()
     let lastT = Date.now()
     let lastB = task.received
@@ -1992,7 +2025,15 @@ async function dlRun(task) {
       if (done) break
       const buf = Buffer.from(value)
       task.received += buf.length
-      if (!ws.write(buf)) await new Promise((r) => ws.once('drain', r))
+      if (!ws.write(buf)) {
+        const ev = await Promise.race([
+          new Promise((r) => ws.once('drain', r)),
+          wsError.then((e) => ({ wsErr: e })),
+          abortedEv
+        ])
+        if (ev && ev.wsErr) throw ev.wsErr
+        if (ev && ev.aborted) throw Object.assign(new Error('download aborted'), { name: 'AbortError' })
+      }
       const now = Date.now()
       if (now - lastEmit >= 250) {
         lastEmit = now
@@ -2016,7 +2057,14 @@ async function dlRun(task) {
     if (task.total) task.received = task.total
     logLine('[dl] 完成', path.basename(task.path), (task.received / 1048576).toFixed(1) + 'MB')
     // 落盘后丢给曲库做增量扫描，下载完就能在「最近添加」里看到
-    if (library) library.scan(store.get().settings.musicDirs || []).catch(() => {})
+    // v3.3.9：下载目录也要一并扫（用户自选目录往往不在 musicDirs 里，
+    // 以前下完的歌永远不进库）；扫描进行中被跳过时 30 秒后补一次
+    if (library) {
+      const scanDirs = Array.from(new Set([...(store.get().settings.musicDirs || []), downloadDir()]))
+      library.scan(scanDirs).then((r) => {
+        if (r && r.skipped) setTimeout(() => { try { library.scan(scanDirs).catch(() => {}) } catch (e) {} }, 30000)
+      }).catch(() => {})
+    }
   } catch (err) {
     if (ws) { try { ws.destroy() } catch (e) { /* 忽略 */ } }
     if (task.deleted) {
@@ -2024,8 +2072,8 @@ async function dlRun(task) {
       dlUnlinkRetry(task.path ? task.path + '.part' : '')
       dlUnlinkRetry(task.path || '')
     } else if (err && (err.name === 'AbortError' || /abort/i.test(err.message || ''))) {
-      task.status = 'paused'
-      task.speed = 0
+      // v3.3.9：只有没有更新的一轮下载在跑时才回落 paused（防旧循环覆盖新状态）
+      if (task.status === 'downloading') { task.status = 'paused'; task.speed = 0 }
     } else {
       task.status = 'error'
       task.error = (err && err.message) || '下载失败'
@@ -2033,7 +2081,8 @@ async function dlRun(task) {
       logLine('[dl] 失败', task.error)
     }
   } finally {
-    task.abort = null
+    // v3.3.9：只清掉自己这轮的 abort 控制器，别抹掉新一轮任务的
+    if (task.abort === ctrl) task.abort = null
     dlBroadcast(true)
   }
 }
@@ -2105,9 +2154,19 @@ function registerIpc() {
   ipcMain.handle('settings:get', () => store.get().settings)
   ipcMain.handle('settings:patch', (e, patch) => {
     const before = store.get().settings || {}
+    // v3.3.9：键白名单 —— 只放行默认设置里已有的键。以前渲染层可以写任意键
+    // （含 musicDirs 之类会触发 watcher 重挂的），进程被注入时是个放大面
+    const allowed = new Set(Object.keys(before))
+    const filtered = {}
+    const blocked = []
+    for (const [k, v] of Object.entries(patch && typeof patch === 'object' ? patch : {})) {
+      if (allowed.has(k)) filtered[k] = v
+      else blocked.push(k)
+    }
+    if (blocked.length) logLine('[settings] 拒绝未知设置键:', blocked.join(', '))
     const prevDirs = JSON.stringify(before.musicDirs || [])
     const prevWatch = before.watchFolders
-    const next = store.patch({ settings: patch }).settings
+    const next = store.patch({ settings: filtered }).settings
     // 目录列表或监视开关变了 → 重新挂 watcher（v1.7）
     if (JSON.stringify(next.musicDirs || []) !== prevDirs || next.watchFolders !== prevWatch) {
       startWatching()
@@ -2377,8 +2436,10 @@ function registerIpc() {
     const hit = probeCache.get(ck)
     if (hit && Date.now() - hit.at < PROBE_TTL) return hit.data
     const run = async () => {
+      const probeRun = online.getPlayable(song, prefer)
+      probeRun.catch(() => {})   // v3.3.9：超时后丢弃的那份别变成 unhandledRejection
       const info = await Promise.race([
-        online.getPlayable(song, prefer),
+        probeRun,
         new Promise((r) => setTimeout(() => r(null), 8000))
       ])
       if (!info) throw new Error('no info')
@@ -2451,7 +2512,9 @@ function registerIpc() {
 
   ipcMain.handle('online:dlResume', (e, id) => {
     const t = dlTasks.get(String(id))
-    if (!t || t.status === 'downloading' || t.status === 'queued') return { ok: false }
+    // v3.3.9：pausing 必须拦 —— abort 还在途时续传会双写同一个 .part（文件损坏），
+    // 且旧循环的 finally 会把新任务的 abort 控制器抹掉，任务从此无法暂停/删除
+    if (!t || t.status === 'downloading' || t.status === 'queued' || t.status === 'pausing') return { ok: false }
     t.status = 'paused'
     dlRun(t)
     return { ok: true }
@@ -2460,8 +2523,9 @@ function registerIpc() {
   ipcMain.handle('online:dlDelete', (e, id) => {
     const t = dlTasks.get(String(id))
     if (!t) return { ok: false }
-    if (t.status === 'downloading' || t.status === 'queued') {
+    if (t.status === 'downloading' || t.status === 'queued' || t.status === 'pausing') {
       // 让下载线程自己收尾：abort → catch 里发现 deleted → 删残片、摘任务
+      // v3.3.9：pausing 也走这条路 —— 在途写盘没结束时直接摘任务会与写盘竞态
       t.deleted = true
       try { if (t.abort) t.abort.abort() } catch (err) { /* 忽略 */ }
       return { ok: true }
@@ -2593,8 +2657,19 @@ function registerIpc() {
     })
     return res.canceled ? [] : res.filePaths
   })
+  // v3.3.9：路径收口 —— 只允许曲库目录 / 下载目录 / 数据目录之内的文件
+  function isAllowedMediaPath(p) {
+    const abs = path.resolve(String(p || ''))
+    const roots = [
+      ...(store.get().settings.musicDirs || []),
+      downloadDir(),
+      DATA_DIR
+    ].map((r) => path.resolve(r).toLowerCase() + path.sep)
+    const low = abs.toLowerCase() + path.sep
+    return roots.some((r) => low.startsWith(r))
+  }
   ipcMain.handle('shell:showItem', (e, filePath) => {
-    if (filePath && fs.existsSync(filePath)) shell.showItemInFolder(filePath)
+    if (filePath && fs.existsSync(filePath) && isAllowedMediaPath(filePath)) shell.showItemInFolder(filePath)
   })
 
   // —— 窗口控制 ——
@@ -2674,6 +2749,11 @@ function registerIpc() {
     }
     // v3.3.7：引擎没跑起来还返回 true，渲染层会以为加载成功，界面假「播放中」
     if (!mpvEngine || !mpvEngine.running) return false
+    // v3.3.9：本地文件只放行曲库/下载/数据目录之内（网址不受限，播放走的是本机代理）
+    if (!/^https?:\/\//i.test(target) && !isAllowedMediaPath(target)) {
+      logLine('[mpv] 拒绝加载曲库目录之外的文件:', target)
+      return false
+    }
     mpvEngine.load(target, opts || {})
     return true
   })
@@ -2736,21 +2816,23 @@ function registerIpc() {
    */
   ipcMain.handle('mpv:devices', async () => {
     let startedHere = false
+    let eng = null
     try {
       if (!mpvEngine || !mpvEngine.running) {
         const r = await ensureMpv(false)
         if (!r.ok) return { ok: false, devices: [], error: r.error || '引擎未启动' }
         startedHere = true
       }
-      const devices = await mpvEngine.listDevices()
+      eng = mpvEngine
+      const devices = await eng.listDevices()
       return { ok: true, devices }
     } catch (err) {
       return { ok: false, devices: [], error: err.message }
     } finally {
       // 只为枚举而临时拉起的引擎用完即关，不留空闲进程。
-      // v3.3.7：以前 exclusiveOutput=true 但引擎恰好没跑时这个共享引擎会被留下，
-      // 一直挂着不干活也不受设备监视管 —— 既然只为枚举，就一律关掉。
-      if (startedHere) stopMpv()
+      // v3.3.9：但枚举的几百毫秒里用户可能点了播放（引擎被复用加载了文件），
+      // 这时不能杀 —— 用「引擎还是同一个且从未加载过文件」作判据。
+      if (startedHere && mpvEngine === eng && !eng._lastFile) stopMpv()
     }
   })
 
@@ -3060,13 +3142,21 @@ if (gotLock) cleanChromiumCache()
     quitting = true
     stopWatching()
     const hadEngine = !!mpvEngine
-    stopMpv().catch(() => {}).finally(() => {
-      if (hadEngine) { try { sweepOurMpv() } catch (err) { /* 忽略 */ } }
-      try { dlSaveNow() } catch (err) { /* 忽略 */ }
-      try { if (store) store.flush() } catch (err) { /* 忽略 */ }
+    try {
+      stopMpv().catch(() => {}).finally(() => {
+        (async () => {
+          if (hadEngine) { try { await sweepOurMpv() } catch (err) { /* 忽略 */ } }
+          try { dlSaveNow() } catch (err) { /* 忽略 */ }
+          try { if (store) store.flush() } catch (err) { /* 忽略 */ }
+          quitCleanupDone = true
+          app.quit()
+        })()
+      })
+    } catch (err) {
+      // v3.3.9：stopMpv 若同步抛错也不能把退出卡死
       quitCleanupDone = true
       app.quit()
-    })
+    }
   })
 
   app.on('will-quit', () => globalShortcut.unregisterAll())

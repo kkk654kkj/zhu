@@ -1170,8 +1170,12 @@ async function getLyric(song) {
     } catch (err) { lrc = null }
   }
   // 本源没词就换源找同一首（换了源的曲目也能出词）
+  // v3.3.9：换源兜底整体限时 —— 以前最坏 4 源 × (搜索15s + 取词15s) ≈ 90s，
+  // 歌词 IPC 全程挂着，界面像死了一样
+  const lyricDeadline = Date.now() + 15000
   if (!lrc) {
     for (const id of SOURCE_ORDER) {
+      if (Date.now() > lyricDeadline) break
       if (id === song.source || !SOURCES[id]) continue
       try {
         const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 5)
