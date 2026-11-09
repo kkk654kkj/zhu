@@ -182,6 +182,8 @@ class Player extends Emitter {
     }
     this._loadedTrack = track
     this._endingHandled = false
+    // v3.3.13：跨 load 复位 700ms 抑制窗，短曲目 / 快速切歌的曲末不被误吞
+    this._lastEndedAt = 0
     this._pendingSeek = null
     this.audio.src = track.audio
     this.audio.load()
@@ -219,7 +221,7 @@ class Player extends Emitter {
     this.emit('state-change', false)
   }
 
-  next(auto = false) {
+  next(auto = false, fromError = false) {
     if (!this.tracks.length) return
     if (this.mode === 'single' && auto) {
       this.seek(0)
@@ -233,10 +235,26 @@ class Player extends Emitter {
       if (this.index >= this.tracks.length) {
         if (this.mode === 'list') {
           this.index = 0
-          // 列表循环绕过一圈也算"播完一轮"——「播放结束后关机」要的就是这个时刻
-          if (auto) this.emit('queue-end')
+          // 列表循环绕过一圈也算"播完一轮"——「播放结束后关机」要的就是这个时刻；
+          // 但坏盘连续跳曲（fromError）绕回不算，别误触发关机。next(true) 行为不变。
+          if (auto && !fromError) this.emit('queue-end')
         } else { this.index = this.tracks.length - 1; this.stop(); return }
       }
+    }
+    this._loadCurrent(true)
+  }
+
+  /**
+   * v3.3.13：播放失败自动跳曲（app.js 调用）。
+   * 强制 index+1：忽略单曲循环、不 emit('queue-end')（坏盘不能误触发关机）；
+   * 越界时 list / shuffle 绕回 0，order 停在末尾并停播。
+   */
+  skipToNext() {
+    if (!this.tracks.length) return
+    this.index = this.index + 1
+    if (this.index >= this.tracks.length) {
+      if (this.mode === 'order') { this.index = this.tracks.length - 1; this.stop(); return }
+      this.index = 0
     }
     this._loadCurrent(true)
   }
@@ -271,7 +289,7 @@ class Player extends Emitter {
   }
 
   _onEnded() {
-    // v3.3.13：mpv 曲末双事件；mpvaudio 有 1.5 秒窗，这里再兜一层
+    // v3.3.13：mpv 曲末双事件；mpvaudio 有 700ms 窗，这里再兜一层
     if (this._endingHandled || Date.now() - (this._lastEndedAt || 0) < 700) return
     this._lastEndedAt = Date.now()
     this._endingHandled = true

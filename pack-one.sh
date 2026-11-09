@@ -10,6 +10,24 @@ PACK="$2"
 NAME="$3"
 VER="$4"
 
+# 参数校验必须在任何 rm -rf 之前：漏传时 "$STAGE/src" 会展开成 "/src"
+# （MSYS 下指向 Git 安装目录），相对路径也会误删当前目录下的东西。
+if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ]; then
+  echo "用法: bash pack-one.sh <stage目录> <pack目录> <名称> <版本号>"
+  echo "  四个参数都必填；<stage目录>/<pack目录> 必须是绝对路径（脚本会自行创建/重建）。"
+  exit 1
+fi
+for p in "$STAGE" "$PACK"; do
+  case "$p" in
+    /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+    *) echo "!! 目标必须是绝对路径（拒绝相对路径以免误删）：$p"; exit 1 ;;
+  esac
+  case "$p" in
+    /|//|[A-Za-z]:/|[A-Za-z]:) echo "!! 拒绝盘符/根目录作为目标：$p"; exit 1 ;;
+  esac
+  if [ -e "$p" ] && [ ! -d "$p" ]; then echo "!! 目标是文件不是目录：$p"; exit 1; fi
+done
+
 unset ELECTRON_RUN_AS_NODE NODE_OPTIONS
 
 # 1) 刷新源码（分支当前工作区）

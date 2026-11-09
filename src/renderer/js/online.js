@@ -24,6 +24,7 @@ const Online = {
   loading: false,
   playingId: null,     // 当前正在播的在线曲目 id（on:<src>:<id>）
   probeToken: 0,       // 音质探测轮次（换关键词就作废上一轮）
+  _searchRound: 0,     // 新搜索轮次（play 解析期间发起新搜索就作废旧收尾）
   sources: [],         // 全部可用源（主进程返回）
   proxyBase: '',       // 本地代理基地址 http://127.0.0.1:<port>
   enabled: new Set(),  // 本次参与搜索的源
@@ -271,6 +272,7 @@ const Online = {
     if (!kw) { input.focus(); return }
     if (this.loading) return
     this.loading = true
+    if (reset) this._searchRound++
     this.keyword = kw
     this.page = reset ? 1 : this.page + 1
     this.setStatus('正在搜索「' + esc(kw) + '」…', false)
@@ -307,7 +309,7 @@ const Online = {
       // v3.3.7：失败要回滚 page —— 以前 page 已经 +1，下次「加载更多」
       // 直接请求下下页，中间一页结果永久丢失
       if (!reset) this.page = Math.max(1, this.page - 1)
-      this.setStatus('搜索失败：' + esc(err.message || '网络异常'), false)
+      this.setStatus('搜索失败：' + esc(err.message || '网络异常'), this.hasMore)
     } finally {
       this.loading = false
       if (btn) btn.disabled = false
@@ -332,13 +334,17 @@ const Online = {
     // 以前「后解析完成的赢」，队列还可能新旧混着拼
     const token = (this._playToken || 0) + 1
     this._playToken = token
+    const round = this._searchRound
     const listAtStart = this.list
     const key = `${song.source}:${song.id}`
     this.setStatus('正在解析「' + esc(song.title) + '」…', this.hasMore)
     const r = await window.api.onlinePlayable(song).catch((err) => ({ ok: false, error: err.message }))
     if (token !== this._playToken) return   // 已被新的播放请求取代，这次作废
+    // 解析期间若发起了新搜索，状态栏与 state.visible 已属于新结果，
+    // 别用旧歌快照覆盖；但歌本身照播（点播意图不能丢）。this.list 本就不写。
+    const stale = round !== this._searchRound
     if (!r || !r.ok) {
-      this.setStatus('❌ ' + esc((r && r.error) || '解析失败'), this.hasMore)
+      if (!stale) this.setStatus('❌ ' + esc((r && r.error) || '解析失败'), this.hasMore)
       toast((r && r.error) || '解析失败', 3000)
       return
     }
@@ -352,7 +358,7 @@ const Online = {
     if (idx >= 0) queue[idx] = track
     else queue.unshift(track)
 
-    state.visible = queue       // 让「播放全部 / 上一首下一首」在这批结果里生效
+    if (!stale) state.visible = queue   // 让「播放全部 / 上一首下一首」在这批结果里生效
     player.setMode('list')
     player.setQueue(queue, idx >= 0 ? idx : 0, true)
     this.markPlaying(track.id)
@@ -365,10 +371,12 @@ const Online = {
       notes.push((hi ? '高解析 FLAC' : '无损 FLAC') + (r.bitrate ? ' ' + r.bitrate + 'k' : ''))
     }
     else if (r.bitrate) notes.push(r.bitrate + 'k')
-    this.setStatus(
-      `▶ ${esc(actual.title)} — ${esc(actual.artist)}` + (notes.length ? '（' + notes.join(' · ') + '）' : ''),
-      this.hasMore
-    )
+    if (!stale) {
+      this.setStatus(
+        `▶ ${esc(actual.title)} — ${esc(actual.artist)}` + (notes.length ? '（' + notes.join(' · ') + '）' : ''),
+        this.hasMore
+      )
+    }
     if (r.partial) toast('这首只有试听片段（版权限制），要完整版请换源或另找', 3500)
   },
 

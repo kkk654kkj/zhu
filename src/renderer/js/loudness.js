@@ -40,23 +40,46 @@ function getDecodeCtx() {
   return _decodeCtx
 }
 
-/** 分析一个音频 URL 的响度。返回 { lufs, peakDb, gain }，失败抛异常。 */
-async function analyzeLoudness(url, targetLufs = LUFS_DEFAULT_TARGET) {
+/**
+ * 分析一个音频 URL 的响度。返回 { lufs, peakDb, gain }，失败抛异常。
+ * opts（全部可选，保证旧调用 analyzeLoudness(url, target) 不变也能生效）：
+ *   - maxSeconds：解码前拦截阈值（秒），默认 1800
+ *   - duration：调用方已知的音轨时长（秒），>0 时优先据此判定（最准）
+ * 注意：30 分钟上限必须在 decodeAudioData 之前判断 —— 整段解码才会 OOM，
+ * 而库里 duration=0 的坏曲目会绕过调用方的时长预跳过，只能靠字节量兜底。
+ */
+async function analyzeLoudness(url, targetLufs = LUFS_DEFAULT_TARGET, opts = {}) {
+  const maxSeconds = Number(opts.maxSeconds) > 0 ? Number(opts.maxSeconds) : 1800
+  const knownDuration = Number(opts.duration) || 0
+  const TOO_LONG = '音轨超过 30 分钟，跳过响度分析'
+  // 1) 已知时长优先：最准，且完全不占内存
+  if (knownDuration > maxSeconds) throw new Error(TOO_LONG)
+  const BYTES_PER_SEC = 44100 * 2 * 2   // 44.1kHz 立体声 16bit PCM 字节率（保守上界）
   const res = await fetch(url)
   if (!res.ok) throw new Error('HTTP ' + res.status)
+  // 2) 解码前：用响应头 Content-Length 先估一次，能早退就不落全量 buffer
+  let clen = 0
+  try {
+    const h = res.headers
+    if (h && typeof h.get === 'function') clen = Number(h.get('content-length')) || 0
+  } catch {}
+  if (clen > maxSeconds * BYTES_PER_SEC) throw new Error(TOO_LONG)
   const ab = await res.arrayBuffer()
+  // 3) 解码前最后一道：用实际字节数兜底（Content-Length 可能缺失或被压缩格式低估）
+  if (ab.byteLength > maxSeconds * BYTES_PER_SEC) throw new Error(TOO_LONG)
   const buf = await getDecodeCtx().decodeAudioData(ab)
-  return analyzeBuffer(buf, targetLufs)
+  return analyzeBuffer(buf, targetLufs, maxSeconds)
 }
 
-function analyzeBuffer(buf, targetLufs) {
+function analyzeBuffer(buf, targetLufs, maxSeconds = 1800) {
   const sr = buf.sampleRate
   const n = buf.length
   const nCh = Math.min(buf.numberOfChannels, 2) // BS.1770 对立体声求和；环绕声罕见，取前两声道
   if (!n || !nCh) throw new Error('空音频')
   // v3.3.9：长音轨直接拒绝 —— decodeAudioData 整段解码 + 每声道再拷一份，
-  // 1 小时立体声内存峰值约 2.8GB，整库分析遇到有声书必 OOM（调用方按失败跳过）
-  if (n / sr > 1800) throw new Error('音轨超过 30 分钟，跳过响度分析')
+  // 1 小时立体声内存峰值约 2.8GB，整库分析遇到有声书必 OOM（调用方按失败跳过）。
+  // 保留这里作为解码后的二次兜底（压缩音频解码后才暴露真实时长）。
+  if (n / sr > maxSeconds) throw new Error('音轨超过 30 分钟，跳过响度分析')
 
   // 1) 峰值（滤波前）+ 每声道 K 滤波后的副本
   const filtered = []

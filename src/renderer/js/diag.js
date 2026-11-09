@@ -18,6 +18,9 @@ const Diag = {
   failures: null,
   fileLog: null,
   MAX_LIVE: 1000,
+  _liveEpoch: 0,         // v3.3.13：每次 reset 自增，用于作废旧轮次的 in-flight 响应
+  _needReload: false,    // reset 被 in-flight 挡住时置位，等其收尾后补发一次全量
+  _polling: false,
 
   el(id) { return document.getElementById(id) },
 
@@ -224,7 +227,11 @@ const Diag = {
     // v3.3.7：加 in-flight 防护 —— IPC 偶发慢于 1.2s 时两次请求并行，
     // 同一批日志行会入列两次（「复制」会输出重复行）
     // v3.3.13：reset 要先于 in-flight 判断，否则轮询中点「刷新」毫无反应
+    // v3.3.13 修复：in-flight 期间点「刷新」会清空状态，但那次带着旧 lastSeq 的
+    // in-flight 请求只返回增量，历史会永久丢失。用 epoch 作废旧响应 + 补发全量。
     if (reset) {
+      this._liveEpoch++
+      this._needReload = true
       this.liveLines = []
       this.lastSeq = 0
       this._renderedSeq = 0
@@ -232,8 +239,12 @@ const Diag = {
     }
     if (this._polling) return
     this._polling = true
+    const epoch = this._liveEpoch        // 记录本次请求发起时的轮次
     try {
       const r = await window.api.diagMpvLog(this.lastSeq).catch(() => null)
+      // 请求期间发生过 reset：本次带的是旧 lastSeq、只有增量，绝不能并入已清空的状态
+      if (epoch !== this._liveEpoch) return
+      this._needReload = false           // 本次请求属于最新轮次，撤销待补发
       if (!r || !r.ok) return
       if (r.entries && r.entries.length) {
         this.liveLines.push(...r.entries)
@@ -241,11 +252,17 @@ const Diag = {
           this.liveLines.splice(0, this.liveLines.length - this.MAX_LIVE)
         }
         this.lastSeq = r.seq
-        if (this.mpvMode === 'live' && this.tab === 'mpv') this.renderLive(true)
+        if (this.mpvMode === 'live' && this.tab === 'mpv') this.renderLive(true, epoch)
       }
       this.renderMpvState(r.running, r.exclusive)
     } finally {
       this._polling = false
+      // reset 被上一次 in-flight 挡住（那次响应已被作废）：用 lastSeq=0 重新拉一次全量
+      if (this._needReload) {
+        this._needReload = false
+        this.lastSeq = 0
+        this.pollLive(true)
+      }
     }
   },
 
@@ -258,7 +275,9 @@ const Diag = {
     else st.textContent = '引擎未运行'
   },
 
-  renderLive(append) {
+  renderLive(append, epoch) {
+    // 过期轮次的响应不许再碰 DOM/_renderedSeq（reset 后旧轮次可能滞后返回）
+    if (epoch != null && epoch !== this._liveEpoch) return
     const pre = this.el('diagLog')
     if (!pre) return
     if (!this.liveLines.length) {
@@ -281,8 +300,13 @@ const Diag = {
     const nearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 48
     pre.insertAdjacentHTML('beforeend', fresh.map((l) => this.lineHtml(l.at, l.level, l.text)).join(''))
     this._renderedSeq = fresh[fresh.length - 1].seq
-    // 节点数上限：一行是两个 span（时间 + 正文），所以按 2 倍算，超出从头裁掉
-    while (pre.childElementCount > this.MAX_LIVE * 2) pre.removeChild(pre.firstElementChild)
+    // 节点数上限：一行 = 两个 span（时间 + 正文）+ 一个换行文本节点。
+    // 以前只删 firstElementChild，换行文本节点永远留在顶部 → DOM 文本节点无上限增长。
+    // 现在按整行删：删掉行首的所有元素节点，连同其后紧跟的换行文本节点。
+    while (pre.childElementCount > this.MAX_LIVE * 2) {
+      while (pre.firstChild && pre.firstChild.nodeType !== 3) pre.removeChild(pre.firstChild)
+      if (pre.firstChild) pre.removeChild(pre.firstChild)
+    }
     if (nearBottom) this.scrollBottom(pre, true)
   },
 

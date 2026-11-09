@@ -102,9 +102,15 @@ const AudioFx = {
       return true
     } catch (err) {
       console.warn('[audiofx] WebAudio 接入失败，均衡器不可用:', err && err.message)
-      // v3.3.9：元素一旦被 AudioContext 捕获，链路没连 destination 就是整机静音 ——
-      // 兜底直连一次（createMediaElementSource 只能调一次，不能再重建）
-      try { if (src && ctx) src.connect(ctx.destination) } catch (e2) { /* 真没辙 */ }
+      if (src && ctx) {
+        // v3.3.9：createMediaElementSource 已成功，元素被这条 ctx 捕获 ——
+        // 链路没连 destination 会整机静音，直连一次兜底。这条链是活的，绝不能 close。
+        try { src.connect(ctx.destination) } catch (e2) { /* 真没辙 */ }
+      } else if (ctx) {
+        // new AudioContext() 成功但 createMediaElementSource(audio) 同步抛错：
+        // ctx 还没接任何节点却已在 running，必须关掉，否则泄漏一个空 AudioContext
+        try { ctx.close() } catch (e2) { /* 已关闭 */ }
+      }
       this.failed = true
       this.ctx = null
       return false

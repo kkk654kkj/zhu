@@ -102,6 +102,15 @@ function clean(s) {
     .trim()
 }
 
+/**
+ * 音源接口返回的 ext 只认白名单：它会被拼进缓存文件名，
+ * 万一接口给出 '../../evil' 这类值就是目录穿越。非法一律回退 mp3。
+ */
+function safeExt(x) {
+  const e = String(x == null ? '' : x).toLowerCase()
+  return /^(mp3|m4a|flac|ogg|aac|wav|ape)$/.test(e) ? e : 'mp3'
+}
+
 /* ---------------- 酷我 ---------------- */
 
 /**
@@ -171,7 +180,7 @@ const kw = {
     if (!d || !d.url || d.url === 'None') return null
     return {
       url: d.url,
-      ext: (d.format || 'mp3').toLowerCase(),
+      ext: safeExt(d.format),
       bitrate: Number(d.bitrate) || 0,
       duration: Number(d.duration) || song.duration || 0,
       referer: 'https://www.kuwo.cn/'
@@ -253,6 +262,8 @@ const wy = {
       const res = await req(u, {
         headers: { Referer: 'https://music.163.com', Range: 'bytes=0-1' }
       })
+      // 只读响应头，正文必须显式释放：否则每次取链留一个 15 秒 timer + 未归还连接
+      try { res.release && res.release() } catch (e) { /* 忽略 */ }
       if (!res.ok && res.status !== 206) return null
       const type = res.headers.get('content-type') || ''
       if (/text\/html/i.test(type)) return null      // 落到 404 页
@@ -420,7 +431,7 @@ const kg = {
         if (u) {
           return {
             url: u,
-            ext: (j.extName || 'mp3').toLowerCase(),
+            ext: safeExt(j.extName),
             bitrate: Math.round((Number(j.bitRate) || 0) / 1000),
             duration: song.duration || 0,
             referer: 'https://www.kugou.com/'
@@ -576,7 +587,7 @@ async function probeStream(info, realDuration, expectDuration = 0) {
     const total = Number(cr.split('/')[1]) || 0
     const type = res.headers.get('content-type') || ''
     if (/text\/html/i.test(type)) return { ...info, broken: true }
-    if (!total || !realDuration) return info
+    if (!total || !realDuration) return { ...info, unverified: true }
     const kbps = Math.round((total * 8) / realDuration / 1000)
     // 兜底换源时，候选的时长不能自己跟自己对——必须跟**用户点的那首歌**比。
     // 否则「45 秒剪辑版」永远判不出来：0.7MB/45s = 130k，看着比谁都健康。
@@ -965,7 +976,7 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
         const up = await maybeUpgrade(res, song, 'best')
         urlCachePut(cacheKey(song, 'best'), { ...up, at: Date.now() })
         return up
-      })()
+      })().catch(() => null)   // race 赢家直接 return 时它无人 await，吞掉悬空 rejection
       return fbPromise
     }
     const fbTimer = setTimeout(startFallback, 1500)
@@ -975,7 +986,8 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
     const losslessTimeout = new Promise((r) => { losslessTimer = setTimeout(() => r(null), 9000) })
     try {
       got = await Promise.race([
-        resolveLossless(song, prefer),
+        // 9 秒超时后输家仍在后台跑；吞掉它的 rejection，避免 unhandledRejection
+        resolveLossless(song, prefer).catch(() => null),
         // QQ 那边偶尔要 5 秒才给链，窗口给足；超过就先用降级结果出声
         losslessTimeout
       ])
