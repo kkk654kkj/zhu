@@ -2758,14 +2758,6 @@ function sanitizePlainValue(v) {
   return v
 }
 /**
- * 按 DEFAULT_SETTINGS 的形状校验一个 settings patch：
- *  · 只放行模板里已有的键（顶层白名单）；
- *  · 数组元素类型须与模板一致、数值键须为有限数、布尔键须为布尔、字符串键须为字符串；
- *  · 空对象模板 = 数值 map（歌词偏移/增益/断点），只留有限数；
- *  · 递归拒绝 __proto__/constructor/prototype，未知类型一律丢弃。
- * template 传 DEFAULT_SETTINGS.desktopLyric 即可用于 dlyric:cfg 的子对象过滤。
- */
-/**
  * 已知数值键的取值范围。渲染层可以调 settings:patch，光校验「是有限数」不够：
  * volume=5 会让 audio.volume 赋值抛 IndexSizeError，fadeMs 为负会让淡入淡出反向，
  * onlineCacheLimitMB 为负会让缓存淘汰逻辑算错目标。
@@ -2789,6 +2781,15 @@ function clampSetting(key, v) {
   return Math.min(r[1], Math.max(r[0], v))
 }
 
+/**
+ * 按 DEFAULT_SETTINGS 的形状校验一个 settings patch：
+ *  · 只放行模板里已有的键（顶层白名单）；
+ *  · 数组元素类型须与模板一致、数值键须为有限数（并夹到 SETTING_RANGES 范围内）、
+ *    布尔键须为布尔、字符串键须为字符串；
+ *  · 空对象模板 = 数值 map（歌词偏移/增益/断点），只留有限数，条数上限 SETTING_MAP_MAX；
+ *  · 递归拒绝 __proto__/constructor/prototype，未知类型一律丢弃。
+ * template 传 DEFAULT_SETTINGS.desktopLyric 即可用于 dlyric:cfg 的子对象过滤。
+ */
 function sanitizeSettingsPatch(patch, template = DEFAULT_SETTINGS) {
   const out = {}
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return out
