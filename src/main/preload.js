@@ -187,5 +187,11 @@ contextBridge.exposeInMainWorld('api', {
     const h = (_e, payload) => cb(payload)
     ipcRenderer.on('device-lost', h)
     return () => ipcRenderer.removeListener('device-lost', h)
+  },
+  /** 第二实例带来的关联文件路径 */
+  onOpenFiles: (cb) => {
+    const h = (_e, payload) => cb(payload)
+    ipcRenderer.on('open-files', h)
+    return () => ipcRenderer.removeListener('open-files', h)
   }
 })

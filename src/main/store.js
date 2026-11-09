@@ -44,6 +44,12 @@ class Store {
       if (fs.existsSync(this.file)) {
         const raw = fs.readFileSync(this.file, 'utf8')
         const parsed = JSON.parse(raw)
+        // v3.3.10：顶层必须是普通对象 —— 合法 JSON 但顶层是数组/原始值时
+        // （磁盘损坏/误编辑），deepMerge 会把它整体当数据，之后一次 patch
+        // 就把 settings/playlists 全部清空并写回固化
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('顶层结构损坏（非对象）')
+        }
         this.data = deepMerge(JSON.parse(JSON.stringify(this.defaults)), parsed)
         this._migrate(parsed)
       } else {
@@ -90,6 +96,13 @@ class Store {
     return this.data
   }
 
+  /** 顶层键整体替换（不走 deepMerge —— session 这类「整体换」的数据不能留旧键） */
+  setKey(key, value) {
+    this.data[key] = value
+    this.save()
+    return this.data
+  }
+
   save() {
     if (this._loading) return
     clearTimeout(this._timer)
@@ -105,10 +118,19 @@ class Store {
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true })
       const tmp = this.file + '.tmp'
-      fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8')
+      // v3.3.10：写完 fsync 再 rename —— 原子写（tmp+rename）只防「写一半」，
+      // 不防掉电时内容还在页缓存里没落盘（rename 生效但文件是空的/旧的）
+      const fd = fs.openSync(tmp, 'w')
+      try {
+        fs.writeSync(fd, JSON.stringify(this.data, null, 2), null, 'utf8')
+        fs.fsyncSync(fd)
+      } finally {
+        fs.closeSync(fd)
+      }
       fs.renameSync(tmp, this.file)
     } catch (err) {
       this.onError('[store] 写入失败: ' + err.message)
+      try { fs.unlinkSync(this.file + '.tmp') } catch (e) { /* 清理残件 */ }
     }
   }
 }

@@ -88,7 +88,7 @@ const CASES = [
     `(() => { const all = state.tracks.length
        const hit = state.tracks.filter((t) => (t.pyf || '').replace(/\\s+/g, '').includes('zj')).length
        return { all, hit } })()`,
-    (v) => v && v.all > 0 && v.hit >= 0 && v.hit <= v.all],
+    (v) => v && v.all > 0 && v.hit < v.all],
 
   ['队列排序 API 存在',
     `typeof player.moveInQueue === 'function'`,

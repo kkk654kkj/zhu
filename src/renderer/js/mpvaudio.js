@@ -89,8 +89,18 @@ class MpvAudio {
     this._pos = 0
     this._posStamp = performance.now()
     // 先按"暂停"加载，避免非自动播放的场景（会话恢复）先响一下
-    window.api.mpvLoad(this._srcPath, { paused: !this._wantPlaying })
-    if (this._wantPlaying) window.api.mpvPlay()
+    const wantPlaying = this._wantPlaying
+    window.api.mpvLoad(this._srcPath, { paused: !wantPlaying }).then((ok) => {
+      // 主进程解析在线直链失败会返回 false：必须报错，
+      // 否则界面停在这里一直"正在加载"，用户只能手动切歌
+      if (ok === false) {
+        this._paused = true
+        this._wantPlaying = false
+        this._emit('error')
+        return
+      }
+      if (wantPlaying && this._wantPlaying) window.api.mpvPlay()
+    }).catch(() => {})
   }
 
   play() {
@@ -100,7 +110,12 @@ class MpvAudio {
     if (this._ended && this._srcPath) {
       this._ended = false
       this._endedFired = false
+      // v3.3.10：状态与事件同步 —— 以前重载分支不翻 _paused 也不发 play，
+      // mpv 回报 unpause 之前 isPlaying 为 false，播放图标短暂回跳
+      this._paused = false
+      this._posStamp = performance.now()
       this.load()
+      this._emit('play')
       return Promise.resolve()
     }
     this._ended = false
@@ -229,7 +244,7 @@ class MpvAudio {
         break
       }
       case 'engine-exit': {
-        // v2.8.2：引擎进程没了（被别的实例误杀 / 崩溃）时，以前什么都不做——
+        // v3.3.2：引擎进程没了（被别的实例误杀 / 崩溃）时，以前什么都不做——
         // currentTime 是按「上次上报 + 本地经过时间」插值的，于是进度条继续走、
         // 却一点声音都没有。这里立刻按暂停处理，界面能如实变成「已暂停」并给出原因。
         this._paused = true

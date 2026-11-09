@@ -797,8 +797,11 @@ async function runWatchScan() {
   const s = store.get().settings
   if (s.watchFolders === false) return
   logLine('[watch] 检测到文件变化，开始增量扫描')
+  // v2.8.9：run 必须声明在 try 外 —— const run 在 try 块内时 finally 引用
+  // 必然 ReferenceError → activeScan 永远清不掉，后续 watch 扫描全部失效
+  let run = null
   try {
-    const run = library.scan(s.musicDirs, (p) => {
+    run = library.scan(s.musicDirs, (p) => {
       sendToRenderer('lib:scan-progress', {
         phase: p.phase, done: p.done, total: p.total,
         track: p.track ? toClientTrack(p.track) : null
@@ -1510,7 +1513,8 @@ function registerIpc() {
 
   ipcMain.handle('session:get', () => store.get().session || null)
   ipcMain.handle('session:set', (e, session) => {
-    store.patch({ session })
+    // v2.8.9：改整体替换（Store.setKey）—— deepMerge 会让旧 session 的键永久残留
+    store.setKey('session', session && typeof session === 'object' ? session : {})
     return true
   })
 
@@ -1570,13 +1574,17 @@ function registerIpc() {
   })
   // v2.8.8：路径收口 —— 只允许曲库目录 / 数据目录之内的文件
   function isAllowedMediaPath(p) {
-    const abs = path.resolve(String(p || ''))
+    const abs = path.resolve(String(p || '')).toLowerCase()
+    // v2.8.9：根路径先把尾分隔符归一化再拼 sep —— 盘符根目录（D:/）resolve 后
+    // 自带尾分隔符，直接拼会变双分隔符，曲库选成盘根时所有文件都被拒。
+    // 空目录项也过滤（resolve('')=cwd，会放行任意文件）
     const roots = [
       ...(store.get().settings.musicDirs || []),
       DATA_DIR
-    ].map((r) => path.resolve(r).toLowerCase() + path.sep)
-    const low = abs.toLowerCase() + path.sep
-    return roots.some((r) => low.startsWith(r))
+    ]
+      .filter((r) => r && String(r).trim())
+      .map((r) => path.resolve(r).toLowerCase().replace(/[\\/]+$/, '') + path.sep)
+    return roots.some((r) => abs.startsWith(r) || (abs + path.sep).startsWith(r))
   }
   ipcMain.handle('shell:showItem', (e, filePath) => {
     if (filePath && fs.existsSync(filePath) && isAllowedMediaPath(filePath)) shell.showItemInFolder(filePath)
@@ -1931,7 +1939,10 @@ let gotLock = false
 try {
   gotLock = app.requestSingleInstanceLock()
 } catch (err) {
-  logLine('WARN 单实例锁异常，忽略', err.message)
+  // v2.8.9：锁 API 抛异常 ≠ 已有实例在跑。以前 gotLock 保持 false 直接退出，
+  // 变成「永远启动不了」（data 目录被杀软锁定等便携环境常见）。fail-open 更安全
+  logLine('WARN 单实例锁异常，按拿到锁处理', err.message)
+  gotLock = true
 }
 logLine('stage: lock=' + gotLock)
 if (!gotLock) {
@@ -1942,12 +1953,18 @@ if (!gotLock) {
 // 只在确认是唯一实例时清缓存：多实例情况下删的是正在运行实例的文件（多半删不掉）
 if (gotLock) cleanChromiumCache()
 {
-  app.on('second-instance', () => {
+  app.on('second-instance', (event, argv) => {
     if (win) {
       if (!win.isVisible()) win.show()
       if (win.isMinimized()) win.restore()
       win.focus()
     }
+    // v2.8.9：第二实例带的文件参数以前被完全忽略（双击关联文件/拖到 exe 上毫无反应）。
+    // 单文件导入尚未实现，先转给渲染层给出可见反馈
+    const media = (argv || [])
+      .map(String)
+      .filter((a) => /\.(mp3|flac|m4a|wav|ogg|opus|dsf|dff|aac|wma|ape|alac|m3u|m3u8)$/i.test(a) && fs.existsSync(a))
+    if (media.length) sendToRenderer('open-files', { paths: media })
   })
 
   app.whenReady().then(async () => {
@@ -2014,6 +2031,10 @@ if (gotLock) cleanChromiumCache()
       else if (win) win.show()
     })
   })
+
+  // v2.8.9：托盘「退出」的最后一次窗口 bounds patch 发生在窗口 close 事件里
+  // （晚于 before-quit 里的 flush），这里再兜一次，不然去抖定时器会被进程退出吞掉
+  app.on('will-quit', () => { try { if (store) store.flush() } catch (err) { /* 忽略 */ } })
 
   // v2.8.7：退出前必须等清理真正做完再退 ——
   // 以前 stopMpv 的 Promise 没 await，后面的同步清扫还会阻塞事件循环，

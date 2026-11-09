@@ -15,12 +15,15 @@ function parseLrc(text) {
   const rows = raw.split('\n')
 
   for (const row of rows) {
-    const line = row.trim()
+    // v3.3.10：let —— 元信息行去掉头部标签后，剩余部分还要继续按时间戳行处理
+    let line = row.trim()
     if (!line) continue
 
     // 元信息标签 [ti:xxx]
     // v3.3.9：去掉结尾锚 —— `[ti:标题] 备注` 这种行以前被当纯文本丢掉
-    const metaMatch = /^\[(ti|ar|al|by|offset|tool|re|ve):(.*)\]/i.exec(line)
+    // v3.3.10：值域改 [^\\]]* —— 以前 (.*) 贪婪到行尾最后一个 ]，
+    // `[ar:x] [00:12]词` 会把同行歌词整行吞掉
+    const metaMatch = /^\[(ti|ar|al|by|offset|tool|re|ve):([^\]]*)\]/i.exec(line)
     if (metaMatch) {
       const key = metaMatch[1].toLowerCase()
       const val = metaMatch[2].trim()
@@ -30,7 +33,8 @@ function parseLrc(text) {
       } else {
         meta[key] = val
       }
-      continue
+      line = line.slice(metaMatch[0].length).trim()
+      if (!line) continue
     }
 
     // 时间戳 [mm:ss.xx] 或 [mm:ss:xx]

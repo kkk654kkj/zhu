@@ -40,9 +40,14 @@ const AudioFx = {
   init(audio) {
     if (this.ctx || this.failed) return !!this.ctx
     if (!window.AudioContext) { this.failed = true; return false }
+    // v3.3.10：let 提到 try 外 —— 上一版兜底在 catch 里引用块级 const，
+    // typeof src 恒为 'undefined'，兜底是死代码（createMediaElementSource 成功后
+    // 建链失败的场景救不了 = 整机静音）
+    let ctx = null
+    let src = null
     try {
-      const ctx = new AudioContext()
-      const src = ctx.createMediaElementSource(audio)
+      ctx = new AudioContext()
+      src = ctx.createMediaElementSource(audio)
 
       const trackGain = ctx.createGain()
       const preamp = ctx.createGain()
@@ -99,7 +104,7 @@ const AudioFx = {
       console.warn('[audiofx] WebAudio 接入失败，均衡器不可用:', err && err.message)
       // v3.3.9：元素一旦被 AudioContext 捕获，链路没连 destination 就是整机静音 ——
       // 兜底直连一次（createMediaElementSource 只能调一次，不能再重建）
-      try { if (typeof src !== 'undefined' && src && ctx) src.connect(ctx.destination) } catch (e2) { /* 真没辙 */ }
+      try { if (src && ctx) src.connect(ctx.destination) } catch (e2) { /* 真没辙 */ }
       this.failed = true
       this.ctx = null
       return false

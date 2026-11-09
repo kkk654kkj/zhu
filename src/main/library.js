@@ -239,7 +239,7 @@ function getMM () {
 }
 
 /**
- * v2.8.4：运行时读内嵌歌词。
+ * v2.8.4 / v3.3.4：运行时读内嵌歌词。
  *
  * 以前只有扫描时才解析标签，于是「用 Mp3tag 之类改完 FLAC 内嵌 LYRICS 后」
  * 播放器永远读不到新词——它只认外置 .lrc。这里给主进程一个按需读取的入口，
@@ -289,9 +289,11 @@ function readLrcMeta(lyricPath) {
   try {
     const fd = fs.openSync(lyricPath, 'r')
     // v3.3.9：readSync 抛错时原来不会 close —— 句柄滞留到 GC
+    // v3.3.10：buf 必须声明在 try 外 —— 上一版把 const buf 写进了内层 try，
+    // 出块后引用必然 ReferenceError 被 catch 吞掉，函数 100% 失效
     let n = 0
+    const buf = Buffer.alloc(8192)
     try {
-      const buf = Buffer.alloc(8192)
       n = fs.readSync(fd, buf, 0, buf.length, 0)
     } finally {
       try { fs.closeSync(fd) } catch (e) { /* 已关 */ }

@@ -187,6 +187,10 @@ async function boot() {
   window.api.onScanProgress(onScanProgress)
   window.api.onScanDone(onScanDone)
   window.api.onShortcut((action) => handleShortcut(action))
+  // v2.8.9：第二实例带来的关联文件 —— 单文件导入尚未实现，先给出可见反馈
+  window.api.onOpenFiles(({ paths }) => {
+    toast('收到 ' + paths.length + ' 个文件：单文件导入开发中，请先把文件所在文件夹加进曲库', 6000)
+  })
   // 外面改了当前这首的 .lrc（main 的 fs.watch 推过来）→ 立刻重读重画
   if (window.api.onLyricChanged) {
     window.api.onLyricChanged((id) => {
@@ -430,6 +434,14 @@ async function analyzeLibraryLoudness() {
     for (const t of list) {
       if (state.abortAnalysis) break
       UI.updateScan({ phase: 'parse', done, total: list.length, name: t.title, label: '正在分析响度' })
+      // v2.8.9：超长音轨在解码前就跳过 —— decodeAudioData 整段解码内存峰值无上限，
+      // 1 小时 FLAC ≈ 2.8GB（loudness.js 里还有一道兜底）
+      if ((t.duration || 0) > 1800) {
+        failed++
+        console.warn('[loudness] 跳过长音轨', t.title)
+        done++
+        continue
+      }
       try {
         const r = await analyzeLoudness(t.audio, target)
         gains[t.id] = r.gain
