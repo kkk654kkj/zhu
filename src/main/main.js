@@ -175,7 +175,52 @@ function mimeFor(p) {
   return AUDIO_MIME[ext] || MIME_BY_EXT[ext] || 'application/octet-stream'
 }
 
+/**
+ * 带 TTL + 上限的 realpath 缓存：曲库目录里的 junction/符号链接被重新指向后
+ * 最多 5 秒即重新解析。
+ *
+ * 注意：本地版此前**从未定义过这个函数**，而 isAllowedMediaPath / lxfile 协议
+ * 一直在调用它 —— 每次打开本地文件都会抛 ReferenceError（被协议层的 catch 吞成 500），
+ * 表现为「本地歌全部放不出来」。这里补齐（与联网版同源实现）。
+ */
+const REALPATH_TTL = 5000
+const REALPATH_MAX = 512
+const realpathCache = new Map()
+function realpathCached(p) {
+  const now = Date.now()
+  const hit = realpathCache.get(p)
+  if (hit && now - hit.at < REALPATH_TTL) return hit.val
+  let val = null
+  try { val = fs.realpathSync.native(p) } catch (e) { val = null }
+  // 满了就逐条淘汰最早的，而不是整表 clear()：clear 会让每个 Range 请求
+  // 都把所有 root 重新 realpathSync 一遍（主进程同步 IO）
+  while (realpathCache.size >= REALPATH_MAX) realpathCache.delete(realpathCache.keys().next().value)
+  realpathCache.set(p, { val, at: now })
+  return val
+}
+
 /** v2.8.12：媒体路径白名单（模块作用域，协议层与 IPC 共用） */
+/**
+ * 明显不该当媒体根的位置：盘符根、Windows / Program Files / ProgramData。
+ * settings.musicDirs 等键都能由渲染层 patch 写入，一旦渲染层被注入（恶意标签/歌词），
+ * 把它们改成 'C:\\' 就能让 lxfile:// 读到任意文件。
+ * 这里只挡「整盘 / 系统目录」，用户把音乐放在 C:\Users\me\Music 这类正常路径不受影响。
+ */
+const DANGEROUS_ROOT = /^[a-z]:[\\/]?$|^[a-z]:[\\/](windows|program files|program files \(x86\)|programdata)([\\/]|$)/i
+
+// Windows 驱动器相对根「D:」（无斜杠）path.resolve 会落到 cwd，补上分隔符。
+// 本地版此前缺这个函数（白名单一调用就 ReferenceError），这里补齐。
+function fixDriveRoot(s) {
+  const t = String(s == null ? '' : s).trim()
+  return /^[A-Za-z]:$/.test(t) ? t + path.sep : t
+}
+
+function isSafeMediaRoot(r) {
+  const p = String(r == null ? '' : r).trim()
+  if (!p) return false
+  return !DANGEROUS_ROOT.test(p)
+}
+
 function isAllowedMediaPath(p) {
   // abs 与每个 root 都取 realpath：曲库里的 junction/符号链接指向系统目录时，
   // real 之后的绝对路径前缀对不上白名单，从而被拒绝
@@ -184,10 +229,10 @@ function isAllowedMediaPath(p) {
   const real = abs.toLowerCase()
   const roots = [
     ...(store.get().settings.musicDirs || []),
-    downloadDir(),
+    // 本地版没有在线下载/缓存目录（这两个根只在联网版存在）
     DATA_DIR,
   ]
-    .filter((r) => r && String(r).trim())
+    .filter((r) => r && String(r).trim() && isSafeMediaRoot(r))
     .map((r) => realpathCached(path.resolve(fixDriveRoot(r))))
     .filter(Boolean)
     .map((r) => {
@@ -215,6 +260,10 @@ function registerFileProtocol() {
       filePath = path.normalize(filePath)
       // v3.3.13：协议层也要收口（以前只有 mpv:load / shell:showItem 有）
       if (!isAllowedMediaPath(filePath)) return new Response('forbidden', { status: 403 })
+
+      // v3.3.17：后续 stat 与 createReadStream 一律用 realpath 结果，
+      // 消除「校验与打开不是同一个文件」的 TOCTOU
+      filePath = realpathCached(filePath) || filePath
 
       const stat = await fsp.stat(filePath)
       if (!stat.isFile()) return new Response('not a file', { status: 404 })
@@ -268,6 +317,19 @@ function registerFileProtocol() {
             'Content-Type': type,
             'Content-Length': String(end - start + 1),
             'Content-Range': `bytes ${start}-${end}/${total}`,
+            'Accept-Ranges': 'bytes',
+            'Cache-Control': 'no-store'
+          }
+        })
+      }
+
+      // HEAD 只要头不要体（媒体元数据探测会用）
+      if (request.method === 'HEAD') {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            'Content-Type': type,
+            'Content-Length': String(total),
             'Accept-Ranges': 'bytes',
             'Cache-Control': 'no-store'
           }
@@ -386,11 +448,17 @@ function clampToWorkArea(b) {
   const height = Math.max(200, Math.round(b.height || MINI_DEFAULT_H))
   let area = null
   try {
-    const x = Number.isFinite(b.x) ? b.x : 0
-    const y = Number.isFinite(b.y) ? b.y : 0
-    area = screen.getDisplayMatching({ x, y, width, height }).workArea
-  } catch { /* screen 不可用时直接返回原值 */ }
-  if (!area) return { ...b, width, height }
+    const hasPos = Number.isFinite(b.x) && Number.isFinite(b.y)
+    // v3.3.17：没有坐标时不能拿 (0,0) 去匹配显示器 —— 副屏在主屏左侧/上方
+    // 或任务栏在左/上时，(0,0) 不在主屏工作区，夹出来的位置会跑到错误的屏幕上。
+    area = hasPos
+      ? screen.getDisplayMatching({ x: b.x, y: b.y, width, height }).workArea
+      : screen.getPrimaryDisplay().workArea
+  } catch { /* screen 不可用时用默认值 */ }
+  if (!area) {
+    // 不能把 undefined 原样带回去：win.setBounds({x: undefined}) 会抛 TypeError
+    return { x: 0, y: 0, width, height }
+  }
   const w = Math.min(width, area.width)
   const h = Math.min(height, area.height)
   const x = Math.min(Math.max(Number.isFinite(b.x) ? b.x : area.x + area.width - w - 24, area.x), area.x + area.width - w)
@@ -419,10 +487,31 @@ function waitWindowEvent(win, ev, timeout = 500) {
  * 切换迷你模式：同一个窗口缩放，不做第二个窗口（播放状态天然连续）。
  * 进迷你前把完整窗口的尺寸位置存进 settings.mini.fullBounds，退出时原样还原。
  */
+let miniBusy = false
+let miniDesired = null
+
 async function applyMini(on) {
   if (!win || win.isDestroyed()) return miniActive
   on = !!on
+  // v3.3.17：进迷你时若窗口是最大化状态，会 await 一次 unmaximize（最长 500ms）。
+  // 这段窗口里 miniActive 还是旧值，「on === miniActive」的早退会把**后来的**那次
+  // 切换当成重复请求丢掉 —— 快速连按两次（托盘 + 全局快捷键）最终会停在你不想去的状态。
+  if (miniBusy) { miniDesired = on; return miniActive }
   if (on === miniActive) return miniActive
+  miniBusy = true
+  try {
+    return await applyMiniOnce(on)
+  } finally {
+    miniBusy = false
+    const want = miniDesired
+    miniDesired = null
+    if (want != null && want !== miniActive) {
+      applyMini(want).catch(() => {})
+    }
+  }
+}
+
+async function applyMiniOnce(on) {
   const cfg = miniCfg()
 
   if (on) {
@@ -656,9 +745,10 @@ function runPowerAction() {
     if (kind === 'quit') { quitting = true; app.quit(); return }
     try {
       if (kind === 'shutdown') {
-        execFile('shutdown', ['/s', '/t', '30'], onShutdownDone)
-        // v3.3.13：shutdown /s /t 30 之后系统还有 30 秒可取消窗口，
-        // 不能随 15 秒反悔窗口一起消失 —— 单独记标志并排一个 30 秒清理定时器
+        // v3.3.17：标志必须**先于** execFile 立起来，并立刻重建托盘。
+        // 以前它在 execFile 之后赋值，而托盘重建发生在这之前 —— 结果是
+        // 「15 秒反悔窗口到点 → 30 秒系统关机窗口」这段时间里，
+        // 托盘菜单上根本没有「取消关机」，用户错过 toast 就只能等关机。
         systemShutdownPending = true
         if (systemShutdownTimer) clearTimeout(systemShutdownTimer)
         systemShutdownTimer = setTimeout(() => {
@@ -667,8 +757,10 @@ function runPowerAction() {
           refreshTrayMenu()
         }, 30000)
         if (systemShutdownTimer.unref) systemShutdownTimer.unref()
+        refreshTrayMenu()
+        execFile('shutdown', ['/s', '/t', '30'], (err) => onShutdownDone(err, 'shutdown'))
       } else if (kind === 'hibernate') {
-        execFile('shutdown', ['/h'], onShutdownDone)
+        execFile('shutdown', ['/h'], (err) => onShutdownDone(err, 'hibernate'))
       }
     } catch (err) {
       logLine('[power] 执行失败 ' + err.message)
@@ -678,6 +770,23 @@ function runPowerAction() {
 }
 
 let powerPending = null
+/**
+ * shutdown.exe 的回调。
+ * 本地版此前**从未定义过这个函数**（v2.8.13 起只有调用），关机/休眠一触发就
+ * 抛 ReferenceError —— 命令根本没发出去，用户看到「即将关机」后什么都没发生。
+ */
+function onShutdownDone(err, kind) {
+  if (!err) return
+  logLine('[power] shutdown 命令失败 ' + (err.message || String(err)))
+  systemShutdownPending = false
+  if (systemShutdownTimer) { clearTimeout(systemShutdownTimer); systemShutdownTimer = null }
+  refreshTrayMenu()
+  if (kind) {
+    const what = kind === 'hibernate' ? '休眠' : '关机'
+    sendToRenderer('power-action', { kind: null, error: '系统拒绝执行' + what + '命令（可能被组策略禁用）' })
+  }
+}
+
 function cancelPowerAction() {
   // v3.3.13：15 秒反悔窗口结束后系统关机还有 30 秒可取消，两种状态都要能取消
   if (!powerPending && !systemShutdownPending) return false
@@ -696,7 +805,12 @@ function cancelPowerAction() {
  * 勾选「不再提示」后记住这次的选择（可在托盘菜单改回来）；
  * 不勾则只对本次生效，设置不变。弹窗失败时退回旧行为（按 closeToTray 设置执行）。
  */
+/** 关窗询问是否已经在弹（连点 × / 托盘退出同时触发时只能有一个对话框） */
+let closeAskBusy = false
+
 async function handleCloseAsk() {
+  if (closeAskBusy) return
+  closeAskBusy = true
   try {
     const r = await dialog.showMessageBox(win, {
       type: 'question',
@@ -710,7 +824,10 @@ async function handleCloseAsk() {
       checkboxChecked: false,
       noLink: true
     })
+    // v3.3.17：弹窗是异步模态，期间窗口可能已经被销毁（托盘退出 / 上一次 quit）。
+    // 对已销毁的 BrowserWindow 调 hide()/close() 会抛 "Object has been destroyed"。
     if (r.response === 2) return
+    if (!win || win.isDestroyed()) return
     const toTray = r.response === 0
     if (r.checkboxChecked) {
       store.patch({ settings: { closeToTray: toTray, closeAsk: false } })
@@ -724,16 +841,36 @@ async function handleCloseAsk() {
     win.close()
   } catch (err) {
     logLine('[close] 询问弹窗失败 ' + err.message + '，按托盘设置执行')
-    if (store.get().settings.closeToTray) win.hide()
-    else { quitting = true; win.close() }
+    // catch 里同样要判窗口存活，且异常不能再从 catch 逸出
+    if (win && !win.isDestroyed()) {
+      if (store.get().settings.closeToTray) win.hide()
+      else { quitting = true; win.close() }
+    }
+  } finally {
+    closeAskBusy = false
   }
+}
+
+/**
+ * 显示主窗口。窗口已被销毁（退出清理的 20 秒窗口期内 window-all-closed 已触发）
+ * 时重建一个 —— 以前只判 `if (win)`，销毁后点托盘会在原生回调里抛
+ * "Object has been destroyed"，之后菜单就再也没反应了。
+ */
+function showMainWindow() {
+  if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    return
+  }
+  try { createWindow() } catch (e) { logLine('[win] 重建主窗口失败 ' + e.message) }
 }
 
 function refreshTrayMenu() {
   if (!tray) return
   try {
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: '显示主窗口', click: () => { if (win) { win.show(); win.focus() } } },
+      { label: '显示主窗口', click: () => showMainWindow() },
       {
         label: '迷你模式',
         type: 'checkbox',
@@ -816,10 +953,14 @@ const WATCH_EXTS = new Set([
 let watchers = []
 let watchTimer = null
 
+/** watcher 失效后的重挂定时器（见 startWatching 的 error 回调） */
+let watchRebuildTimer = null
+
 function stopWatching() {
-  for (const w of watchers) { try { w.close() } catch {} }
+  for (const w of watchers) { try { w.close() } catch (e) { /* 已关 */ } }
   watchers = []
   if (watchTimer) { clearTimeout(watchTimer); watchTimer = null }
+  if (watchRebuildTimer) { clearTimeout(watchRebuildTimer); watchRebuildTimer = null }
 }
 
 /**
@@ -839,7 +980,23 @@ function startWatching() {
         if (!WATCH_EXTS.has(path.extname(String(filename)).toLowerCase())) return
         scheduleWatchScan()
       })
-      w.on('error', (err) => logLine('WARN watch 错误', dir, err.message))
+      // v3.3.17：FSWatcher 收到 error（目录被删/改名、网络盘掉线、句柄耗尽）后就永久失效，
+      // 但以前它仍留在 watchers 里、也没有任何重建路径 —— 用户拔插移动硬盘或改名再改回，
+      // 之后所有新增曲目都不再自动入库，只剩手点扫描。
+      w.on('error', (err) => {
+        logLine('WARN watch 错误', dir, err.message)
+        try { w.close() } catch (e) { /* 已关 */ }
+        const i = watchers.indexOf(w)
+        if (i >= 0) watchers.splice(i, 1)
+        // 30 秒后整体重挂一次（目录可能还在恢复中，失败就等下一次 error 再触发）
+        if (!watchRebuildTimer) {
+          watchRebuildTimer = setTimeout(() => {
+            watchRebuildTimer = null
+            try { startWatching() } catch (e) { /* 忽略 */ }
+          }, 30000)
+          if (watchRebuildTimer.unref) watchRebuildTimer.unref()
+        }
+      })
       watchers.push(w)
     } catch (err) {
       logLine('WARN watch 启动失败（目录不存在或无权限）', dir, err.message)
@@ -948,15 +1105,32 @@ function sendToRenderer(channel, payload) {
 
 /** 只盯当前这首的 lrc：外面改了立刻通知渲染层重读，切歌时自动换监听 */
 let lyricWatch = []
+/** 当前在看的歌词文件（rename 后用它重建监视） */
+let currentLyricFiles = []
+
 function watchLyricFile(files, trackId) {
   for (const w of lyricWatch) { try { w.close() } catch (err) { /* 忽略 */ } }
   lyricWatch = []
   const list = (Array.isArray(files) ? files : [files]).filter(Boolean)
+  currentLyricFiles = list.slice()
   if (!list.length) return
   for (const f of list) {
     try {
-      const w = fs.watch(f, { persistent: false }, () => {
+      let closed = false
+      const w = fs.watch(f, { persistent: false }, (evt) => {
         sendToRenderer('lyric:changed', trackId)
+        // v3.3.17：多数编辑器保存 .lrc 是「写临时文件 + rename 覆盖」。
+        // Windows 上旧 watcher 钉的是 inode，rename 后最多收到一次事件就永久静默 ——
+        // 以前没有任何重建路径，用户在外面改完歌词界面就不再刷新。
+        if (evt === 'rename' && !closed) {
+          closed = true
+          try { w.close() } catch (e) { /* 已关 */ }
+          const i = lyricWatch.indexOf(w)
+          if (i >= 0) lyricWatch.splice(i, 1)
+          setTimeout(() => {
+            if (currentLyricFiles.includes(f)) watchLyricFile(currentLyricFiles, trackId)
+          }, 800).unref?.()
+        }
       })
       w.on('error', () => { /* 文件被删/改名，下次读的时候重建 */ })
       lyricWatch.push(w)
@@ -1407,6 +1581,36 @@ function stopDeviceWatch() {
 
 /* ---------------- IPC ---------------- */
 
+/** 已知数值键的取值范围（防止 volume=5 / fadeMs=-1000 这类值直接落盘） */
+const SETTING_RANGES = {
+  volume: [0, 1],
+  fadeMs: [0, 3000],
+  lyricFontSize: [8, 200],
+  lyricOffset: [-60, 60]
+}
+/** 数值 map（lyricOffsetById / trackGains / manualGains / resumePos）的条数上限 */
+const SETTING_MAP_MAX = 5000
+
+function clampSetting(key, v) {
+  const r = SETTING_RANGES[key]
+  if (!r) return v
+  return Math.min(r[1], Math.max(r[0], v))
+}
+
+/** 递归清洗自由结构（窗口 bounds / desktopLyric 等）：只做去污染键，不改值 */
+function sanitizePlainValue(v) {
+  if (Array.isArray(v)) return v.map(sanitizePlainValue)
+  if (v && typeof v === 'object') {
+    const o = {}
+    for (const [k, x] of Object.entries(v)) {
+      if (FORBIDDEN_SETTING_KEYS.has(k)) continue
+      o[k] = sanitizePlainValue(x)
+    }
+    return o
+  }
+  return v
+}
+
 function sanitizeSettingsPatch(patch, template = DEFAULT_SETTINGS) {
   const out = {}
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return out
@@ -1425,9 +1629,12 @@ function sanitizeSettingsPatch(patch, template = DEFAULT_SETTINGS) {
       if (tvKeys.length === 0) {
         // 空对象模板 = 数值 map（lyricOffsetById / trackGains / manualGains / resumePos）
         const clean = {}
+        let n = 0
         for (const [mk, mv] of Object.entries(v)) {
           if (FORBIDDEN_SETTING_KEYS.has(mk)) continue
-          if (typeof mv === 'number' && Number.isFinite(mv)) clean[mk] = mv
+          // v3.3.17：数值 map 也要设条数上限，否则一次 patch 能塞进十万条
+          if (n >= SETTING_MAP_MAX) break
+          if (typeof mv === 'number' && Number.isFinite(mv)) { clean[mk] = mv; n++ }
         }
         out[k] = clean
       } else {
@@ -1437,7 +1644,7 @@ function sanitizeSettingsPatch(patch, template = DEFAULT_SETTINGS) {
       // 模板为 null = 自由结构（窗口 bounds 等），只做递归去污染键
       out[k] = sanitizePlainValue(v)
     } else if (typeof tv === 'number') {
-      if (typeof v === 'number' && Number.isFinite(v)) out[k] = v
+      if (typeof v === 'number' && Number.isFinite(v)) out[k] = clampSetting(k, v)
     } else if (typeof tv === 'boolean') {
       if (typeof v === 'boolean') out[k] = v
     } else if (typeof tv === 'string') {
@@ -1859,7 +2066,8 @@ function registerMpvIpc() {
     if (mpvEngine) mpvEngine.setAbLoop(a, b)
     return true
   })
-  ipcMain.handle('mpv:quit', () => { stopMpv(); return true })
+  // v3.3.17：必须等进程真的退出，否则渲染层紧接着的 mpv:start 会与旧进程抢设备
+  ipcMain.handle('mpv:quit', async () => { await stopMpv().catch(() => {}); return true })
   // v2.8.6：完整的「释放独占」流程 —— 等进程真退出 + 扫残留孤儿 + 实测声卡
   ipcMain.handle('mpv:release', async () => {
     try {
@@ -1984,14 +2192,26 @@ function registerDiagIpc() {
   })
 
   // 解析失败清单（完整路径 + 原因；文件是否还在另行核对）
-  ipcMain.handle('diag:failures', () => {
-    const list = library.listFailures().map((f) => ({
-      ...f,
-      exists: (() => { try { return fs.existsSync(f.path) } catch { return false } })()
-    }))
+  ipcMain.handle('diag:failures', async () => {
+    const raw = library.listFailures()
+    // v3.3.17：改异步 + 限流并发。以前逐条同步 existsSync，几千条失败记录
+    // 里混着已掉线的网络盘路径时，单次调用能阻塞主进程数秒
+    const limit = 16
+    const out = new Array(raw.length)
+    let cursor = 0
+    const worker = async () => {
+      for (;;) {
+        const i = cursor++
+        if (i >= raw.length) return
+        let exists = false
+        try { exists = !!(await fsp.stat(raw[i].path)) } catch (e) { exists = false }
+        out[i] = { ...raw[i], exists }
+      }
+    }
+    await Promise.all(new Array(Math.min(limit, raw.length)).fill(0).map(worker))
     const counts = { parse: 0, metadata: 0, stat: 0, duration: 0 }
-    for (const f of list) counts[f.stage] = (counts[f.stage] || 0) + 1
-    return { ok: true, failures: list, counts }
+    for (const f of out) counts[f.stage] = (counts[f.stage] || 0) + 1
+    return { ok: true, failures: out, counts }
   })
 
   // mpv 实时日志：按 seq 增量取，避免每次重画整个列表
@@ -2021,8 +2241,22 @@ function registerDiagIpc() {
       } finally {
         await fd.close()
       }
+      // v3.3.17：从文件中间切会切在多字节字符上，丢掉首个换行之前的残行
+      if (readBytes < st.size) {
+        const nl = text.indexOf('\n')
+        text = nl >= 0 ? text.slice(nl + 1) : text
+      }
       const lines = text.split(/\r?\n/).filter((l) => l.length)
-      return { ok: true, lines: lines.slice(-n), file: LOG_FILE, size: st.size, truncated: lines.length > n }
+      // truncated 必须同时看「文件还有更多内容」，否则大日志会被当成完整内容
+      const fileHasMore = readBytes < st.size
+      return {
+        ok: true,
+        lines: lines.slice(-n),
+        file: LOG_FILE,
+        size: st.size,
+        readBytes,
+        truncated: fileHasMore || lines.length > n
+      }
     } catch (err) {
       return { ok: false, error: err.message, lines: [], file: LOG_FILE }
     }
