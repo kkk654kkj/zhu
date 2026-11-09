@@ -229,7 +229,30 @@ class MpvAudio {
       }
       case 'format': {
         this.format = e.params || null
+        // v3.3.11：独占播放中参数回来了 = 看门狗夺回成功（或流自愈），解除冻结
+        if (e.params && this._aoLost) {
+          this._aoLost = false
+          this._paused = false
+          this._posStamp = performance.now()
+        }
         this._emit('formatchange')
+        break
+      }
+      case 'ao-lost': {
+        // v3.3.11：独占输出被系统作废（启动大型游戏改设备配置等）——
+        // mpv 还在解码，进度条会照走但没有声音。这里冻结进度插值，如实反映「没在出声」；
+        // 引擎层看门狗会在 2.5 秒后自动重启夺回，恢复后 format 事件解除冻结
+        this._aoLost = true
+        this._paused = true
+        this.lastError = e.message || '独占输出中断'
+        this._emit('pause')
+        break
+      }
+      case 'exclusive-lost': {
+        // 连续 3 次夺回失败：设备真被别的程序占着（游戏也开了独占）。
+        // 不发 error（error 会触发自动跳曲），只记录并交给 app.js 的提示
+        this._aoLost = false
+        this.lastError = e.message || '独占设备被占用'
         break
       }
       case 'volume': {

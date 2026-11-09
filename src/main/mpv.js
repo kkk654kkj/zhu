@@ -48,6 +48,16 @@ class MpvEngine {
     // 而那个进程已经没人管了 —— 变成孤儿独占进程：声卡一直被占，别人全都没声音，
     // 而播放器自己还在放（用户看到的正是「关了独占，别人还是没声音，播放器还能继续播放」）。
     this._gen = 0
+    // v3.3.11：独占输出看门狗状态。
+    // _aoLostAt：audio-out-params 变 null 的时刻（独占流被系统踢掉的直接证据）；
+    // _paused/_idle：暂停/空闲时 AO 释放是正常的，不看门狗；
+    // _recoverAttempts/_lastRecoverAt：自动夺回的退避与冷却。
+    this._aoLostAt = 0
+    this._paused = true
+    this._idle = true
+    this._recoverAttempts = 0
+    this._lastRecoverAt = 0
+    this._wdTimer = null
     // v2.8.6 / v3.3.6：「已释放」标记。
     // stop()（= 关独占 / 退出）之后，这个引擎对象就不要再起来了 ——
     // 否则正在进行的 restart() 会在释放之后又起一个新的独占 mpv，
@@ -129,7 +139,7 @@ class MpvEngine {
       })
     }
     proc.on('exit', (code) => {
-      // v2.8.1 关键修复（联网版同步修复）：切设备/回退共享时会 kill 旧进程再起新的，
+      // v3.3.1 关键修复：切设备/回退共享时会 kill 旧进程再起新的，
       // 而旧进程的 exit 事件往往晚于新进程 spawn 才到。以前这里无条件 _teardown()，
       // 会把**新引擎**的 proc/ready 一起清空 —— 于是引擎还在放歌，主进程却以为它没运行：
       // 暂停/停止/关独占全部变成空操作，音乐停不下来；再切设备也因为 !running 直接跳过。
@@ -160,6 +170,14 @@ class MpvEngine {
     this.ready = true
     this._observe()
     this._flush()
+    // v3.3.11：独占输出看门狗（每秒检查一次，见 _wdTick）
+    this._aoLostAt = 0
+    this._recoverAttempts = 0
+    this._paused = true
+    this._idle = true
+    if (this._wdTimer) clearInterval(this._wdTimer)
+    this._wdTimer = setInterval(() => this._wdTick(), 1000)
+    if (this._wdTimer.unref) this._wdTimer.unref()
     // 拿不到音频参数就当没起来（设备被占用等）
     return { ok: true, exclusive: this.exclusive }
   }
@@ -271,12 +289,20 @@ class MpvEngine {
           this.onEvent({ type: 'duration', duration: typeof data === 'number' ? data : 0 })
           break
         case 'pause':
+          this._paused = data !== false
+          if (this._paused) this._aoLostAt = 0   // 暂停时 AO 释放是正常行为
           this.onEvent({ type: 'pause', paused: data !== false })
           break
         case 'eof-reached':
           if (data === true) this.onEvent({ type: 'eof' })
           break
         case 'audio-out-params':
+          // v3.3.11：独占播放中 params 变 null = 输出流被踢（游戏启动改设备配置、
+          // 系统切换默认设备等）。记下时刻交给看门狗；恢复非 null 即解除
+          if (this.exclusive) {
+            if (!data && !this._idle) this._aoLostAt = Date.now()
+            else if (data) { this._aoLostAt = 0; this._recoverAttempts = 0 }
+          }
           this.onEvent({ type: 'format', params: data || null })
           break
         case 'volume':
@@ -286,12 +312,15 @@ class MpvEngine {
           this.onEvent({ type: 'mute', muted: data === true })
           break
         case 'idle-active':
+          this._idle = data === true
+          if (this._idle) this._aoLostAt = 0
           this.onEvent({ type: 'idle', idle: data === true })
           break
       }
       return
     }
     if (msg.event === 'file-loaded') {
+      this._idle = false
       this.onEvent({ type: 'loaded' })
       return
     }
@@ -327,6 +356,7 @@ class MpvEngine {
   load(filePath, { paused = false } = {}) {
     this._lastFile = filePath
     this._lastPos = 0
+    this._idle = false
     if (paused) this._send(['set_property', 'pause', true])
     this._send(['loadfile', filePath, 'replace'])
   }
@@ -422,6 +452,8 @@ class MpvEngine {
   }
 
   kill() {
+    // v3.3.11：清掉看门狗
+    if (this._wdTimer) { clearInterval(this._wdTimer); this._wdTimer = null }
     // 代次 +1：让所有「在途的 start()」知道自己过期了（见构造函数注释）。
     // 没有这一步，kill 之后仍可能有 start() 接着 spawn 出没人管的孤儿独占进程。
     this._gen++
@@ -487,9 +519,49 @@ class MpvEngine {
 
   _teardown() {
     this.ready = false
+    if (this._wdTimer) { clearInterval(this._wdTimer); this._wdTimer = null }
     this._rejectPending('mpv 进程退出')
     this.sock = null
     this.proc = null
+  }
+
+  /**
+   * v3.3.11：独占输出看门狗。
+   *
+   * 场景：独占播放中用户启动大型游戏（如极限竞速：地平线4），游戏初始化音频时
+   * 改动设备配置/默认设备，WASAPI 独占流被系统作废（AUDCLNT_E_DEVICE_INVALIDATED）。
+   * 此时 mpv 还在解码、进度照走，但一点声音都没有；切歌时 AO 重新初始化又会
+   * 撞上被游戏占用的设备，于是「关掉再开独占」才能恢复——而且下一首又哑。
+   *
+   * 判据：非暂停、非空闲、有文件，但 audio-out-params 持续 null ≥ 2.5 秒。
+   * 动作：自动重启引擎夺回独占（restart 自带续播：等旧进程真退出 + file-loaded 再 seek）。
+   * 防打地鼠：两次恢复至少间隔 12 秒；连续 3 次失败就停手并上报 exclusive-lost
+   * （说明设备真被别的程序长期占用，比如游戏也开了独占——这时该用户自己决定）。
+   * 参数恢复非 null（或暂停/空闲）会清零计数。
+   */
+  _wdTick() {
+    if (!this.ready || !this.exclusive || this._disposed) return
+    if (this._idle || this._paused || !this._lastFile) { this._aoLostAt = 0; return }
+    if (!this._aoLostAt) return
+    const lostFor = Date.now() - this._aoLostAt
+    if (lostFor < 2500) return
+    if (Date.now() - this._lastRecoverAt < 12000) return
+    if (this._recoverAttempts >= 3) return
+    this._lastRecoverAt = Date.now()
+    this._recoverAttempts++
+    this.onEvent({ type: 'ao-lost', attempt: this._recoverAttempts,
+      message: '独占输出已中断 ' + Math.round(lostFor / 1000) + ' 秒，正在自动重启引擎夺回…' })
+    this.restart({ exclusive: true })
+      .then((r) => {
+        if (r && r.ok) {
+          this._recoverAttempts = 0
+          this.onEvent({ type: 'ao-recovered' })
+        } else if (this._recoverAttempts >= 3) {
+          this.onEvent({ type: 'exclusive-lost',
+            message: '自动夺回独占失败（' + ((r && r.error) || '设备被占用') + '）。游戏可能在用声卡，稍后会自动再试' })
+        }
+      })
+      .catch(() => {})
   }
 }
 

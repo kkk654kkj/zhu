@@ -187,6 +187,13 @@ async function boot() {
   window.api.onScanProgress(onScanProgress)
   window.api.onScanDone(onScanDone)
   window.api.onShortcut((action) => handleShortcut(action))
+  // v2.8.10：独占输出被系统踢掉/自动夺回的用户提示
+  window.api.onMpvEvent((e) => {
+    if (!e) return
+    if (e.type === 'ao-lost') toast('独占输出被系统中断（可能是游戏启动改了音频设备），正在自动恢复…', 5000)
+    else if (e.type === 'ao-recovered') toast('独占输出已恢复', 2500)
+    else if (e.type === 'exclusive-lost') toast(e.message || '自动夺回独占失败：设备被其他程序占用', 6000)
+  })
   // v2.8.9：第二实例带来的关联文件 —— 单文件导入尚未实现，先给出可见反馈
   window.api.onOpenFiles(({ paths }) => {
     toast('收到 ' + paths.length + ' 个文件：单文件导入开发中，请先把文件所在文件夹加进曲库', 6000)
