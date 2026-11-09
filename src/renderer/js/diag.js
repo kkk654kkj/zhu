@@ -62,7 +62,7 @@ const Diag = {
 
     this.el('btnDiagCopy').addEventListener('click', () => this.copy())
     this.el('btnDiagOpenLog').addEventListener('click', () => window.api.diagOpenLog())
-    // v2.8.6：声卡占用自查 + 一键释放独占。
+    // v3.3.6 / v2.8.6：声卡占用自查 + 一键释放独占。
     // 用户遇到「开了独占再关掉，别的软件还是没声音」时，在诊断面板里点一下就知道
     // 声卡到底被谁占着，不用去翻任务管理器。
     this.el('btnDiagProbeDevice').addEventListener('click', async () => {
@@ -223,12 +223,14 @@ const Diag = {
   async pollLive(reset) {
     // v3.3.7：加 in-flight 防护 —— IPC 偶发慢于 1.2s 时两次请求并行，
     // 同一批日志行会入列两次（「复制」会输出重复行）
-    if (this._polling) return
+    // v3.3.13：reset 要先于 in-flight 判断，否则轮询中点「刷新」毫无反应
     if (reset) {
       this.liveLines = []
       this.lastSeq = 0
       this._renderedSeq = 0
+      try { this.el('diagLog').innerHTML = '' } catch (e) { /* 未挂载 */ }
     }
+    if (this._polling) return
     this._polling = true
     try {
       const r = await window.api.diagMpvLog(this.lastSeq).catch(() => null)

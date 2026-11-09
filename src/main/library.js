@@ -510,7 +510,13 @@ async function mapLimit(items, limit, fn) {
     while (true) {
       const i = cursor++
       if (i >= items.length) return
-      results[i] = await fn(items[i], i)
+      try {
+        results[i] = await fn(items[i], i)
+      } catch (err) {
+        // v3.3.13：单个文件解析异常不能让整轮扫描的落盘被跳过
+        console.error('[library] 解析任务异常:', err && err.message)
+        results[i] = null
+      }
     }
   })
   await Promise.all(workers)
@@ -568,7 +574,8 @@ class Library {
   async persistFailures() {
     try {
       await fsp.mkdir(path.dirname(this.failuresFile), { recursive: true })
-      const tmp = this.failuresFile + '.tmp'
+      // v3.3.13：固定 tmp 会被「扫描结束」与「清空失败记录」并发覆盖
+      const tmp = this.failuresFile + '.tmp-' + process.pid + '-' + Date.now().toString(36)
       await fsp.writeFile(tmp, JSON.stringify({ v: 1, failures: this.listFailures() }), 'utf8')
       await fsp.rename(tmp, this.failuresFile)
     } catch (err) {
@@ -687,7 +694,7 @@ class Library {
   async persist() {
     try {
       await fsp.mkdir(path.dirname(this.cacheFile), { recursive: true })
-      const tmp = this.cacheFile + '.tmp'
+      const tmp = this.cacheFile + '.tmp-' + process.pid + '-' + Date.now().toString(36)
       // v2.8.7：写完先 fsync 再 rename。原子写（tmp+rename）只防「写一半」，
       // 不防「rename 生效了但内容还在页缓存里没落盘」的断电丢数据
       const fh = await fsp.open(tmp, 'w')

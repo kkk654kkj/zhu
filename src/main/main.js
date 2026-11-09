@@ -175,6 +175,18 @@ function mimeFor(p) {
   return AUDIO_MIME[ext] || MIME_BY_EXT[ext] || 'application/octet-stream'
 }
 
+/** v2.8.12：媒体路径白名单（模块作用域，协议层与 IPC 共用） */
+function isAllowedMediaPath(p) {
+  const abs = path.resolve(String(p || '')).toLowerCase()
+  const roots = [
+    ...(store.get().settings.musicDirs || []),
+    DATA_DIR
+  ]
+    .filter((r) => r && String(r).trim())
+    .map((r) => path.resolve(r).toLowerCase().replace(/[\\/]+$/, '') + path.sep)
+  return roots.some((r) => abs.startsWith(r) || (abs + path.sep).startsWith(r))
+}
+
 /* ---------------- 自定义协议：支持 Range 的本地文件读取 ---------------- */
 
 function registerFileProtocol() {
@@ -191,6 +203,7 @@ function registerFileProtocol() {
       if (/^\/[A-Za-z]:\//.test(filePath)) filePath = filePath.slice(1)
       if (process.platform !== 'win32' && !filePath.startsWith('/')) filePath = '/' + filePath
       filePath = path.normalize(filePath)
+      if (!isAllowedMediaPath(filePath)) return new Response('forbidden', { status: 403 })
 
       const stat = await fsp.stat(filePath)
       if (!stat.isFile()) return new Response('not a file', { status: 404 })
@@ -240,7 +253,7 @@ function registerFileProtocol() {
         }
       })
     } catch (err) {
-      return new Response('not found: ' + err.message, { status: 404 })
+      return new Response('not found', { status: 404 })
     }
   })
 }
@@ -267,7 +280,7 @@ function registerCoverProtocol() {
         }
       })
     } catch (err) {
-      return new Response('cover error: ' + err.message, { status: 500 })
+      return new Response('cover error', { status: 500 })
     }
   })
 }
@@ -356,14 +369,16 @@ function clampToWorkArea(b) {
 function waitWindowEvent(win, ev, timeout = 500) {
   return new Promise((resolve) => {
     let done = false
+    let timer = null
     const fin = () => {
       if (done) return
       done = true
+      if (timer) clearTimeout(timer)
       try { win.removeListener(ev, fin) } catch {}
       resolve()
     }
-    win.once(ev, fin)
-    setTimeout(fin, timeout)
+    win.on(ev, fin)
+    timer = setTimeout(fin, timeout)
   })
 }
 
@@ -444,11 +459,12 @@ function createWindow() {
   const x = miniActive ? (Number.isFinite(mb.x) ? mb.x : bounds.x) : bounds.x
   const y = miniActive ? (Number.isFinite(mb.y) ? mb.y : bounds.y) : bounds.y
 
+  const placed = clampToWorkArea({ width, height, x, y })
   win = new BrowserWindow({
-    width,
-    height,
-    x,
-    y,
+    width: placed.width,
+    height: placed.height,
+    x: placed.x,
+    y: placed.y,
     minWidth: miniActive ? MINI_MIN_W : FULL_MIN_W,
     minHeight: miniActive ? MINI_MIN_H : FULL_MIN_H,
     maximizable: !miniActive,
@@ -551,7 +567,7 @@ function pushSleepState() {
 /** minutes=0 表示关闭。到点只做一件事：让渲染层淡出并暂停。 */
 function setSleepTimer(minutes) {
   if (sleepTimerId) { clearTimeout(sleepTimerId); sleepTimerId = null }
-  sleepMinutes = Number(minutes) || 0
+  sleepMinutes = Math.min(24 * 60, Math.max(0, Math.floor(Number(minutes) || 0)))
   sleepEndsAt = 0
   if (sleepMinutes > 0) {
     logLine('[sleep] 定时 ' + sleepMinutes + ' 分钟')
@@ -592,7 +608,6 @@ function runPowerAction() {
   const kind = powerAfterQueue
   powerAfterQueue = 'off'
   store.patch({ settings: { powerAfterQueue: 'off' } })
-  refreshTrayMenu()
   sendToRenderer('power-after-queue', 'off')
   sendToRenderer('power-action', { kind, delay: 15 })
   logLine('[power] 队列结束，执行 ' + kind + '（15 秒内可在托盘取消）')
@@ -603,6 +618,7 @@ function runPowerAction() {
   if (powerPending) { clearTimeout(powerPending); powerPending = null }
   powerPending = setTimeout(() => {
     powerPending = null
+    refreshTrayMenu()
     if (kind === 'quit') { quitting = true; app.quit(); return }
     try {
       if (kind === 'shutdown') execFile('shutdown', ['/s', '/t', '30'])
@@ -611,6 +627,7 @@ function runPowerAction() {
       logLine('[power] 执行失败 ' + err.message)
     }
   }, 15000)
+  refreshTrayMenu()   // v2.8.12：赋值之后重建，「取消关机」菜单项才真的出现
 }
 
 let powerPending = null
@@ -1584,20 +1601,6 @@ function registerIpc() {
     })
     return res.canceled ? [] : res.filePaths
   })
-  // v2.8.8：路径收口 —— 只允许曲库目录 / 数据目录之内的文件
-  function isAllowedMediaPath(p) {
-    const abs = path.resolve(String(p || '')).toLowerCase()
-    // v2.8.9：根路径先把尾分隔符归一化再拼 sep —— 盘符根目录（D:/）resolve 后
-    // 自带尾分隔符，直接拼会变双分隔符，曲库选成盘根时所有文件都被拒。
-    // 空目录项也过滤（resolve('')=cwd，会放行任意文件）
-    const roots = [
-      ...(store.get().settings.musicDirs || []),
-      DATA_DIR
-    ]
-      .filter((r) => r && String(r).trim())
-      .map((r) => path.resolve(r).toLowerCase().replace(/[\\/]+$/, '') + path.sep)
-    return roots.some((r) => abs.startsWith(r) || (abs + path.sep).startsWith(r))
-  }
   ipcMain.handle('shell:showItem', (e, filePath) => {
     if (filePath && fs.existsSync(filePath) && isAllowedMediaPath(filePath)) shell.showItemInFolder(filePath)
   })
@@ -1975,7 +1978,10 @@ if (gotLock) cleanChromiumCache()
     // 单文件导入尚未实现，先转给渲染层给出可见反馈
     const media = (argv || [])
       .map(String)
-      .filter((a) => /\.(mp3|flac|m4a|wav|ogg|opus|dsf|dff|aac|wma|ape|alac|m3u|m3u8)$/i.test(a) && fs.existsSync(a))
+      .filter((a) => {
+        if (a.length > 240 || a.startsWith('\\\\') || !/\.(mp3|flac|m4a|wav|ogg|opus|dsf|dff|aac|wma|ape|alac|m3u|m3u8)$/i.test(a)) return false
+        try { return fs.statSync(a).isFile() } catch (e) { return false }
+      })
     if (media.length) sendToRenderer('open-files', { paths: media })
   })
 
@@ -2058,19 +2064,25 @@ if (gotLock) cleanChromiumCache()
     quitting = true
     stopWatching()
     const hadEngine = !!mpvEngine
+    const finishQuit = () => {
+      if (quitCleanupDone) return
+      quitCleanupDone = true
+      try { if (store) store.flush() } catch (err) { /* 忽略 */ }
+      try { if (tray) tray.destroy() } catch (err) { /* 忽略 */ }
+      app.quit()
+    }
+    const quitGuard = setTimeout(finishQuit, 6000)
     try {
       stopMpv().catch(() => {}).finally(() => {
         (async () => {
           if (hadEngine) { try { await sweepOurMpv() } catch (err) { /* 忽略 */ } }
-          try { if (store) store.flush() } catch (err) { /* 忽略 */ }
-          quitCleanupDone = true
-          app.quit()
+          clearTimeout(quitGuard)
+          finishQuit()
         })()
       })
     } catch (err) {
-      // v2.8.8：stopMpv 若同步抛错也不能把退出卡死
-      quitCleanupDone = true
-      app.quit()
+      clearTimeout(quitGuard)
+      finishQuit()
     }
   })
 

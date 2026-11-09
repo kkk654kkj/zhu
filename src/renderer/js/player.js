@@ -121,12 +121,11 @@ class Player extends Emitter {
     if (from === to) return
     const len = this.tracks.length
     if (from < 0 || to < 0 || from >= len || to >= len) return
-    const curId = this.current ? this.current.id : null
+    const cur = this.current
     const [item] = this.tracks.splice(from, 1)
     this.tracks.splice(to, 0, item)
-    // 不能用「index 加减 delta」推算：拖过当前项时方向会算反。直接按 id 重新定位。
-    if (curId) {
-      const idx = this.tracks.findIndex((t) => t.id === curId)
+    if (cur) {
+      const idx = this.tracks.indexOf(cur)
       if (idx >= 0) this.index = idx
     }
     this._buildShufflePool()
@@ -271,7 +270,8 @@ class Player extends Emitter {
   }
 
   _onEnded() {
-    if (this._endingHandled) return
+    if (this._endingHandled || Date.now() - (this._lastEndedAt || 0) < 700) return
+    this._lastEndedAt = Date.now()
     this._endingHandled = true
     this.emit('ended', this.current)
     if (this.mode === 'single') {
@@ -283,6 +283,7 @@ class Player extends Emitter {
       return
     }
     if (this.mode === 'order' && this.index >= this.tracks.length - 1) {
+      this._endingHandled = false
       this.emit('state-change', false)
       // v2.1：整队播完（顺序模式停在最后一首）——主进程据此决定要不要关机/休眠
       this.emit('queue-end')
@@ -295,6 +296,7 @@ class Player extends Emitter {
 
   seek(sec) {
     const dur = this.audio.duration || 0
+    if (!Number.isFinite(sec)) sec = 0
     if (!dur) { this._pendingSeek = sec; return }
     this.audio.currentTime = Math.max(0, Math.min(sec, dur - 0.05))
     this.emit('time', this.audio.currentTime, dur)
@@ -309,6 +311,7 @@ class Player extends Emitter {
   /* ---------- 音量 / 淡入淡出 ---------- */
 
   setVolume(v, silent = false) {
+    if (!Number.isFinite(v)) v = this.volume
     this.volume = Math.max(0, Math.min(1, v))
     // 淡入/淡出进行中都不要直写 audio.volume：渐变 tick 会按自己的曲线覆盖直写
     // （淡入期直写表现为「拖音量弹回去」，淡出期直写表现为「音量先跳新值再被拉回 0」）
@@ -380,9 +383,9 @@ class Player extends Emitter {
   }
 
   _fadeOut(done) {
-    if (this.audio.noFade || this.muted || !this.fadeMs) { done && done(); return }
+    if (this.audio.noFade || this.muted || !this.fadeMs) { this._clearFade(); done && done(); return }
     const from = this.audio.volume
-    if (from <= 0.01) { done && done(); return }
+    if (from <= 0.01) { this._clearFade(); done && done(); return }
     this._fadeTo(0, 'out')
     // 延时器必须存下来：用户点暂停后 350ms 内又点播放时，_fadeIn() 会调 _clearFade()
     // 把它取消掉，否则会出现「点了播放，过一会儿自己停了」

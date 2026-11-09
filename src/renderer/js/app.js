@@ -188,11 +188,19 @@ async function boot() {
   window.api.onScanDone(onScanDone)
   window.api.onShortcut((action) => handleShortcut(action))
   // v2.8.10：独占输出被系统踢掉/自动夺回的用户提示
+  // v2.8.12：同类 30 秒内只提示一次
+  const aoToastAt = {}
+  const aoToast = (type, msg, ms) => {
+    const now = Date.now()
+    if (aoToastAt[type] && now - aoToastAt[type] < 30000) return
+    aoToastAt[type] = now
+    toast(msg, ms)
+  }
   window.api.onMpvEvent((e) => {
     if (!e) return
-    if (e.type === 'ao-lost') toast('独占输出被系统中断（可能是游戏启动改了音频设备），正在自动恢复…', 5000)
-    else if (e.type === 'ao-recovered') toast('独占输出已恢复', 2500)
-    else if (e.type === 'exclusive-lost') toast(e.message || '自动夺回独占失败：设备被其他程序占用', 6000)
+    if (e.type === 'ao-lost') aoToast('ao-lost', '独占输出被系统中断（可能是游戏启动改了音频设备），正在自动恢复…', 5000)
+    else if (e.type === 'ao-recovered') aoToast('ao-recovered', '独占输出已恢复', 2500)
+    else if (e.type === 'exclusive-lost') aoToast('exclusive-lost', e.message || '自动夺回独占失败：设备被其他程序占用', 6000)
   })
   // v2.8.9：第二实例带来的关联文件 —— 单文件导入尚未实现，先给出可见反馈
   window.api.onOpenFiles(({ paths }) => {

@@ -115,22 +115,25 @@ class Store {
   }
 
   _flush() {
+    let fd = null
+    let wrote = false
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true })
       const tmp = this.file + '.tmp'
-      // v3.3.10：写完 fsync 再 rename —— 原子写（tmp+rename）只防「写一半」，
-      // 不防掉电时内容还在页缓存里没落盘（rename 生效但文件是空的/旧的）
-      const fd = fs.openSync(tmp, 'w')
-      try {
-        fs.writeSync(fd, JSON.stringify(this.data, null, 2), null, 'utf8')
-        fs.fsyncSync(fd)
-      } finally {
-        fs.closeSync(fd)
-      }
+      fd = fs.openSync(tmp, 'w')
+      // v3.3.13：writeSync 可能短写；writeFileSync(fd,...) 会循环写满
+      fs.writeFileSync(fd, JSON.stringify(this.data, null, 2), 'utf8')
+      fs.fsyncSync(fd)
+      fs.closeSync(fd)
+      fd = null
+      wrote = true
       fs.renameSync(tmp, this.file)
     } catch (err) {
+      if (fd) { try { fs.closeSync(fd) } catch (e) {} }
       this.onError('[store] 写入失败: ' + err.message)
-      try { fs.unlinkSync(this.file + '.tmp') } catch (e) { /* 清理残件 */ }
+      // v3.3.13：rename 失败时 tmp 是「已写完并 fsync 的完整新数据」，不能删；
+      // 只有写入阶段失败才清理残件
+      if (!wrote) { try { fs.unlinkSync(this.file + '.tmp') } catch (e) { /* 忽略 */ } }
     }
   }
 }

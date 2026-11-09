@@ -30,6 +30,9 @@ class MpvAudio {
     this._wantPlaying = false
     this._lastEmit = 0
     this._endedFired = false
+    this._lastEndedAt = 0      // v3.3.13：曲末双事件（eof-reached + end-file eof）跨 load 抑制
+    this._aoLost = false
+    this._exclusiveLost = false
 
     window.api.onMpvEvent((e) => this._onEvent(e))
 
@@ -100,7 +103,12 @@ class MpvAudio {
         return
       }
       if (wantPlaying && this._wantPlaying) window.api.mpvPlay()
-    }).catch(() => {})
+    }).catch(() => {
+      // v3.3.13：直链解析抛异常（畸形 lxstream 等）不能停死在「正在加载」
+      this._paused = true
+      this._wantPlaying = false
+      this._emit('error')
+    })
   }
 
   play() {
@@ -173,6 +181,17 @@ class MpvAudio {
 
   /* ---------------- 主进程事件 ---------------- */
 
+  /** v3.3.13：独占恢复后把状态机与 mpv 对齐（显式发 play，不能只翻标志位） */
+  _resumeFromAo() {
+    this._aoLost = false
+    this._exclusiveLost = false
+    if (this._paused) {
+      this._paused = false
+      this._posStamp = performance.now()
+      this._emit('play')
+    }
+  }
+
   _onEvent(e) {
     if (!e) return
     switch (e.type) {
@@ -218,7 +237,11 @@ class MpvAudio {
       }
       case 'eof':
       case 'file-eof': {
-        if (this._endedFired) break
+        // v3.3.13：mpv 曲末会连发 eof-reached 与 end-file(eof)。切歌会清零
+        // _endedFired / player._endingHandled，第二个事件就会再切一首。
+        // 用 1.5 秒时间窗跨 load 抑制，两个守卫都不依赖
+        if (this._endedFired || Date.now() - this._lastEndedAt < 700) break
+        this._lastEndedAt = Date.now()
         this._endedFired = true
         this._ended = true
         this._paused = true
@@ -229,29 +252,31 @@ class MpvAudio {
       }
       case 'format': {
         this.format = e.params || null
-        // v3.3.11：独占播放中参数回来了 = 看门狗夺回成功（或流自愈），解除冻结
-        if (e.params && this._aoLost) {
-          this._aoLost = false
-          this._paused = false
-          this._posStamp = performance.now()
-        }
+        // v3.3.13：只在「之前冻结过」且参数真回来时才恢复；普通 format 事件
+        // 不碰 _paused，否则用户手动暂停会被迟到的 format 翻回播放
+        if (e.params && (this._aoLost || this._exclusiveLost)) this._resumeFromAo()
         this._emit('formatchange')
         break
       }
       case 'ao-lost': {
-        // v3.3.11：独占输出被系统作废（启动大型游戏改设备配置等）——
-        // mpv 还在解码，进度条会照走但没有声音。这里冻结进度插值，如实反映「没在出声」；
-        // 引擎层看门狗会在 2.5 秒后自动重启夺回，恢复后 format 事件解除冻结
+        // 独占输出被系统作废：mpv 还在解码，进度条会照走但没有声音。
+        // 冻结进度插值并同步 UI 状态；恢复由 ao-recovered / format 驱动
         this._aoLost = true
+        this._exclusiveLost = false
         this._paused = true
         this.lastError = e.message || '独占输出中断'
         this._emit('pause')
         break
       }
+      case 'ao-recovered': {
+        this._resumeFromAo()
+        break
+      }
       case 'exclusive-lost': {
-        // 连续 3 次夺回失败：设备真被别的程序占着（游戏也开了独占）。
-        // 不发 error（error 会触发自动跳曲），只记录并交给 app.js 的提示
+        // 连续 3 次夺回失败：设备真被别的程序占着。保持冻结（进度如实），
+        // 等设备空闲后 format 事件会解除；不发 error（error 会误触发跳曲）
         this._aoLost = false
+        this._exclusiveLost = true
         this.lastError = e.message || '独占设备被占用'
         break
       }
