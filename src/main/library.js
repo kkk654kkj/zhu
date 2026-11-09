@@ -289,9 +289,11 @@ function readLrcMeta(lyricPath) {
   try {
     const fd = fs.openSync(lyricPath, 'r')
     // v3.3.9：readSync 抛错时原来不会 close —— 句柄滞留到 GC
+    // v3.3.10：buf 必须声明在 try 外 —— 上一版把 const buf 写进了内层 try，
+    // 出块后引用必然 ReferenceError 被 catch 吞掉，函数 100% 失效
     let n = 0
+    const buf = Buffer.alloc(8192)
     try {
-      const buf = Buffer.alloc(8192)
       n = fs.readSync(fd, buf, 0, buf.length, 0)
     } finally {
       try { fs.closeSync(fd) } catch (e) { /* 已关 */ }

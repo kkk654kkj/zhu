@@ -1324,8 +1324,12 @@ async function runWatchScan() {
   const s = store.get().settings
   if (s.watchFolders === false) return
   logLine('[watch] 检测到文件变化，开始增量扫描')
+  // v3.3.10：run 必须声明在 try 外 —— 上一版 const run 在 try 块内，
+  // finally 里引用必然 ReferenceError → activeScan 永远清不掉，
+  // 后续 watch 扫描全部失效（每 8 秒空转重试）+ 每次一个 unhandledRejection
+  let run = null
   try {
-    const run = library.scan(s.musicDirs, (p) => {
+    run = library.scan(s.musicDirs, (p) => {
       sendToRenderer('lib:scan-progress', {
         phase: p.phase, done: p.done, total: p.total,
         track: p.track ? toClientTrack(p.track) : null
@@ -2072,8 +2076,10 @@ async function dlRun(task) {
       dlUnlinkRetry(task.path ? task.path + '.part' : '')
       dlUnlinkRetry(task.path || '')
     } else if (err && (err.name === 'AbortError' || /abort/i.test(err.message || ''))) {
-      // v3.3.9：只有没有更新的一轮下载在跑时才回落 paused（防旧循环覆盖新状态）
-      if (task.status === 'downloading') { task.status = 'paused'; task.speed = 0 }
+      // v3.3.10：回落判据改用 abort 归属（与 finally 同构）——
+      // 上一版用 status==='downloading' 判断，而 dlPause 是先置 pausing 再 abort，
+      // 守卫永不满足 → 每次点暂停任务都永久卡在 pausing（继续/删除/重下全部失效）
+      if (task.abort === ctrl) { task.status = 'paused'; task.speed = 0 }
     } else {
       task.status = 'error'
       task.error = (err && err.message) || '下载失败'
@@ -2315,7 +2321,9 @@ function registerIpc() {
 
   ipcMain.handle('session:get', () => store.get().session || null)
   ipcMain.handle('session:set', (e, session) => {
-    store.patch({ session })
+    // v3.3.10：改整体替换（Store.setKey）—— deepMerge 会让旧 session 的键永久残留，
+    // 恢复播放可能拿到过时字段
+    store.setKey('session', session && typeof session === 'object' ? session : {})
     return true
   })
 
@@ -2523,6 +2531,9 @@ function registerIpc() {
   ipcMain.handle('online:dlDelete', (e, id) => {
     const t = dlTasks.get(String(id))
     if (!t) return { ok: false }
+    // v3.3.10：卡在 pausing 且下载循环已退出（abort 控制器已被 finally 清掉）的
+    // 兜底 —— abort() 不会有人响应，直接当 paused 走下面的正常删除路径
+    if (t.status === 'pausing' && !t.abort) t.status = 'paused'
     if (t.status === 'downloading' || t.status === 'queued' || t.status === 'pausing') {
       // 让下载线程自己收尾：abort → catch 里发现 deleted → 删残片、摘任务
       // v3.3.9：pausing 也走这条路 —— 在途写盘没结束时直接摘任务会与写盘竞态
@@ -2659,14 +2670,18 @@ function registerIpc() {
   })
   // v3.3.9：路径收口 —— 只允许曲库目录 / 下载目录 / 数据目录之内的文件
   function isAllowedMediaPath(p) {
-    const abs = path.resolve(String(p || ''))
+    const abs = path.resolve(String(p || '')).toLowerCase()
+    // v3.3.10：根路径先把尾分隔符归一化再拼 sep —— 盘符根目录（D:/）resolve 后
+    // 自带尾分隔符，直接拼会变双分隔符，startsWith 永远 false，
+    // 曲库选成盘根时所有文件都被拒。空目录项也过滤（resolve('')=cwd，会放行任意文件）
     const roots = [
       ...(store.get().settings.musicDirs || []),
       downloadDir(),
       DATA_DIR
-    ].map((r) => path.resolve(r).toLowerCase() + path.sep)
-    const low = abs.toLowerCase() + path.sep
-    return roots.some((r) => low.startsWith(r))
+    ]
+      .filter((r) => r && String(r).trim())
+      .map((r) => path.resolve(r).toLowerCase().replace(/[\\/]+$/, '') + path.sep)
+    return roots.some((r) => abs.startsWith(r) || (abs + path.sep).startsWith(r))
   }
   ipcMain.handle('shell:showItem', (e, filePath) => {
     if (filePath && fs.existsSync(filePath) && isAllowedMediaPath(filePath)) shell.showItemInFolder(filePath)
@@ -3031,7 +3046,11 @@ let gotLock = false
 try {
   gotLock = app.requestSingleInstanceLock()
 } catch (err) {
-  logLine('WARN 单实例锁异常，忽略', err.message)
+  // v3.3.10：锁 API 抛异常 ≠ 已有实例在跑。以前 gotLock 保持 false 直接退出，
+  // 变成「永远启动不了」（data 目录被杀软锁定等便携环境常见）。fail-open 更安全：
+  // 双实例的最坏后果（抢 mpv）远好过永远起不来
+  logLine('WARN 单实例锁异常，按拿到锁处理', err.message)
+  gotLock = true
 }
 logLine('stage: lock=' + gotLock)
 if (!gotLock) {
@@ -3042,12 +3061,18 @@ if (!gotLock) {
 // 只在确认是唯一实例时清缓存：多实例情况下删的是正在运行实例的文件（多半删不掉）
 if (gotLock) cleanChromiumCache()
 {
-  app.on('second-instance', () => {
+  app.on('second-instance', (event, argv) => {
     if (win) {
       if (!win.isVisible()) win.show()
       if (win.isMinimized()) win.restore()
       win.focus()
     }
+    // v3.3.10：第二实例带的文件参数以前被完全忽略（双击关联文件/拖到 exe 上毫无反应）。
+    // 应用按「文件夹」组织曲库、单文件导入尚未实现，先把路径转给渲染层给出可见反馈
+    const media = (argv || [])
+      .map(String)
+      .filter((a) => /\.(mp3|flac|m4a|wav|ogg|opus|dsf|dff|aac|wma|ape|alac|m3u|m3u8)$/i.test(a) && fs.existsSync(a))
+    if (media.length) sendToRenderer('open-files', { paths: media })
   })
 
   app.whenReady().then(async () => {
@@ -3131,6 +3156,10 @@ if (gotLock) cleanChromiumCache()
       else if (win) win.show()
     })
   })
+
+  // v3.3.10：托盘「退出」的最后一次窗口 bounds patch 发生在窗口 close 事件里
+  // （晚于 before-quit 里的 flush），这里再兜一次，不然 250ms 的去抖定时器会被进程退出吞掉
+  app.on('will-quit', () => { try { if (store) store.flush() } catch (err) { /* 忽略 */ } })
 
   // v3.3.7：退出前必须等清理真正做完再退 ——
   // 以前 stopMpv 的 Promise 没 await，后面的同步清扫还会阻塞事件循环，

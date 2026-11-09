@@ -188,6 +188,11 @@ async function boot() {
   window.api.onScanProgress(onScanProgress)
   window.api.onScanDone(onScanDone)
   window.api.onShortcut((action) => handleShortcut(action))
+  // v3.3.10：第二实例带来的关联文件 —— 曲库按「文件夹」组织，单文件导入
+  // 尚未实现，先给出可见反馈（以前完全静默）
+  window.api.onOpenFiles(({ paths }) => {
+    toast('收到 ' + paths.length + ' 个文件：单文件导入开发中，请先把文件所在文件夹加进曲库', 6000)
+  })
   // 外面改了当前这首的 .lrc（main 进程 fs.watch 推过来）→ 立刻重读重画，不用切歌/重启
   if (window.api.onLyricChanged) {
     window.api.onLyricChanged((id) => {

@@ -1173,15 +1173,26 @@ async function getLyric(song) {
   // v3.3.9：换源兜底整体限时 —— 以前最坏 4 源 × (搜索15s + 取词15s) ≈ 90s，
   // 歌词 IPC 全程挂着，界面像死了一样
   const lyricDeadline = Date.now() + 15000
+  // v3.3.10：每个 await 都受 deadline 约束 —— 以前只在循环开头查一次，
+  // 临界点进入的最后一轮 search+getLyric 各 15s 不可中断，最坏仍拖 ~45s
+  const leftMs = () => Math.max(0, lyricDeadline - Date.now())
+  const withDeadline = (p) => new Promise((resolve) => {
+    if (leftMs() <= 0) return resolve(null)
+    const t = setTimeout(() => resolve(null), leftMs())
+    Promise.resolve(p).then(
+      (v) => { clearTimeout(t); resolve(v) },
+      () => { clearTimeout(t); resolve(null) }
+    )
+  })
   if (!lrc) {
     for (const id of SOURCE_ORDER) {
-      if (Date.now() > lyricDeadline) break
+      if (leftMs() <= 0) break
       if (id === song.source || !SOURCES[id]) continue
       try {
-        const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 5)
-        const cand = pickBestMatch(list, song)
-        if (!cand) continue
-        lrc = await SOURCES[id].getLyric(cand)
+        const list = await withDeadline(SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 5))
+        const cand = list && pickBestMatch(list, song)
+        if (!cand || leftMs() <= 0) continue
+        lrc = await withDeadline(SOURCES[id].getLyric(cand))
         if (lrc) break
       } catch (err) { /* 下一个 */ }
     }

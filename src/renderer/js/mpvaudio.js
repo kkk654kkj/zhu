@@ -110,7 +110,12 @@ class MpvAudio {
     if (this._ended && this._srcPath) {
       this._ended = false
       this._endedFired = false
+      // v3.3.10：状态与事件同步 —— 以前重载分支不翻 _paused 也不发 play，
+      // mpv 回报 unpause 之前 isPlaying 为 false，播放图标短暂回跳
+      this._paused = false
+      this._posStamp = performance.now()
       this.load()
+      this._emit('play')
       return Promise.resolve()
     }
     this._ended = false
