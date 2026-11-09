@@ -18,9 +18,30 @@ const TIMEOUT = 15000
 let logger = () => {}
 function setLogger(fn) { if (typeof fn === 'function') logger = fn }
 
+/**
+ * 各平台 CDN 认的 Referer。
+ *
+ * 无损链路（青听网关通吃四家、ChKSz 主打 QQ/酷狗）会把**别的平台**的直链交给我们，
+ * 以前统一塞网易的 Referer —— CDN 做白名单校验时直接 403/无 content-range，
+ * probeStream 判 broken 后整档无损被跳过，用户只看到「明明有 flac 却一直 320k」。
+ */
+const SOURCE_REFERER = {
+  wy: 'https://music.163.com/',
+  qq: 'https://y.qq.com/',
+  kg: 'https://www.kugou.com/',
+  kw: 'https://www.kuwo.cn/'
+}
+function refererFor(source) {
+  return SOURCE_REFERER[source] || SOURCE_REFERER.wy
+}
+
 /* ---------------- 通用请求 ---------------- */
 
-async function req(url, opts = {}) {
+/**
+ * 发一次请求并返回原始 Response（带超时与主动释放能力）。
+ * 不做重试 —— 重试策略在 req() 里统一处理。
+ */
+async function reqOnce(url, opts = {}) {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), opts.timeout || TIMEOUT)
   try {
@@ -59,12 +80,35 @@ async function req(url, opts = {}) {
   }
 }
 
-async function reqText(url, opts) {
+/**
+ * 发请求。429 / 5xx 做一次短退避重试。
+ *
+ * 各家状态码的脾气：网易连搜两次会回 405、ChKSz 有配额限流、聚合网关偶发 5xx，
+ * 这些都是一次抖动就恢复的。以前一律直接失败并降级到下一个源，
+ * 用户看到的是「这个源又没结果」。
+ * 404/403/416 属于确定性失败，不重试。
+ */
+async function req(url, opts = {}) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await reqOnce(url, opts)
+    const retriable = res.status === 429 || res.status >= 500
+    if (attempt >= 1 || !retriable) return res
+    try { res.release && res.release() } catch (e) { /* 已释放 */ }
+    await new Promise((r) => setTimeout(r, 400 + Math.random() * 300))
+  }
+}
+
+async function reqText(url, opts = {}) {
   try {
     const res = await req(url, opts)
-    if (!res.ok) { try { res.release && res.release() } catch (e) {} ; return null }
+    if (!res.ok) {
+      try { res.release && res.release() } catch (e) { /* 忽略 */ }
+      logger('[req] HTTP ' + res.status + ' ' + String(url).slice(0, 80))
+      return null
+    }
     return await res.text()
   } catch (err) {
+    logger('[req] ' + ((err && err.message) || err) + ' ' + String(url).slice(0, 80))
     return null
   }
 }
@@ -106,6 +150,20 @@ function clean(s) {
  * 音源接口返回的 ext 只认白名单：它会被拼进缓存文件名，
  * 万一接口给出 '../../evil' 这类值就是目录穿越。非法一律回退 mp3。
  */
+/**
+ * 码率统一成 kbps。
+ * 各家字段单位不一致：酷狗明确给 bps（除以 1000），网易要自己算，
+ * 酷我原样透传（可能是 bps 也可能是 kbps）。单位一旦猜错，
+ * probeStream 的 `>=32` 与 maybeUpgrade 的 `>=96` 就会全部走偏 ——
+ * 前者丢掉实测值，后者误以为音质够好而放弃补救。
+ */
+function normBitrate(v) {
+  const n = Number(v) || 0
+  if (n <= 0) return 0
+  // 大于 10000 只可能是 bps（320000 / 1411200），kbps 不会有这个量级
+  return Math.round(n > 10000 ? n / 1000 : n)
+}
+
 function safeExt(x) {
   const e = String(x == null ? '' : x).toLowerCase()
   return /^(mp3|m4a|flac|ogg|aac|wav|ape)$/.test(e) ? e : 'mp3'
@@ -134,9 +192,13 @@ function parseKuwoList(text) {
     const body = m[0]
     if (!/DC_TARGETID|MUSICRID|"DC_TARGETID"/.test(body)) continue
     const obj = {}
-    const kvRe = /['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?\s*:\s*'((?:[^'\\]|\\.)*)'/g
+    // v3.3.17：值分支以前只认带引号的字符串，无引号的数字（DURATION:245）会整体丢失，
+    // duration 变 0 → probeStream 的 expectDuration 与 relevance 的时长加权全部失效
+    const kvRe = /['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?\s*:\s*(?:'((?:[^'\\]|\\.)*)'|(-?\d+(?:\.\d+)?))/g
     let kv
-    while ((kv = kvRe.exec(body))) obj[kv[1]] = kv[2].replace(/\\'/g, "'")
+    while ((kv = kvRe.exec(body))) {
+      obj[kv[1]] = kv[2] !== undefined ? kv[2].replace(/\\'/g, "'") : kv[3]
+    }
     if (obj.DC_TARGETID) out.push(obj)
   }
   return out
@@ -181,7 +243,7 @@ const kw = {
     return {
       url: d.url,
       ext: safeExt(d.format),
-      bitrate: Number(d.bitrate) || 0,
+      bitrate: normBitrate(d.bitrate),
       duration: Number(d.duration) || song.duration || 0,
       referer: 'https://www.kuwo.cn/'
     }
@@ -364,7 +426,10 @@ const qq = {
     return {
       url: sip.replace(/^http:/, 'https:') + purl,
       ext: /\.m4a/i.test(purl) ? 'm4a' : 'mp3',
-      bitrate: 128,
+      // v3.3.17：以前硬编码 128 —— probeStream 因 `info.bitrate >= 32` 直接采信它、
+      // 丢掉 Content-Range 实测值，于是 maybeUpgrade 的「>=96k 就不补救」对 QQ 恒成立、
+      // 「候选 <128k 就跳过」恒不成立。给 0 表示「不知道」，让探测结果说话。
+      bitrate: 0,
       duration: song.duration || 0,
       referer: 'https://y.qq.com/'
     }
@@ -419,10 +484,21 @@ const kg = {
 
   /** 走 tracker 接口；热门版权歌会返回 status=2（无授权），此时按失败处理交给别的源 */
   async getUrl(song) {
+    // v3.3.17：idHq 与 id 相同时前两条请求完全一样，白跑一次 15 秒超时的请求。
+    // 用 seen 去重（hash + br 相同即视为同一次尝试）。
     const tries = []
-    if (song.idHq) tries.push({ hash: song.idHq.toLowerCase(), br: 'hq' })
-    tries.push({ hash: String(song.id).toLowerCase(), br: 'hq' })
-    tries.push({ hash: String(song.id).toLowerCase(), br: '' })
+    const seen = new Set()
+    const push = (hash, br) => {
+      const h = String(hash || '').toLowerCase()
+      if (!h) return
+      const k = h + '|' + br
+      if (seen.has(k)) return
+      seen.add(k)
+      tries.push({ hash: h, br })
+    }
+    if (song.idHq) push(song.idHq, 'hq')
+    push(song.id, 'hq')
+    push(song.id, '')
     for (const t of tries) {
       const key = crypto.createHash('md5').update(t.hash + 'kgcloudv2').digest('hex')
       const url = `https://trackercdn.kugou.com/i/v2/?key=${key}&hash=${t.hash}&br=${t.br}`
@@ -434,7 +510,7 @@ const kg = {
           return {
             url: u,
             ext: safeExt(j.extName),
-            bitrate: Math.round((Number(j.bitRate) || 0) / 1000),
+            bitrate: normBitrate(j.bitRate),
             duration: song.duration || 0,
             referer: 'https://www.kugou.com/'
           }
@@ -511,11 +587,22 @@ const searchCache = new Map()
 async function searchOne(id, keyword, page, limit) {
   const key = `${id}|${keyword}|${page}|${limit}`
   const hit = searchCache.get(key)
-  if (hit && Date.now() - hit.at < SEARCH_TTL_MS) return hit.list
+  if (hit && Date.now() - hit.at < SEARCH_TTL_MS) {
+    // v3.3.17：命中即前移（delete + set 走 Map 插入序）→ 真 LRU。
+    // 以前不刷新序，热词反而先被淘汰，本质是 FIFO。
+    searchCache.delete(key)
+    searchCache.set(key, hit)
+    return hit.list
+  }
   try {
     const list = await SOURCES[id].search(keyword, page, limit)
     if (Array.isArray(list) && list.length) {
-      if (searchCache.size > 120) searchCache.delete(searchCache.keys().next().value)
+      if (searchCache.size > 120) {
+        // 先按 TTL 清过期项，再按插入序淘汰，避免长期会话里驻留一堆过期列表
+        const now = Date.now()
+        for (const [k, v] of searchCache) { if (now - v.at > SEARCH_TTL_MS) searchCache.delete(k) }
+        while (searchCache.size > 120) searchCache.delete(searchCache.keys().next().value)
+      }
       searchCache.set(key, { list, at: Date.now() })
     }
     return list
@@ -561,6 +648,28 @@ function urlCachePut(key, rec) {
     while (urlCache.size > 300) urlCache.delete(urlCache.keys().next().value)
   }
   urlCache.set(key, rec)
+}
+
+/**
+ * v3.3.17：作废某首歌的直链缓存。
+ *
+ * 平台签名直链可能提前失效（换签名 / 风控 / 同一 IP 多端），而缓存 TTL 是 20 分钟、
+ * 期间没有任何回写路径 —— 用户在这段时间里每次点这首歌都命中同一条死链，
+ * 换源逻辑压根不会触发，只能重启。播放器收到 file-error 时调这个即可。
+ */
+function invalidateUrl(song, prefer) {
+  if (!song) return false
+  const keys = prefer ? [cacheKey(song, prefer)] : Array.from(urlCache.keys())
+  let hit = false
+  for (const k of keys) {
+    if (prefer) {
+      if (urlCache.delete(k)) hit = true
+    } else if (k.startsWith(song.source + ':' + song.id + ':')) {
+      urlCache.delete(k)
+      hit = true
+    }
+  }
+  return hit
 }
 
 function cacheKey(song, prefer) {
@@ -747,8 +856,10 @@ async function qingResolveOnce(source, rid, level) {
       if (!j) continue
       if (j.code === 0 || j.code === '0') {
         const d = j.data || {}
-        // need_decrypt：酷我偶发会回加密流，本地没有它的 AES 密钥，直接放弃换别的档
-        if (d.need_decrypt) return null
+        // need_decrypt：酷我偶发会回加密流，本地没有它的 AES 密钥。
+        // v3.3.17：这里只放弃**这一档**（continue 到下一个 level / 下一条线路），
+        // 以前 return null 把整条青听链路直接掐死，备用 base 也不会试
+        if (d.need_decrypt) continue
         if (d.url) return { url: d.url, headers: d.playbackHeaders || d.headers || null }
         return null
       }
@@ -775,13 +886,20 @@ async function qingLossless(song, prefer) {
   for (const level of levels) {
     const got = await qingResolveOnce(source, String(song.id), level)
     if (!got || !got.url) continue
-    if (!/\.flac(\?|$)/i.test(got.url)) continue
+    // v3.3.17：签名直链常常没有扩展名（/resolve/xxx?sign=...），以前一律 continue，
+    // 真无损被当成「不是 flac」丢掉，整条青听链路白跑。现在只排除明确的有损后缀，
+    // 其余交给 probeStream 按码率确认（下面 hasFlacExt 的判定）。
+    if (/\.(mp3|m4a|aac|ogg|wav)(\?|$)/i.test(got.url)) continue
     const probed = await probeStream(
-      { url: got.url, ext: 'flac', bitrate: 0, duration, referer: 'https://music.163.com/', headers: got.headers },
+      { url: got.url, ext: 'flac', bitrate: 0, duration, referer: refererFor(song.source), headers: got.headers },
       duration,
       duration
     )
     if (probed.broken || probed.partial || probed.unverified) continue
+    // 没有 .flac 后缀的地址必须用码率兜底确认：无损一般 >700k，
+    // 达不到就说明网关给的是有损档，不能标成 lossless 骗界面
+    const hasFlacExt = /\.flac(\?|$)/i.test(got.url)
+    if (!hasFlacExt && (probed.bitrate || 0) < 700) continue
     return {
       ...probed,
       duration,
@@ -837,7 +955,7 @@ async function chkszLossless(song, key) {
   if (!isFlac) return null
   const duration = song.duration || 0
   const probed = await probeStream(
-    { url: j.url, ext: 'flac', bitrate: Number(j.br) || 900, duration, referer: 'https://music.163.com/' },
+    { url: j.url, ext: 'flac', bitrate: Number(j.br) || 900, duration, referer: refererFor(song.source) },
     duration,
     duration
   )
@@ -912,7 +1030,11 @@ async function resolveLossless(song, prefer) {
   }
 
   // ① QQ / 酷狗：只有 ChKSz 能拿（GDStudio 只支持网易）
+  // v3.3.17：③ 的兜底会对同一首再调一次 ChKSz（twin 为 null 时参数完全一样），
+  // 白耗一次每日 50 次的额度，且结果必然与这里相同 —— 记下已试过的 id 供 ③ 跳过。
+  let chkszTried = ''
   if (key && (song.source === 'qq' || song.source === 'kg')) {
+    chkszTried = song.source + ':' + song.id
     const got = await chkszLossless(song, key)
     if (got) return got
   }
@@ -951,8 +1073,13 @@ async function resolveLossless(song, prefer) {
 
   // ③ 兜底：有 key 的话，ChKSz 再试一次（腾讯/酷狗的号池有时比免费接口更硬）
   if (key) {
-    const got = await chkszLossless(twin || song, key)
-    if (got) return { ...got, actual: twin || song }
+    const target = twin || song
+    const tid = target.source + ':' + target.id
+    // 同一首已经在上面的 ① 试过一次，这里再试必然同样失败，别白扣额度
+    if (tid !== chkszTried) {
+      const got = await chkszLossless(target, key)
+      if (got) return { ...got, actual: target }
+    }
   }
   return null
 }
@@ -981,7 +1108,10 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
         const res = await resolvePlayable(song, 'best', opts)
         if (!res) return null
         const up = await maybeUpgrade(res, song, 'best')
-        urlCachePut(cacheKey(song, 'best'), { ...up, at: Date.now() })
+        // v3.3.17：缓存命中的结果不能重新盖时间戳 —— 否则反复点同一首 lossless 歌，
+        // 1.5 秒定时器每次都给**已过期的签名直链**续期，TTL 被无限重置，
+        // 正是上面 L1019「命中不重写时间戳」那条修复要防的事。
+        if (!res.fromCache) urlCachePut(cacheKey(song, 'best'), { ...up, at: Date.now() })
         return up
       })().catch(() => null)   // race 赢家直接 return 时它无人 await，吞掉悬空 rejection
       return fbPromise
@@ -990,7 +1120,10 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
 
     let got = null
     let losslessTimer = null
-    const losslessTimeout = new Promise((r) => { losslessTimer = setTimeout(() => r(null), 9000) })
+    // v3.3.17：窗口按档位分。母带要多跳几级（jymaster → hires → lossless）且常走两条线路，
+    // 9 秒对它太紧；普通无损 7 秒足够。注释里承诺的「6 秒」早就和实现对不上了。
+    const losslessWait = prefer === 'master' ? 12000 : 7000
+    const losslessTimeout = new Promise((r) => { losslessTimer = setTimeout(() => r(null), losslessWait) })
     try {
       got = await Promise.race([
         // 9 秒超时后输家仍在后台跑；吞掉它的 rejection，避免 unhandledRejection
@@ -1034,15 +1167,22 @@ async function maybeUpgrade(res, song, prefer) {
   if (res.partial) return res
   if ((res.bitrate || 0) >= 96) return res
   const t0 = Date.now()
+  // v3.3.17：预算改成「剩余时间」，并在每个 await 之间复查。
+  // 以前只在 for 头部判一次，循环体内 search(15s) + 2×(getUrl 15s + probe 16s)
+  // 单源最坏能跑到 77 秒 —— 注释承诺的「上限 6 秒」完全没兑现。
+  const left = () => 6000 - (Date.now() - t0)
   for (const id of SOURCE_ORDER) {
     if (id === res.song.source || !SOURCES[id]) continue
-    if (Date.now() - t0 > 6000) break
+    if (left() <= 0) break
     try {
       const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10)
+      if (left() <= 0) break
       const cands = rankMatches(list, song).slice(0, 2)
       for (const cand of cands) {
+        if (left() <= 0) break
         const got = await SOURCES[id].getUrl(cand, prefer)
         if (!got || !got.url) continue
+        if (left() <= 0) break
         const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0)
         if (probed.broken || probed.partial || probed.unverified) continue
         if ((probed.bitrate || 0) < 128) continue
@@ -1070,6 +1210,13 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
   }
 
   let partial = null
+  let unverified = null
+  // v3.3.17：整条兜底链必须有总预算。以前一个 deadline 都没有：
+  // 主链路 getUrl(15s)+probe(16s)，本源 3 个候选各 31s，再叠三个源各 ~108s，
+  // 最坏能跑五分钟 —— mpv 的 load 会一直挂着，界面永久「正在加载」。
+  // getLyric 早就有同样的 deadline，这里补齐。
+  const deadline = Date.now() + 12000
+  const expired = () => Date.now() > deadline
 
   const src = SOURCES[song.source]
   if (src) {
@@ -1080,16 +1227,19 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
         // expectDuration 是「这首歌本该多长」。只传前两个会让「片段时长明显偏短」
         // 这条判据永远为假 —— 45 秒剪辑版按 240 秒算出来的码率反而很健康。
         const probed = await probeStream(got, got.duration || song.duration || 0, song.duration || 0)
+        // v3.3.17：unverified（探测两次都失败 / CDN 不回 content-range）以前在这里
+        // 直接 return，等于「接受一条永不可信、永不缓存、也永不换源的地址」，
+        // 而 tryList / maybeUpgrade / 青听对它是跳过 —— 同一个结果两种处置。
+        // 现在把它记为兜底备选，继续往下换源；实在没有更好的才用它。
         if (probed.unverified) {
-          // v3.3.8：探测两次都失败的结果不进 20 分钟直链缓存
-          return { ...probed, song, fallback: false }
-        }
-        if (!probed.partial && !probed.broken) {
+          if (!unverified) unverified = { ...probed, song, fallback: false }
+        } else if (!probed.partial && !probed.broken) {
           const rec = { ...probed, at: Date.now() }
           urlCachePut(key, rec)
           return { ...rec, song, fallback: false }
+        } else if (probed.partial) {
+          partial = { ...probed, at: Date.now(), song }
         }
-        if (probed.partial) partial = { ...probed, at: Date.now(), song }
       }
     } catch (err) { /* 继续兜底 */ }
   }
@@ -1107,6 +1257,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
       .filter((c) => !(c.source === song.source && c.id === song.id))
       .slice(0, 3)
     for (const cand of cands) {
+      if (expired()) break
       const got = await SOURCES[id].getUrl(cand, prefer)
       if (!got || !got.url) continue
       const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0)
@@ -1123,7 +1274,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
   }
 
   // ① 本源内换候选
-  if (src) {
+  if (src && !expired()) {
     try {
       const list = await src.search(`${song.title} ${song.artist}`.trim(), 1, 10)
       const got = await tryList(song.source, list)
@@ -1135,6 +1286,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
   //    每个源要试多个候选——同一个源里同名歌常有好几条（原版/重制/翻唱）。
   const others = SOURCE_ORDER.filter((id) => id !== song.source && SOURCES[id])
   for (const id of others) {
+    if (expired()) break
     try {
       const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10)
       const got = await tryList(id, list)
@@ -1142,7 +1294,13 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
     } catch (err) { /* 下一个源 */ }
   }
 
-  if (partial) return { ...partial, fallback: true, partial: true }
+  if (partial) {
+    // fallback 只在「真的换过源」时为真：本源的试听片段也走这条分支，
+    // 以前一律标 true，界面会显示「已换源」，用户以为听到了别的版本
+    const changed = partial.song && (partial.song.id !== song.id || partial.song.source !== song.source)
+    return { ...partial, fallback: !!changed, partial: true }
+  }
+  if (unverified) return unverified
   return null
 }
 
@@ -1151,15 +1309,25 @@ function normText(s) {
   return String(s || '').toLowerCase().replace(/[\s\-_()（）\[\]【】]/g, '')
 }
 
+/** 各源在歌手缺失时会填这些占位词，比对时必须当成「不知道」而不是「一个叫未知歌手的歌手」 */
+const UNKNOWN_ARTISTS = new Set(['未知歌手', '未知', 'unknown', '未知艺术家', 'various'])
+function normArtist(v) {
+  const s = normText(String(v || '').split('/')[0])
+  return UNKNOWN_ARTISTS.has(s) ? '' : s
+}
+
 function matchScore(s, song) {
   const t = normText(song.title)
   if (!t) return 0   // v3.3.13：空标题下 st.includes('') 恒真，会把所有候选判成同曲
-  const a = normText(String(song.artist || '').split('/')[0])
   const st = normText(s.title)
-  const sa = normText(String(s.artist || ''))
+  if (!st) return 0  // v3.3.17：候选标题为空时 t.includes('') 同样恒真，白送 5 分
+  const a = normArtist(song.artist)
+  const sa = normArtist(s.artist)
   // 歌手完全对不上时直接判定不是同一首。
   // 否则「晴天」会被换成网易上某个用户上传的同名翻唱——名字一样、人不对，
   // 用户点周杰伦却听到陌生人唱，比放不出来还糟。
+  // v3.3.17：占位词（未知歌手）先归一成空串，否则"未知歌手"与真实歌手互不包含，
+  // 冷门/纯音乐/原唱缺失的歌会在这里被判 0 分，跨源兜底与无损兜底双双失效。
   if (a && sa && !sa.includes(a) && !a.includes(sa)) return 0
   let score = 0
   if (st === t) score += 6
@@ -1177,9 +1345,15 @@ function matchScore(s, song) {
 
 function rankMatches(list, song) {
   if (!list || !list.length) return []
-  return list
-    .map((s) => ({ s, score: matchScore(s, song) }))
-    .filter((x) => x.score >= 8)
+  const scored = list.map((s) => ({ s, score: matchScore(s, song) }))
+  const best = scored.reduce((m, x) => Math.max(m, x.score), 0)
+  // v3.3.17：固定阈值 8 在「时长未知」时过于苛刻 —— 无时长最多只能拿
+  // 6（标题精确）+ 3（歌手）= 9，歌手也未知时就只剩 6 分，同名同曲会被全部滤掉，
+  // 兜底链空转、用户看到「放不出来」。
+  // 现在：最高分够 8 就仍用 8（保持原来的严格度），否则退到「最高分的 80%，但不低于 6」。
+  const floor = best >= 8 ? 8 : Math.max(6, Math.round(best * 0.8))
+  return scored
+    .filter((x) => x.score >= floor)
     .sort((x, y) => y.score - x.score)
     .map((x) => x.s)
 }
@@ -1194,24 +1368,10 @@ const lyricCache = new Map()   // key → { lrc, at }
 
 async function getLyric(song) {
   const key = `${song.source}:${song.id}`
-  const hit = lyricCache.get(key)
-  if (hit) {
-    // v3.3.7：空结果只缓存 1 分钟 —— 网络抖动不该让一首歌整场都没词
-    if (hit.lrc || Date.now() - hit.at < 60000) return hit.lrc
-  }
-  const src = SOURCES[song.source]
-  let lrc = null
-  if (src) {
-    try {
-      lrc = await src.getLyric(song)
-    } catch (err) { lrc = null }
-  }
-  // 本源没词就换源找同一首（换了源的曲目也能出词）
-  // v3.3.9：换源兜底整体限时 —— 以前最坏 4 源 × (搜索15s + 取词15s) ≈ 90s，
-  // 歌词 IPC 全程挂着，界面像死了一样
+  // v3.3.17：deadline 必须在**第一个请求之前**建立。以前它在换源兜底前才创建，
+  // 首个 src.getLyric 仍可跑满 15 秒 —— 加上后面的兜底循环，总耗时最坏 30 秒，
+  // 与「整体限时 15 秒」的注释不符。
   const lyricDeadline = Date.now() + 15000
-  // v3.3.10：每个 await 都受 deadline 约束 —— 以前只在循环开头查一次，
-  // 临界点进入的最后一轮 search+getLyric 各 15s 不可中断，最坏仍拖 ~45s
   const leftMs = () => Math.max(0, lyricDeadline - Date.now())
   const withDeadline = (p) => new Promise((resolve) => {
     if (leftMs() <= 0) return resolve(null)
@@ -1221,6 +1381,27 @@ async function getLyric(song) {
       () => { clearTimeout(t); resolve(null) }
     )
   })
+  const hit = lyricCache.get(key)
+  if (hit) {
+    // v3.3.7：空结果只缓存 1 分钟 —— 网络抖动不该让一首歌整场都没词
+    if (hit.lrc || Date.now() - hit.at < 60000) {
+      // 命中前移 → 真 LRU（与 searchCache 一致）
+      lyricCache.delete(key)
+      lyricCache.set(key, hit)
+      return hit.lrc
+    }
+  }
+  const src = SOURCES[song.source]
+  let lrc = null
+  if (src) {
+    try {
+      lrc = await withDeadline(src.getLyric(song))
+    } catch (err) { lrc = null }
+  }
+  // 本源没词就换源找同一首（换了源的曲目也能出词）
+  // v3.3.9：换源兜底整体限时 —— 以前最坏 4 源 × (搜索15s + 取词15s) ≈ 90s，
+  // 歌词 IPC 全程挂着，界面像死了一样
+  // v3.3.10：每个 await 都受 deadline 约束（deadline 与 withDeadline 定义在函数开头）
   if (!lrc) {
     for (const id of SOURCE_ORDER) {
       if (leftMs() <= 0) break
@@ -1234,7 +1415,11 @@ async function getLyric(song) {
       } catch (err) { /* 下一个 */ }
     }
   }
-  if (lyricCache.size > 200) lyricCache.delete(lyricCache.keys().next().value)
+  if (lyricCache.size > 200) {
+    const now = Date.now()
+    for (const [k, v] of lyricCache) { if (now - v.at > 3600000) lyricCache.delete(k) }
+    while (lyricCache.size > 200) lyricCache.delete(lyricCache.keys().next().value)
+  }
   lyricCache.set(key, { lrc, at: Date.now() })
   return lrc
 }
@@ -1285,6 +1470,7 @@ module.exports = {
   listSources,
   search,
   getPlayable,
+  invalidateUrl,
   getLyric,
   resolveStreamUrl,
   fmtDur

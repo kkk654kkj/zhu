@@ -30,6 +30,8 @@ const state = {
   restoringSession: false,// 正在恢复上次会话（此时不要叠加断点续播）
   selected: new Set(),   // 列表多选（v1.7）
   selAnchor: null,       // Shift 范围选的起点下标
+  historyId: null,       // 最近一条已写入历史的曲目 id（去重，见 state-change 处理）
+  gainsCleared: false,   // 分析途中点了「清除分析数据」→ 收尾时不要再写回
   consecutiveFails: 0,   // 连续播放失败次数（在线/本地共用，>=3 就停止自动跳过）
   autoSkipping: false,   // 本次 track-change 是否由「失败自动跳曲」触发（决定是否清零计数）
   skipTimer: null,       // 失败自动跳曲的延时器（可取消）
@@ -133,14 +135,23 @@ function restoreSession(session) {
   if (!session || !Array.isArray(session.queueIds) || !session.queueIds.length) return
   const queue = session.queueIds.map((id) => state.byId.get(id)).filter(Boolean)
   if (!queue.length) return
+  // v3.3.17：优先按 currentId 定位。队列里有被过滤掉的在线曲时，index 已经错位，
+  // 按 index 取会让「当前曲」变成别的歌，currentTime 也被 seek 进错误的文件。
+  let startIndex = session.index || 0
+  let seekTo = session.currentTime
+  if (session.currentId) {
+    const byId = queue.findIndex((t) => t.id === session.currentId)
+    if (byId >= 0) startIndex = byId
+    else seekTo = 0   // 上次那首已经不在队列里，别把进度用到别的歌上
+  }
   state.restoringSession = true
-  player.setQueue(queue, session.index || 0, false)
+  player.setQueue(queue, startIndex, false)
   state.restoringSession = false
   player.mode = session.mode || 'list'
   UI.setMode(player.mode)
-  if (session.currentTime) {
+  if (seekTo) {
     audio.addEventListener('loadedmetadata', () => {
-      try { audio.currentTime = session.currentTime } catch (e) { /* 时长未知时忽略 */ }
+      try { audio.currentTime = seekTo } catch (e) { /* 时长未知时忽略 */ }
     }, { once: true })
   }
 }
@@ -179,7 +190,12 @@ async function boot() {
   updateAbUi()
   window.api.onPowerAction((p) => {
     if (p && p.kind) showPowerCountdown(p.kind, p.delay || 15)
-    else { clearInterval(powerCountdownTimer); powerCountdownTimer = null }
+    else {
+      clearInterval(powerCountdownTimer)
+      powerCountdownTimer = null
+      // 主进程执行关机/休眠失败时会把错误带回来（组策略禁用、权限不足）
+      if (p && p.error) toast(p.error, 6000)
+    }
   })
   window.api.onDeviceLost((p) => {
     if (!p) return
@@ -470,6 +486,8 @@ function hasAnalyzedGains() {
  */
 async function analyzeLibraryLoudness() {
   if (state.analyzing) { toast('正在分析中…'); return }
+  // v3.3.17：两者共用同一个扫描遮罩，谁先结束都会把对方的进度条关掉
+  if (scanning) { toast('正在扫描曲库，稍后再分析响度'); return }
   const all = state.tracks
   const byExt = all.filter((t) => LOUDNESS_OK_EXT.has((t.ext || '').toLowerCase()))
   // v2.0：带 ReplayGain 标签的直接跳过——标签就是别人算好的响度，
@@ -513,6 +531,15 @@ async function analyzeLibraryLoudness() {
       // 给 UI 喘口气，也让 GC 有机会回收解码缓冲
       await new Promise((r) => setTimeout(r, 20))
     }
+    // v3.3.17：中途点了「清除分析数据」就不要再写回 —— 以前分析收尾无条件把
+    // 开头快照的 gains 落盘，用户刚清除的数据会整批复活。
+    if (state.gainsCleared) {
+      state.gainsCleared = false
+      state.settings.trackGains = {}
+      applyTrackGain(state.currentId)
+      toast('响度分析已中止，数据已清除')
+      return
+    }
     state.settings.trackGains = gains
     await window.api.patchSettings({ trackGains: gains })
     applyTrackGain(state.currentId)
@@ -533,9 +560,12 @@ async function analyzeLibraryLoudness() {
 
 function clearAnalyzedGains() {
   state.settings.trackGains = {}
+  // v3.3.17：分析进行中清除会被整批回写覆盖 —— 分析结束时无条件把开头快照的
+  // trackGains 写成结果。这里先立一个中止标记，分析循环每首前检查。
+  if (state.analyzing) { state.abortAnalysis = true; state.gainsCleared = true }
   window.api.patchSettings({ trackGains: {} }).catch(() => {})
   applyTrackGain(state.currentId)
-  toast('已清除响度分析数据')
+  toast(state.analyzing ? '已清除，并中止正在进行的分析' : '已清除响度分析数据')
 }
 
 /* ================= 桌面歌词 ================= */
@@ -583,6 +613,9 @@ async function toggleDesktopLyric() {
         toast('桌面歌词已解除锁定')
       } else {
         await window.api.dlyricClose()
+        // v3.3.17：渲染层配置也要落成 false —— 否则 pushDesktopLyric 的开关判定仍通过，
+        // 关窗后每秒还在发 4~5 次 dlyricState IPC，直到重启应用。
+        state.settings.desktopLyric = { ...(state.settings.desktopLyric || {}), enabled: false }
         toast('桌面歌词已关闭')
       }
     } else {
@@ -651,11 +684,15 @@ function renderPlaylists() {
 /** 批量加入歌单（拖拽、右键都用它），本地状态与界面同步刷新 */
 async function addTracksToPlaylist(plId, trackIds) {
   if (!plId || !trackIds || !trackIds.length) return
-  const pl = await window.api.addToPlaylist(plId, trackIds).catch(() => null)
+  // v3.3.17：不要在这里吞异常 —— dragdrop 的拖放回调已经包了 try/catch 想给提示，
+  // 内部 .catch(() => null) 会让那个兜底永远收不到错误，表现是「拖过去毫无反应」。
+  const pl = await window.api.addToPlaylist(plId, trackIds)
   if (!pl) return
   const i = state.playlists.findIndex((p) => p.id === pl.id)
   if (i >= 0) state.playlists[i] = pl
   renderPlaylists()
+  // 正在看这个歌单时刷新表格，否则刚加进去的歌看不到
+  if (state.view === pl.id) renderView()
   toast('已加入「' + pl.name + '」' + (trackIds.length > 1 ? ' ' + trackIds.length + ' 首' : ''))
 }
 
@@ -922,9 +959,10 @@ function bindPlayer() {
     UI.setFavorite(state.favorites.has(track.id))
     UI.setRowPlaying(track.id, true)
     loadLyric(track)
-    window.api.addHistory(track.id).catch(() => {})
-    state.history = [{ id: track.id, at: Date.now() }]
-      .concat(state.history.filter((h) => h.id !== track.id)).slice(0, 300)
+    // v3.3.17：历史挪到「真的开播」时写（见 state-change 处理）。
+    // track-change 在 autoplay=false 时也会触发（启动恢复会话、扫描后重建队列），
+    // 以前那些没播过的歌也会进「最近播放」。
+    state.currentId = track.id
     updateNavCounts()
     if (state.view === 'recent') renderView()
     UI.renderQueue(player.tracks, player.index, state.currentId)
@@ -942,6 +980,16 @@ function bindPlayer() {
   })
 
   player.on('state-change', (playing) => {
+    // 真正开始播放时才记一条历史（track-change 也会在仅加载时触发）
+    if (playing && player.current && state.historyId !== player.current.id) {
+      const id = player.current.id
+      state.historyId = id
+      window.api.addHistory(id).catch(() => {})
+      state.history = [{ id, at: Date.now() }]
+        .concat(state.history.filter((h) => h.id !== id)).slice(0, 300)
+      updateNavCounts()
+      if (state.view === 'recent') renderView()
+    }
     UI.setPlayIcon(playing)
     // v3.3.7：renderQueue 的输出只跟 tracks/index/currentId 有关，播放/暂停
     // 不改变它 —— 以前每次暂停/恢复都全量重建队列 innerHTML（滚动位置丢失）
@@ -970,7 +1018,10 @@ function bindPlayer() {
     if (state.ab.a != null) updateAbUi()
     updateMediaPosition(cur, dur)
     // 播放到 30s 或一半计入播放次数
-    if (!state.counted && player.current) {
+    // v3.3.17：dur 为 0 时不能计数 —— Math.min(30, 0*0.9) === 0 会让
+    // `cur >= 0` 恒真，独占后端把 _duration 清零后第一帧就记一次播放，
+    // 「最常播放」与播放次数全量失真，且 counted 立刻置真、后面真听完也不再计。
+    if (!state.counted && player.current && dur > 0) {
       const half = dur > 60 ? dur * 0.5 : 30
       if (cur >= Math.min(half, dur * 0.9)) {
         state.counted = true
@@ -1101,9 +1152,12 @@ function isBitPerfect() {
 /** 独占失败自动回退共享：把运行时状态与所有派生 UI 一次性同步到 false */
 function applyExclusiveFallback() {
   state.exclusive = false
-  // 恢复 EQ / 音量均衡按钮（去掉 disabled class 与「独占下不可用」提示）
-  UI.setEqDisabled(false)
-  UI.setNorm(state.settings.normalizeVolume === true)
+  // v3.3.17：回退后**不能**恢复 EQ/音量均衡。回退的是 mpv 的 WASAPI 共享模式，
+  // audio 仍是 MpvAudio，setupAudioGraph() 从来没跑过（独占分支不走 WebAudio）——
+  // 按钮恢复可用只会让用户拖半天滑块毫无效果，还照样落盘。
+  UI.setEqDisabled(true)
+  UI.setSpectrumVisible(false)
+  UI.setNorm(false)
   updateHifiBadge()
 }
 
@@ -1150,9 +1204,26 @@ function updateHifiBadge() {
 }
 
 /** 切换引擎：改设置后重载界面（队列/进度/播放模式会从会话恢复） */
-async function toggleExclusiveOutput() {  if (state.settings.exclusiveOutput) {
+let exclusiveSwitching = false
+
+async function toggleExclusiveOutput() {
+  // v3.3.17：整个流程包含「写设置 → 释放引擎（最长 11 秒）→ flush → reload」，
+  // 期间连点会并发跑两条链路（release 与 start 交叉），结果不可预料。
+  if (exclusiveSwitching) return
+  exclusiveSwitching = true
+  try {
+    await toggleExclusiveOutputOnce()
+  } finally {
+    exclusiveSwitching = false
+  }
+}
+
+async function toggleExclusiveOutputOnce() {
+  if (state.settings.exclusiveOutput) {
     state.settings.exclusiveOutput = false
-    await window.api.patchSettings({ exclusiveOutput: false }).catch(() => {})
+    const saved = await window.api.patchSettings({ exclusiveOutput: false }).then(() => true, () => false)
+    // 写盘失败就别继续释放并重载 —— 重载后设置还是「开」，用户会看到按钮自己又亮回来
+    if (!saved) { state.settings.exclusiveOutput = true; toast('设置保存失败，已取消关闭独占'); return }
     saveSession()
     // v3.3.6 / v2.8.6：关独占要走完整的「释放」流程 ——
     // 等 mpv 进程真退出、扫掉可能残留的孤儿、实测声卡能不能被别人打开。
@@ -1167,7 +1238,8 @@ async function toggleExclusiveOutput() {  if (state.settings.exclusiveOutput) {
   const ok = await window.api.mpvConfirmEnable().catch(() => false)
   if (!ok) return
   state.settings.exclusiveOutput = true
-  await window.api.patchSettings({ exclusiveOutput: true }).catch(() => {})
+  const saved = await window.api.patchSettings({ exclusiveOutput: true }).then(() => true, () => false)
+  if (!saved) { state.settings.exclusiveOutput = false; toast('设置保存失败，未开启独占'); return }
   saveSession()
   await flushSaveSettingsForExit()
   location.reload()
@@ -1223,6 +1295,9 @@ function paintExclusiveVolume() {
 
 function setExclusiveVolume(v) {
   v = Math.max(0, Math.min(100, Number(v) || 0))
+  // v3.3.17：静音状态下拖音量要顺手解除静音，与主音量条一致。
+  // 否则面板显示 50% 却依然无声，用户会怀疑设备/独占坏了。
+  if (player.muted) player.setMuted(false)
   // player.setVolume → MpvAudio.volume → mpv set_property volume（浮点）→ vol-change 落盘
   player.setVolume(v / 100)
   paintExclusiveVolume()
@@ -1400,10 +1475,19 @@ function paintAudioPanel() {
 /** 选中设备（'' = 跟随系统默认）。保存并即时切（独占没开时只保存，开启后生效）。 */
 async function setAudioDevice(name) {
   name = name || ''
-  state.settings.audioDevice = name
   const r = await window.api.mpvSetDevice(name).catch((err) => ({ ok: false, error: err.message }))
-  if (!r || !r.ok) toast('切换输出设备失败：' + ((r && r.error) || '未知错误'), 3000)
-  else toast(r.applied ? '输出设备已切换' : '输出设备已保存（开启独占后生效）')
+  // v3.3.17：主进程会在新设备起不来时自动退回原设备并回传 reverted。
+  // 以前只看 ok/applied，界面提示「已切换」、面板还把失败设备标成「（当前）」，
+  // 用户以为换了设备其实还在旧的上面。
+  if (r && r.reverted) {
+    state.settings.audioDevice = r.device || ''
+    toast(r.error || '该设备不可用，已退回原设备', 3500)
+  } else if (!r || !r.ok) {
+    toast('切换输出设备失败：' + ((r && r.error) || '未知错误'), 3000)
+  } else {
+    state.settings.audioDevice = name
+    toast(r.applied ? '输出设备已切换' : '输出设备已保存（开启独占后生效）')
+  }
   paintAudioPanel()
 }
 
@@ -1925,7 +2009,12 @@ function bindPopupUi() {
 
   // 右键菜单动作
   document.getElementById('ctxMenu').addEventListener('ctx-act', (e) => {
-    handleCtxAction(e.detail.act, e.detail.arg)
+    // v3.3.17：分发处没有 catch，任何一个动作失败都会变成 unhandledRejection，
+    // 用户看到的是「点了菜单没反应」且没有任何提示
+    handleCtxAction(e.detail.act, e.detail.arg).catch((err) => {
+      console.error('[ctx]', err)
+      toast('操作失败：' + ((err && err.message) || err))
+    })
   })
 
 }
@@ -2047,6 +2136,8 @@ function showTrackMenu(x, y, track) {
     ]
     if (inPlaylist) items.push({ label: '从此歌单移除', icon: 'trash', act: 'remove-pl', danger: true })
     items.push({ sep: true })
+    // v3.3.17：这两项以前只作用于右键那一首，菜单却写着「已选 N 首」——
+    // 现在按整批执行（见 handleCtxAction 的 reveal / copy 分支）
     items.push({ label: '在文件夹中显示', icon: 'folder', act: 'reveal' })
     items.push({ label: '复制歌曲信息', act: 'copy' })
   } else {
@@ -2171,12 +2262,24 @@ async function handleCtxAction(act, arg) {
       }
       break
     }
-    case 'reveal':
-      window.api.showInFolder(track.path).catch(() => {})
+    case 'reveal': {
+      const list = (currentMenuTracks && currentMenuTracks.length ? currentMenuTracks : [track])
+        .filter((t) => t.path)
+      if (!list.length) { toast('在线曲目没有本地文件'); break }
+      // 资源管理器定位一次只能定位一个，批量时逐个打开（上限 10，避免刷屏）
+      for (const t of list.slice(0, 10)) window.api.showInFolder(t.path).catch(() => {})
+      if (list.length > 10) toast('已定位前 10 个文件')
       break
-    case 'copy':
-      navigator.clipboard.writeText(`${track.title} - ${track.artist}`).then(() => toast('已复制'))
+    }
+    case 'copy': {
+      const list = (currentMenuTracks && currentMenuTracks.length ? currentMenuTracks : [track])
+      const text = list.map((t) => `${t.title} - ${t.artist || ''}`.trim()).join('\n')
+      navigator.clipboard.writeText(text).then(
+        () => toast(list.length > 1 ? `已复制 ${list.length} 首` : '已复制'),
+        () => toast('复制失败（剪贴板不可用）')
+      )
       break
+    }
     case 'set-gain': {
       if (state.exclusive) { toast('独占输出下手动增益不可用（会破坏位完美）'); return }
       const db = parseFloat(arg)
@@ -2233,6 +2336,14 @@ async function confirmRename() {
 }
 
 async function deletePlaylist(id) {
+  // v3.3.17：删歌单是不可恢复操作（主进程只 filter 后落盘），右键菜单点一下就没。
+  const pl = state.playlists.find((p) => p.id === id)
+  const n = pl && Array.isArray(pl.trackIds) ? pl.trackIds.length : 0
+  if (!window.confirm('删除歌单「' + (pl ? pl.name : '') + '」？' + (n ? '\n其中的 ' + n + ' 首歌曲不受影响，只是移出这个歌单。' : ''))) return
+  await deletePlaylistConfirmed(id)
+}
+
+async function deletePlaylistConfirmed(id) {
   const pl = state.playlists.find((p) => p.id === id)
   if (!pl) return
   try { await window.api.removePlaylist(id) }
@@ -2290,6 +2401,8 @@ function bindDirModal() {
 
 async function doScan() {
   if (scanning) return
+  // 与响度分析互斥（共用扫描遮罩，同时跑会互相覆盖进度并提前关遮罩）
+  if (state.analyzing) { toast('正在分析响度，稍后再扫描'); return }
   scanning = true
   UI.showScan('正在扫描音乐文件夹…')
   try {
@@ -2302,6 +2415,13 @@ async function doScan() {
       await window.api.patchSettings({ musicDirs: dirs })
     }
     const res = await window.api.scan(dirs)
+    // v3.3.17：已有扫描在跑时主进程立刻返回 skipped，真正那轮还在后台继续。
+    // 以前照样提示「扫描完成」并收起遮罩，用户看到的是半成品数据。
+    if (res && res.skipped) {
+      toast('已有扫描在进行，完成后自动刷新', 2500)
+      UI.hideScan()
+      return
+    }
     const tracks = await window.api.listTracks()
     setTracks(tracks)
     updateNavCounts()
@@ -2365,9 +2485,13 @@ async function onScanDone(res) {
           if (kept.length) player.setQueue(kept, Math.max(0, Math.min(player.index, kept.length - 1)), false)
           else player.stop()
         } else {
-          // 当前曲还在：直接换 tracks，不重建洗牌池、不打断本轮随机顺序
+          // 当前曲还在：直接换 tracks，不打断播放。
+          // v3.3.17：洗牌池里存的是**下标**，裁剪后所有下标都平移了 ——
+          // 不重建的话随机模式会指向错的歌（同一首连播、有的整轮不出现）。
           player.tracks = kept
           player.index = idx
+          // 重建为顺序下标：本轮随机顺序会重置（下一轮重新洗），但绝不会越界或指错
+          player._shufflePool = kept.map((_, i) => i)
           player.emit('queue-change', player.tracks, player.index)
         }
       }
@@ -2390,17 +2514,26 @@ function applyAbLoop() {
   if (typeof audio.setAbLoop === 'function') audio.setAbLoop(state.ab.a, state.ab.b)
 }
 
+let _abSig = ''
+
 function updateAbUi() {
   const btn = UI.els.btnAb
   if (!btn) return
   const { a, b } = state.ab
+  const durNow = (audio && audio.duration) || 0
+  // v3.3.17：time 事件 5~10Hz，每次都重算 title 字符串、toggle class、写两个 marker 的
+  // style.left（触发样式重算）—— A-B 是长期开着的功能，这是纯浪费。
+  // 只有 a / b / 时长变了才真正刷 DOM。
+  const sig = a + '|' + b + '|' + Math.round(durNow)
+  if (sig === _abSig) return
+  _abSig = sig
   btn.classList.toggle('arm', a != null && b == null)
   btn.classList.toggle('on', a != null && b != null)
   btn.textContent = a != null && b == null ? 'A-' : 'A-B'
   btn.title = a == null ? 'A-B 循环：点一下设起点，再点一下设终点'
     : b == null ? 'A 点已设 ' + fmtTime(a) + '，播放到终点位置再点一下'
       : 'A-B 循环中 ' + fmtTime(a) + ' → ' + fmtTime(b) + '，再点一下取消'
-  const dur = (audio && audio.duration) || 0
+  const dur = durNow
   const put = (el, t) => {
     if (!el) return
     if (t == null || !(dur > 0)) { el.hidden = true; return }
@@ -2417,6 +2550,7 @@ function syncAb() {
 }
 
 function resetAb(silent = true) {
+  _abSig = ''   // 强制下次重绘
   if (state.ab.a == null && state.ab.b == null) return
   state.ab = { a: null, b: null }
   syncAb()
@@ -2604,6 +2738,10 @@ function bindGlobalKeys() {
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && !inInput) {
       // 全选当前视图的可见曲目（v1.7）
+      // v3.3.17：在线/专辑/文件夹视图没有「表格行」，而且 renderView 在这几个分支
+      // 提前 return 不会更新 state.visible —— 以前会选中上一个本地视图的残留曲目，
+      // 用户看不见却会真的被批量收藏/加入歌单。
+      if (state.view === 'online' || state.view === 'albums' || state.view === 'folders') return
       e.preventDefault()
       state.selected = new Set(state.visible.map((t) => t.id))
       state.selAnchor = 0
@@ -2688,6 +2826,9 @@ function saveSession() {
   window.api.setSession({
     queueIds: ids,
     index: player.index,
+    // v3.3.17：同时记当前曲 id。恢复时队列里有已下架的在线曲（或曲库被扫描删曲），
+    // 只按 index 取会落到错误的歌上，进度还会被 seek 进那个错的文件。
+    currentId: cur ? cur.id : null,
     currentTime: audio.currentTime || 0,
     mode: player.mode
   }).catch(() => {})
