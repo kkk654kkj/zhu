@@ -17,8 +17,11 @@ echo "== 2) 体检 =="
 cd "$WS/lx-player" && node tools/check-dist.mjs "$DST"
 
 echo "== 3) 打便携包 =="
+mkdir -p "$ZIPDIR"
 cd "$DST"
 rm -f "$ZIPDIR/$ZIPNAME"
-"C:/Windows/System32/tar.exe" -a -cf "$ZIPDIR/$ZIPNAME" *
+# v3.3.10 重要：分发 zip 绝不能带 data/ —— 里面有用户的曲库列表、播放历史、
+# 设置和日志（隐私）。之前没排除，导致公开发布的包泄露了个人数据。
+"C:/Windows/System32/tar.exe" -a -cf "$ZIPDIR/$ZIPNAME" --exclude='data' --exclude='data/*' *
 ls -la "$ZIPDIR/$ZIPNAME"
 echo "== 完成 =="
