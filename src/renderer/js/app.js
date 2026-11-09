@@ -42,16 +42,13 @@ let maxIntent = 0   // btnMax 图标的状态意图 token（启动异步回调�
 
 /* ================= 启动 ================= */
 
-async function boot() {
-  UI.init()
-
-  // 上次退出时是迷你模式 → 先在界面侧切好布局，别让 320px 宽的窗口里闪一下完整界面
-  state.mini = await window.api.isMini().catch(() => false)
-  UI.setMini(state.mini)
-
-  // 主进程若正在建库，lib:list 会等它结束；超时先给个遮罩，避免空等白屏
+/**
+ * 拉取首屏所需数据并落到 state。
+ * 主进程若正在建库，lib:list 会等它结束；超过 400ms 先给个遮罩，避免空等白屏。
+ * @returns {Promise<{tracks: Array, session: object|null}>}
+ */
+async function loadInitialData() {
   const slowTimer = setTimeout(() => UI.showScan('正在载入音乐库…'), 400)
-
   const [settings, tracks, favs, hist, playlists, counts, session] = await Promise.all([
     window.api.getSettings(),
     window.api.listTracks(),
@@ -64,17 +61,23 @@ async function boot() {
   clearTimeout(slowTimer)
   UI.hideScan()
 
-  state.settings = settings
+  state.settings = settings || {}
   state.resumePos = Object.assign({}, (settings && settings.resumePos) || {})
   state.favorites = new Set(favs || [])
   state.history = hist || []
   state.playlists = playlists || []
   state.playCounts = counts || {}
-  state.lyricOffset = settings.lyricOffset || 0
-
+  state.lyricOffset = (settings && settings.lyricOffset) || 0
   applySettings()
+  return { tracks: tracks || [], session: session || null }
+}
 
-  // 引擎选择（v1.5）：独占输出走 mpv + WASAPI exclusive，其余情况仍是原来的 HTML5 + WebAudio
+/**
+ * 选音频引擎并建 Player（v1.5）。
+ * 独占输出走 mpv + WASAPI exclusive，其余情况仍是原来的 HTML5 + WebAudio。
+ * 独占起不来就退回共享输出，并把设置里的 exclusiveOutput 落成 false（下次启动不再白试）。
+ */
+async function createAudioEngine(settings) {
   let exclusiveOK = false
   if (settings.exclusiveOutput === true) {
     const r = await window.api.mpvStart(true).catch((err) => ({ ok: false, error: err && err.message }))
@@ -120,8 +123,50 @@ async function boot() {
     applyEq(eqSettings(), { persist: false })
     if (AudioFx.analyser) AudioFx.startSpectrum(UI.els.spectrum)
   }
+}
 
-  setTracks(tracks || [])
+/**
+ * 恢复上次会话的队列（不自动播放）。
+ * restoringSession 期间不要叠加断点续播，否则会和会话位置打架。
+ */
+function restoreSession(session) {
+  if (!session || !Array.isArray(session.queueIds) || !session.queueIds.length) return
+  const queue = session.queueIds.map((id) => state.byId.get(id)).filter(Boolean)
+  if (!queue.length) return
+  state.restoringSession = true
+  player.setQueue(queue, session.index || 0, false)
+  state.restoringSession = false
+  player.mode = session.mode || 'list'
+  UI.setMode(player.mode)
+  if (session.currentTime) {
+    audio.addEventListener('loadedmetadata', () => {
+      try { audio.currentTime = session.currentTime } catch (e) { /* 时长未知时忽略 */ }
+    }, { once: true })
+  }
+}
+
+/**
+ * 退出钩子与定时落盘。
+ * beforeunload 里的 IPC 是异步的，这里只保证「发起」；真正的同步 flush 在关窗 IPC 里做。
+ */
+function setupExitHooks() {
+  window.addEventListener('beforeunload', () => {
+    flushSaveSettings()
+    saveSession()
+  })
+  setInterval(saveSession, 10000)
+}
+
+async function boot() {
+  UI.init()
+
+  // 上次退出时是迷你模式 → 先在界面侧切好布局，别让 320px 宽的窗口里闪一下完整界面
+  state.mini = await window.api.isMini().catch(() => false)
+  UI.setMini(state.mini)
+
+  const { tracks, session } = await loadInitialData()
+  await createAudioEngine(state.settings)
+  setTracks(tracks)
 
   bindPlayer()
   bindUI()
@@ -146,12 +191,12 @@ async function boot() {
   UI.setVolume(player.volume, player.muted)
   UI.setMode(player.mode)
   UI.setLyricOffset(state.lyricOffset)
-  UI.setLyricPanelVisible(settings.showLyricPanel !== false)
-  UI.setNorm(settings.normalizeVolume === true)
+  UI.setLyricPanelVisible(state.settings.showLyricPanel !== false)
+  UI.setNorm(state.settings.normalizeVolume === true)
   updateHifiBadge()
   showReleaseNotice()
   window.api.dlyricIsOpen().then((open) => {
-    UI.setDLyric(open, open && settings.desktopLyric && settings.desktopLyric.locked)
+    UI.setDLyric(open, open && state.settings.desktopLyric && state.settings.desktopLyric.locked)
   }).catch(() => {})
   // 歌词窗口那边改了锁定/自行关闭，主进程会推最新状态过来
   window.api.onDlyricOpenState((st) => {
@@ -165,23 +210,7 @@ async function boot() {
   updateNavCounts()
   renderPlaylists()
 
-  // 恢复上次会话（不自动播放）
-  if (session && Array.isArray(session.queueIds) && session.queueIds.length) {
-    const queue = session.queueIds.map((id) => state.byId.get(id)).filter(Boolean)
-    if (queue.length) {
-      state.restoringSession = true
-      player.setQueue(queue, session.index || 0, false)
-      state.restoringSession = false
-      player.mode = session.mode || 'list'
-      UI.setMode(player.mode)
-      if (session.currentTime) {
-        audio.addEventListener('loadedmetadata', () => {
-          try { audio.currentTime = session.currentTime } catch {}
-        }, { once: true })
-      }
-    }
-  }
-
+  restoreSession(session)
   switchView('all')
 
   if (!state.tracks.length) {
@@ -213,7 +242,9 @@ async function boot() {
   })
   // v3.3.10：第二实例带来的关联文件 —— 曲库按「文件夹」组织，单文件导入
   // 尚未实现，先给出可见反馈（以前完全静默）
-  window.api.onOpenFiles(({ paths }) => {
+  window.api.onOpenFiles((p) => {
+    const paths = (p && p.paths) || []
+    if (!paths.length) return
     toast('收到 ' + paths.length + ' 个文件：单文件导入开发中，请先把文件所在文件夹加进曲库', 6000)
   })
   // 外面改了当前这首的 .lrc（main 进程 fs.watch 推过来）→ 立刻重读重画，不用切歌/重启
@@ -239,12 +270,7 @@ async function boot() {
     UI.setMini(state.mini)
   })
 
-  window.addEventListener('beforeunload', () => {
-    // 退出前把 debounce 里攒的设置同步发出去（IPC 异步，这里至少保证发起）
-    flushSaveSettings()
-    saveSession()
-  })
-  setInterval(saveSession, 10000)
+  setupExitHooks()
 
   // v3.3.7：isMaximized 是 IPC 函数，直接放条件里恒为真 —— 必须真的调一次
   // v3.3.13：异步回调可能晚于用户点击/toggleMaximize 落地，用意图 token 比对，
@@ -1462,7 +1488,25 @@ async function loadLyric(track) {
 
 /* ================= UI 接线 ================= */
 
+/**
+ * 交互接线总入口。
+ * 以前是一个 450 行的巨型函数，改一个按钮都要在整段里找；
+ * 现在按界面区域拆成 10 个 bindXxx()，调用顺序与原注册顺序完全一致。
+ */
 function bindUI() {
+  bindSearch()
+  bindPlaylistUi()
+  bindTrackListUi()
+  bindLyricUi()
+  bindTransportUi()
+  bindDeviceUi()
+  bindEqUi()
+  bindPopupUi()
+  bindWindowUi()
+}
+
+/** 搜索框（输入去抖 + 清除按钮） */
+function bindSearch() {
   // 搜索
   const doSearch = debounce((q) => {
     state.query = q.trim()
@@ -1476,7 +1520,10 @@ function bindUI() {
     inp.focus()
     doSearch('')
   })
+}
 
+/** 侧边栏：导航、新建/导入歌单、歌单右键与改名弹窗 */
+function bindPlaylistUi() {
   // 侧边栏导航
   document.getElementById('sidebar').addEventListener('click', (e) => {
     const del = e.target.closest('.pl-del')
@@ -1534,6 +1581,10 @@ function bindUI() {
     if (e.key === 'Escape') { e.preventDefault(); closeRenameModal() }
   })
 
+}
+
+/** 曲目列表：点选播放 / Ctrl·Shift 多选 / 右键菜单 / 表头排序 / 扫描入口 */
+function bindTrackListUi() {
   // 列表点击
   document.getElementById('tableBody').addEventListener('click', (e) => {
     const row = e.target.closest('.tr')
@@ -1626,6 +1677,10 @@ function bindUI() {
   document.getElementById('btnEmptyScan').addEventListener('click', doScan)
   document.getElementById('btnScan').addEventListener('click', openDirModal)
 
+}
+
+/** 歌词面板：显隐、字号、每曲偏移、点行跳转 */
+function bindLyricUi() {
   // 歌词面板开关
   document.getElementById('btnLyricToggle').addEventListener('click', () => {
     const visible = document.getElementById('lyricPanel').classList.contains('hidden')
@@ -1675,6 +1730,10 @@ function bindUI() {
     if (item && item.t != null) player.seek(item.t - state.lyricOffset)
   })
 
+}
+
+/** 播放控制条：播放/上下曲/模式/收藏/进度/音量/音量均衡开关 */
+function bindTransportUi() {
   // 播放控制
   document.getElementById('btnPlay').addEventListener('click', () => {
     if (!player.current && state.visible.length) {
@@ -1692,13 +1751,7 @@ function bindUI() {
   document.getElementById('mvFav').addEventListener('click', toggleFavoriteCurrent)
 
   // 进度条拖动
-  bindBar(document.getElementById('progressBar'), (ratio) => {
-    player.seekRatio(ratio)
-  }, (ratio) => {
-    UI.setProgress(ratio * (audio.duration || 0), audio.duration || 0)
-  }, () => {
-    UI.setProgress(audio.currentTime, audio.duration || 0)
-  })
+  bindProgressBar(document.getElementById('progressBar'))
 
   // 音量
   bindBar(document.getElementById('volBar'), (ratio) => {
@@ -1738,6 +1791,10 @@ function bindUI() {
     ])
   })
 
+}
+
+/** 独占输出相关入口：桌面歌词按钮、位完美开关、设备面板、高精度音量 */
+function bindDeviceUi() {
   // 桌面歌词
   document.getElementById('btnDLyric').addEventListener('click', toggleDesktopLyric)
 
@@ -1771,6 +1828,10 @@ function bindUI() {
     if (chip) setExclusiveVolume(chip.dataset.v)
   })
 
+}
+
+/** 均衡器面板：开关 / 预设 / 滑块（拖动实时生效，双击归零） */
+function bindEqUi() {
   // 均衡器面板（独占输出下禁用：任何软件处理都会破坏位完美）
   document.getElementById('btnEq').addEventListener('click', (e) => {
     e.stopPropagation()
@@ -1821,6 +1882,10 @@ function bindUI() {
     setEqBand(Number(el.dataset.i), 0)
   })
 
+}
+
+/** 浮层与全局点击：队列面板、A-B 循环、拖拽、"点外部收起"、右键菜单动作分发 */
+function bindPopupUi() {
   // 队列
   document.getElementById('btnQueue').addEventListener('click', (e) => {
     e.stopPropagation()
@@ -1858,6 +1923,10 @@ function bindUI() {
     handleCtxAction(e.detail.act, e.detail.arg)
   })
 
+}
+
+/** 窗口控制：最小化/最大化/关闭、标题栏双击、迷你模式切换 */
+function bindWindowUi() {
   // 窗口控制
   document.getElementById('btnMin').addEventListener('click', () => window.api.minimize().catch(() => {}))
   document.getElementById('btnMax').addEventListener('click', async () => {
@@ -1902,13 +1971,19 @@ function bindUI() {
   document.getElementById('mvMode').addEventListener('click', () => player.cycleMode())
 
   // 迷你卡片进度条拖动（与完整播放条同一套逻辑）
-  bindBar(document.getElementById('mvBar'), (ratio) => {
-    player.seekRatio(ratio)
-  }, (ratio) => {
-    UI.setProgress(ratio * (audio.duration || 0), audio.duration || 0)
-  }, () => {
-    UI.setProgress(audio.currentTime, audio.duration || 0)
-  })
+  bindProgressBar(document.getElementById('mvBar'))
+}
+
+/**
+ * 进度条拖拽：完整播放条与迷你卡片共用同一套提交/预览/回弹逻辑。
+ * duration 取实时值（切歌瞬间 duration 还没更新过，这里每次读最新的）。
+ */
+function bindProgressBar(el) {
+  bindBar(el,
+    (ratio) => player.seekRatio(ratio),
+    (ratio) => UI.setProgress(ratio * (audio.duration || 0), audio.duration || 0),
+    () => UI.setProgress(audio.currentTime, audio.duration || 0)
+  )
 }
 
 /** 进度/音量条通用拖拽 */

@@ -189,69 +189,86 @@ const UI = {
 
   /* ---------------- 播放条基本信息 ---------------- */
 
+  /**
+   * 三处界面（完整播放条 / 歌词面板 / 迷你卡片）同时设置封面。
+   * 无封面时退回音符图标；<img> 带 onerror 自清，避免裂图占位。
+   */
+  _setCovers(cover) {
+    const html = cover ? `<img src="${esc(cover)}" alt="" onerror="this.remove()" />` : icon('music')
+    this.els.pbCover.innerHTML = html
+    this.els.lpCover.innerHTML = html
+    this.els.mvCover.innerHTML = html
+  },
+
+  /** 换按钮内的 svg 图标（主播放条与迷你卡片共用，名字需含 i- 前缀） */
+  _setIcon(el, name) {
+    if (!el) return
+    const use = el.querySelector('svg use')
+    if (use) use.setAttribute('href', '#' + name)
+  },
+
   renderNowPlaying(track, playing) {
-    if (!track) {
-      this.els.pbTitle.textContent = '未在播放'
-      this.els.pbArtist.textContent = '—'
-      this.els.pbCover.innerHTML = icon('music')
-      this.els.lpTitle.textContent = '未在播放'
-      this.els.lpArtist.textContent = ''
-      this.els.lpCover.innerHTML = icon('music')
-      this.els.tCur.textContent = '0:00'
-      this.els.tDur.textContent = '0:00'
-      this.els.mvTitle.textContent = '未在播放'
-      this.els.mvArtist.textContent = '—'
-      this.els.mvTitle.title = ''
-      this.els.mvCover.innerHTML = icon('music')
-      this.els.mvLyric.textContent = ''
-      this._npKey = null
-      this.setPlayIcon(false)
-      return
-    }
+    if (!track) { this._clearNowPlaying(); return }
     // v3.3.7：同一首歌重复调用（播放/暂停都会触发）不再重建封面 <img> ——
     // 以前每次暂停/恢复都新建三处 <img>，浏览器重新解码加载，肉眼可见闪烁
     // v3.3.9：键带 cover —— 播放中后台扫描补到封面（同 id、cover 变了）也要刷新
     const npKey = track.id + '|' + (track.cover || '')
     const npChanged = npKey !== this._npKey
     this._npKey = npKey
-    this.els.pbTitle.textContent = track.title
-    this.els.pbTitle.title = track.title
-    this.els.pbArtist.textContent = track.artist || '未知歌手'
-    this.els.lpTitle.textContent = track.title
-    this.els.lpArtist.textContent = (track.artist || '未知歌手') + (track.album ? ' · ' + track.album : '')
-    this.els.mvTitle.textContent = track.title
-    this.els.mvTitle.title = track.title + (track.artist ? ' — ' + track.artist : '')
-    this.els.mvArtist.textContent = track.artist || '未知歌手'
+    this._renderNowPlayingText(track)
     if (npChanged) {
-      if (track.cover) {
-        const img = `<img src="${esc(track.cover)}" alt="" onerror="this.remove()" />`
-        this.els.pbCover.innerHTML = img
-        this.els.lpCover.innerHTML = img
-        this.els.mvCover.innerHTML = img
-      } else {
-        this.els.pbCover.innerHTML = icon('music')
-        this.els.lpCover.innerHTML = icon('music')
-        this.els.mvCover.innerHTML = icon('music')
-      }
+      this._setCovers(track.cover)
       this.els.tDur.textContent = fmtDuration(track.duration)
     }
     this.setPlayIcon(playing)
   },
 
+  /** 有曲目时更新三处文案（封面与时长另算，见 renderNowPlaying） */
+  _renderNowPlayingText(track) {
+    const artist = track.artist || '未知歌手'
+    this.els.pbTitle.textContent = track.title
+    this.els.pbTitle.title = track.title
+    this.els.pbArtist.textContent = artist
+    this.els.lpTitle.textContent = track.title
+    this.els.lpArtist.textContent = artist + (track.album ? ' · ' + track.album : '')
+    this.els.mvTitle.textContent = track.title
+    this.els.mvTitle.title = track.title + (track.artist ? ' — ' + track.artist : '')
+    this.els.mvArtist.textContent = artist
+  },
+
+  /** 无曲目时的空态：三处一起清干净，避免残留上一首的封面/标题/提示 */
+  _clearNowPlaying() {
+    this._setCovers(null)
+    this.els.pbTitle.textContent = '未在播放'
+    this.els.pbTitle.title = ''
+    this.els.pbArtist.textContent = '—'
+    this.els.lpTitle.textContent = '未在播放'
+    this.els.lpArtist.textContent = ''
+    this.els.mvTitle.textContent = '未在播放'
+    this.els.mvArtist.textContent = '—'
+    this.els.mvTitle.title = ''
+    this.els.mvLyric.textContent = ''
+    this.els.tCur.textContent = '0:00'
+    this.els.tDur.textContent = '0:00'
+    this._npKey = null
+    this.setPlayIcon(false)
+  },
+
   setPlayIcon(playing) {
-    const svg = this.els.btnPlay.querySelector('svg use')
-    if (svg) svg.setAttribute('href', playing ? '#i-pause' : '#i-play')
-    this.els.btnPlay.title = playing ? '暂停' : '播放'
-    const ms = this.els.mvPlay.querySelector('svg use')
-    if (ms) ms.setAttribute('href', playing ? '#i-pause' : '#i-play')
-    this.els.mvPlay.title = playing ? '暂停' : '播放'
+    const name = playing ? 'i-pause' : 'i-play'
+    const title = playing ? '暂停' : '播放'
+    this._setIcon(this.els.btnPlay, name)
+    this.els.btnPlay.title = title
+    this._setIcon(this.els.mvPlay, name)
+    this.els.mvPlay.title = title
   },
 
   setFavorite(isFav) {
+    const title = isFav ? '取消收藏' : '收藏'
     this.els.btnFav.classList.toggle('on', isFav)
-    this.els.btnFav.title = isFav ? '取消收藏' : '收藏'
+    this.els.btnFav.title = title
     this.els.mvFav.classList.toggle('on', isFav)
-    this.els.mvFav.title = isFav ? '取消收藏' : '收藏'
+    this.els.mvFav.title = title
   },
 
   setProgress(cur, dur) {
@@ -272,19 +289,18 @@ const UI = {
     this.els.volFill.style.width = pct
     this.els.volDot.style.left = pct
     this.els.volVal.textContent = muted ? '静音' : Math.round(v * 100)
-    const use = this.els.btnMute.querySelector('svg use')
-    if (use) use.setAttribute('href', muted || v === 0 ? '#i-volume-off' : '#i-volume')
+    this._setIcon(this.els.btnMute, muted || v === 0 ? 'i-volume-off' : 'i-volume')
   },
 
   setMode(mode) {
-    const use = this.els.btnMode.querySelector('svg use')
-    if (use) use.setAttribute('href', '#' + MODE_ICON[mode])
-    this.els.btnMode.title = MODE_LABEL[mode]
-    this.els.btnMode.classList.toggle('on', mode !== 'list')
-    const mu = this.els.mvMode.querySelector('svg use')
-    if (mu) mu.setAttribute('href', '#' + MODE_ICON[mode])
-    this.els.mvMode.title = MODE_LABEL[mode]
-    this.els.mvMode.classList.toggle('on', mode !== 'list')
+    // 未知模式名直接忽略：拼出 '#undefined' 会把图标清空
+    if (!MODE_ICON[mode]) return
+    for (const el of [this.els.btnMode, this.els.mvMode]) {
+      if (!el) continue
+      this._setIcon(el, MODE_ICON[mode])
+      el.title = MODE_LABEL[mode]
+      el.classList.toggle('on', mode !== 'list')
+    }
   },
 
   /** 切换迷你布局（窗口缩放由主进程负责，这里只管界面） */
@@ -443,8 +459,7 @@ const UI = {
     this.lyricState.index = -2
     this.els.mvLyric.textContent = ''
     if (!parsed || !parsed.lines.length) {
-      box.innerHTML = '<div class="lyric-empty">' +
-        (trackTitle ? '暂无歌词' : '暂无歌词') + '</div>'
+      box.innerHTML = '<div class="lyric-empty">暂无歌词</div>'
       return
     }
     box.innerHTML = parsed.lines.map((l, i) =>
@@ -536,42 +551,49 @@ const UI = {
 
   /* ---------------- 文件夹网格（v1.7） ---------------- */
 
-  renderFolderGrid(groups, onClick) {
+  /**
+   * 卡片网格通用渲染：文件夹视图与专辑视图结构完全一致，
+   * 差异只有 data-* 属性名、图标和副标题文案，所以合并到一处。
+   * @param {Array} cards [{value, cover, icon, name, sub}]，sub 由调用方转义好
+   * @param {string} dataKey 'dir' | 'album'
+   * @param {(value:string)=>void} onClick
+   */
+  _renderCardGrid(cards, dataKey, onClick) {
     const body = this.els.tableBody
-    body.innerHTML = ''
     const grid = document.createElement('div')
     grid.className = 'album-grid'
-    grid.innerHTML = groups.map((g) => `
-      <div class="album-card" data-dir="${esc(g.dir)}" title="${esc(g.dir)}">
-        <div class="ac-cover">${g.cover ? `<img src="${esc(g.cover)}" alt="" onerror="this.remove()" />` : icon('folder')}</div>
-        <div class="ac-name">${esc(g.name)}</div>
-        <div class="ac-sub">${g.count} 首${g.sub ? ' · ' + esc(g.sub) : ''}</div>
+    grid.innerHTML = cards.map((c) => `
+      <div class="album-card" data-${dataKey}="${esc(c.value)}"${dataKey === 'dir' ? ` title="${esc(c.value)}"` : ''}>
+        <div class="ac-cover">${c.cover ? `<img src="${esc(c.cover)}" alt="" onerror="this.remove()" />` : icon(c.icon)}</div>
+        <div class="ac-name">${esc(c.name)}</div>
+        <div class="ac-sub">${c.sub}</div>
       </div>`).join('')
+    body.innerHTML = ''
     body.appendChild(grid)
     grid.addEventListener('click', (e) => {
       const card = e.target.closest('.album-card')
-      if (card) onClick(card.dataset.dir)
+      if (card) onClick(card.dataset[dataKey])
     })
   },
 
-  /* ---------------- 专辑网格 ---------------- */
+  renderFolderGrid(groups, onClick) {
+    this._renderCardGrid(groups.map((g) => ({
+      value: g.dir,
+      cover: g.cover,
+      icon: 'folder',
+      name: g.name,
+      sub: `${g.count} 首${g.sub ? ' · ' + esc(g.sub) : ''}`
+    })), 'dir', onClick)
+  },
 
   renderAlbumGrid(albums, onClick) {
-    const body = this.els.tableBody
-    body.innerHTML = ''
-    const grid = document.createElement('div')
-    grid.className = 'album-grid'
-    grid.innerHTML = albums.map((a) => `
-      <div class="album-card" data-album="${esc(a.name)}">
-        <div class="ac-cover">${a.cover ? `<img src="${esc(a.cover)}" alt="" onerror="this.remove()" />` : icon('album')}</div>
-        <div class="ac-name">${esc(a.name || '未知专辑')}</div>
-        <div class="ac-sub">${esc(a.artist || '')} · ${a.count} 首</div>
-      </div>`).join('')
-    body.appendChild(grid)
-    grid.addEventListener('click', (e) => {
-      const card = e.target.closest('.album-card')
-      if (card) onClick(card.dataset.album)
-    })
+    this._renderCardGrid(albums.map((a) => ({
+      value: a.name,
+      cover: a.cover,
+      icon: 'album',
+      name: a.name || '未知专辑',
+      sub: `${esc(a.artist || '')} · ${a.count} 首`
+    })), 'album', onClick)
   },
 
   /* ---------------- 右键菜单 ---------------- */

@@ -15,6 +15,20 @@ const path = require('path')
  */
 const SCHEMA_VERSION = 1
 
+/**
+ * 合法的顶层数据结构判定：必须是普通对象。
+ * 合法 JSON 但顶层是数组/原始值（磁盘损坏、误编辑）时，deepMerge 会把它整体当数据，
+ * 之后一次 patch 就把 settings/playlists 全部清空并写回固化 —— 所以每个入口都要挡。
+ */
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+}
+
+/** 深拷贝默认值：不能让 this.data 直接持有 defaults 的引用，否则 patch 会污染默认值 */
+function cloneDefaults(defaults) {
+  return JSON.parse(JSON.stringify(defaults))
+}
+
 function deepMerge(base, patch) {
   if (Array.isArray(base) || Array.isArray(patch)) return patch === undefined ? base : patch
   if (typeof base !== 'object' || base === null) return patch === undefined ? base : patch
@@ -39,7 +53,7 @@ class Store {
   constructor(file, defaults, opts = {}) {
     this.file = file
     this.defaults = defaults
-    this.data = JSON.parse(JSON.stringify(defaults))
+    this.data = cloneDefaults(defaults)
     this._timer = null
     this._loading = true
     this._needsFlush = false
@@ -47,6 +61,8 @@ class Store {
     this._dirty = false
     this._retries = 0
     this._retryTimer = null
+    // tmp 是否已「写完并 fsync」：决定失败时能不能删残件（见 _flush 的失败分支）
+    this._tmpComplete = false
     this.onError = opts.onError || ((msg) => console.error(msg))
     this.load()
     this._loading = false
@@ -66,17 +82,15 @@ class Store {
         // v3.3.10：顶层必须是普通对象 —— 合法 JSON 但顶层是数组/原始值时
         // （磁盘损坏/误编辑），deepMerge 会把它整体当数据，之后一次 patch
         // 就把 settings/playlists 全部清空并写回固化
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          throw new Error('顶层结构损坏（非对象）')
-        }
-        this.data = deepMerge(JSON.parse(JSON.stringify(this.defaults)), parsed)
+        if (!isPlainObject(parsed)) throw new Error('顶层结构损坏（非对象）')
+        this.data = deepMerge(cloneDefaults(this.defaults), parsed)
         this._migrate(parsed)
       } else {
         this.data._v = SCHEMA_VERSION
       }
     } catch (err) {
       console.error('[store] 读取失败，使用默认值:', err.message)
-      this.data = JSON.parse(JSON.stringify(this.defaults))
+      this.data = cloneDefaults(this.defaults)
       this.data._v = SCHEMA_VERSION
     }
   }
@@ -97,7 +111,7 @@ class Store {
       this._quarantineCorruptTmp(tmp)
       return null
     }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    if (!isPlainObject(parsed)) {
       this._quarantineCorruptTmp(tmp)
       return null
     }
@@ -142,7 +156,7 @@ class Store {
   replace(next) {
     // v3.3.13：与 load() 一致校验顶层结构，防止数组/null 把 this.data
     // 变成非法结构后 store.get().settings 抛错、当前会话崩
-    if (!next || typeof next !== 'object' || Array.isArray(next)) {
+    if (!isPlainObject(next)) {
       this.onError('[store] replace 忽略非法顶层结构（非普通对象）')
       return this.data
     }
@@ -188,42 +202,58 @@ class Store {
     this._flush()
   }
 
+  /**
+   * 落盘：写 tmp → fsync → rename → fsync 目录。
+   * 失败不抛出：置 _dirty 并挂有上限的重试链（调用方都是「尽力而为」的写设置路径，
+   * 抛错会把上层的业务逻辑一起打断）。
+   */
   _flush() {
-    let fd = null
-    let wrote = false
     try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true })
-      const tmp = this.file + '.tmp'
-      fd = fs.openSync(tmp, 'w')
-      // v3.3.13：writeSync 可能短写；writeFileSync(fd,...) 会循环写满
-      fs.writeFileSync(fd, JSON.stringify(this.data, null, 2), 'utf8')
-      fs.fsyncSync(fd)
-      fs.closeSync(fd)
-      fd = null
-      wrote = true
-      fs.renameSync(tmp, this.file)
-      // v3.3.13：rename 后 fsync 父目录，让目录项本身也落盘（防断电丢目录项）。
-      // Windows 对目录 fsync 会抛 EBADF/EINVAL，忽略即可，不影响文件写入成功
-      let dirFd = null
-      try {
-        dirFd = fs.openSync(path.dirname(this.file), 'r')
-        fs.fsyncSync(dirFd)
-      } catch (e) {
-        /* Windows 不支持目录 fsync，忽略 */
-      } finally {
-        if (dirFd !== null) { try { fs.closeSync(dirFd) } catch (e) { /* 已关 */ } }
-      }
+      this._writeAtomically()
       this._dirty = false
       this._retries = 0
     } catch (err) {
-      if (fd) { try { fs.closeSync(fd) } catch (e) {} }
       this._dirty = true
       this.onError('[store] 写入失败: ' + err.message)
       // v3.3.13：rename 失败时 tmp 是「已写完并 fsync 的完整新数据」，不能删；
-      // 只有写入阶段失败才清理残件
-      if (!wrote) { try { fs.unlinkSync(this.file + '.tmp') } catch (e) { /* 忽略 */ } }
+      // 只有写入阶段失败（_tmpComplete 未置位）才清理残件
+      if (!this._tmpComplete) { try { fs.unlinkSync(this.file + '.tmp') } catch (e) { /* 忽略 */ } }
       // 写失败后续上重试链（_scheduleRetry 自带 3 次上限守卫）
       this._scheduleRetry()
+    }
+  }
+
+  /** 原子写本体：任何一步抛错都由 _flush 统一处理 */
+  _writeAtomically() {
+    fs.mkdirSync(path.dirname(this.file), { recursive: true })
+    const tmp = this.file + '.tmp'
+    this._tmpComplete = false
+    const fd = fs.openSync(tmp, 'w')
+    try {
+      // v3.3.13：writeSync 可能短写；writeFileSync(fd,...) 会循环写满
+      fs.writeFileSync(fd, JSON.stringify(this.data, null, 2), 'utf8')
+      fs.fsyncSync(fd)
+    } finally {
+      try { fs.closeSync(fd) } catch (e) { /* 已关闭 */ }
+    }
+    this._tmpComplete = true
+    fs.renameSync(tmp, this.file)
+    this._fsyncDir()
+  }
+
+  /**
+   * rename 后 fsync 父目录，让目录项本身也落盘（防断电丢目录项）。
+   * Windows 对目录 fsync 会抛 EBADF/EINVAL，忽略即可，不影响文件写入成功。
+   */
+  _fsyncDir() {
+    let dirFd = null
+    try {
+      dirFd = fs.openSync(path.dirname(this.file), 'r')
+      fs.fsyncSync(dirFd)
+    } catch (e) {
+      /* Windows 不支持目录 fsync，忽略 */
+    } finally {
+      if (dirFd !== null) { try { fs.closeSync(dirFd) } catch (e) { /* 已关 */ } }
     }
   }
 }

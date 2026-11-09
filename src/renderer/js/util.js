@@ -20,18 +20,23 @@ function icon(name) {
   return '<svg><use href="#i-' + name + '"/></svg>'
 }
 
-function fmtTime(sec) {
-  if (!isFinite(sec) || sec < 0) sec = 0
-  const s = Math.floor(sec % 60)
-  const m = Math.floor(sec / 60)
+/** 秒 → m:ss。内部共用实现：两个对外函数只在「无效值怎么显示」上不同 */
+function mmss(sec) {
+  const v = isFinite(sec) && sec > 0 ? sec : 0
+  const s = Math.floor(v % 60)
+  const m = Math.floor(v / 60)
   return m + ':' + String(s).padStart(2, '0')
 }
 
+/** 播放进度：无效/负数一律按 0 显示（"0:00"），不要出现 "--:--" 抖动 */
+function fmtTime(sec) {
+  return mmss(sec)
+}
+
+/** 曲目时长：未知时显示占位符（列表里 "--:--" 比 "0:00" 更能说明"没有数据"） */
 function fmtDuration(sec) {
   if (!isFinite(sec) || sec <= 0) return '--:--'
-  const s = Math.floor(sec % 60)
-  const m = Math.floor(sec / 60)
-  return m + ':' + String(s).padStart(2, '0')
+  return mmss(sec)
 }
 
 function fmtSize(bytes) {
@@ -199,20 +204,15 @@ class Emitter {
 function matchQuery(track, q) {
   if (!q) return true
   const needle = q.toLowerCase()
-  if ((track.title || '').toLowerCase().includes(needle)) return true
-  if ((track.artist || '').toLowerCase().includes(needle)) return true
-  if ((track.album || '').toLowerCase().includes(needle)) return true
-  if ((track.fileName || '').toLowerCase().includes(needle)) return true
+  const fields = [track.title, track.artist, track.album, track.fileName]
+  if (fields.some((f) => String(f || '').toLowerCase().includes(needle))) return true
   // 拼音：全拼（zhoujielun）与首字母（zjl），字段由主进程在扫描时算好。
   // 按空格分段比较：py/pyf 里 标题、歌手、专辑是分开的，逐段判断能避免
   // 「上一段结尾 + 下一段开头」拼出假匹配（搜 zj 命中一大片）
   const compact = needle.replace(/\s+/g, '')
-  if (compact) {
-    const hit = (field) => String(field || '').split(/\s+/).some((seg) => seg.includes(compact))
-    if (hit(track.py)) return true
-    if (hit(track.pyf)) return true
-  }
-  return false
+  if (!compact) return false
+  const hit = (field) => String(field || '').split(/\s+/).some((seg) => seg.includes(compact))
+  return hit(track.py) || hit(track.pyf)
 }
 
 function sameTrackIds(a, b) {
