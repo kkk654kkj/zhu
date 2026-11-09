@@ -141,8 +141,13 @@ const CASES = [
   ['歌词居中（有歌词行时）',
     `(() => { const box = document.querySelector('#lpLyrics')
        if (!box) return { skip: true }
-       const a = [...box.querySelectorAll('.lyric-line')].find((n) => n.classList.contains('active'))
+       const nodes = [...box.querySelectorAll('.lyric-line')]
+       const a = nodes.find((n) => n.classList.contains('active'))
        if (!a) return { skip: true }
+       // 前两行/后两行上方（下方）没有足够的滚动空间，物理上不可能居中
+       // （scrollTop 不能为负），这不是缺陷 —— 跳过以免会话恢复到曲目开头时误报
+       const i = nodes.indexOf(a)
+       if (i < 2 || i >= nodes.length - 2) return { skip: true }
        const br = box.getBoundingClientRect(), ar = a.getBoundingClientRect()
        return { skip: false, delta: Math.round((ar.top - br.top) - (br.height - ar.height) / 2) } })()`,
     (v) => v && (v.skip === true || Math.abs(v.delta) <= 40)],

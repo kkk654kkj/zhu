@@ -200,7 +200,9 @@ const kw = {
       const t = Number(l.time) || 0
       const mm = String(Math.floor(t / 60)).padStart(2, '0')
       const ss = String(Math.floor(t % 60)).padStart(2, '0')
-      const cs = String(Math.round((t % 1) * 100)).padStart(2, '0')
+      // v3.3.16：截到 99 —— Math.round((t%1)*100) 在尾数 ≥0.995 时会给出 100，
+      // 而 padStart(2) 不截断，会拼出 [00:12.100]，LRC 解析器按三位百分秒解析出错
+      const cs = String(Math.min(99, Math.round((t % 1) * 100))).padStart(2, '0')
       return `[${mm}:${ss}.${cs}]${l.lineLyric || ''}`
     })
     return head.concat(lines).join('\n')
@@ -548,6 +550,11 @@ const urlCache = new Map()   // key: src:id:prefer → { url, ext, bitrate, dura
 
 /** v3.3.7：直链缓存加上限淘汰 —— 以前只进不出，长会话缓慢膨胀 */
 function urlCachePut(key, rec) {
+  // v3.3.16：探测不可信（unverified）或只是试听片段（partial）的结果一律不入缓存。
+  // 以前只在 resolvePlayable 的某一处做了判断，getPlayable 的普通分支与降级链
+  // 仍会无条件写入 —— 于是 30 秒片段/死链会被当成「完整版」缓存 20 分钟，
+  // 期间同一首歌再怎么点都直接命中它，连换源都不试。
+  if (!rec || rec.unverified || rec.partial) return
   if (urlCache.size > 300) {
     const now = Date.now()
     for (const [k, v] of urlCache) { if (now - v.at > URL_TTL_MS) urlCache.delete(k) }
@@ -1069,7 +1076,10 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
     try {
       const got = await src.getUrl(song, prefer)
       if (got && got.url) {
-        const probed = await probeStream(got, song.duration || got.duration)
+        // 三个参数缺一不可：realDuration 是「接口自报的这段音频有多长」，
+        // expectDuration 是「这首歌本该多长」。只传前两个会让「片段时长明显偏短」
+        // 这条判据永远为假 —— 45 秒剪辑版按 240 秒算出来的码率反而很健康。
+        const probed = await probeStream(got, got.duration || song.duration || 0, song.duration || 0)
         if (probed.unverified) {
           // v3.3.8：探测两次都失败的结果不进 20 分钟直链缓存
           return { ...probed, song, fallback: false }

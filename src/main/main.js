@@ -497,8 +497,12 @@ function cacheTry(song, cls) {
       cacheSaveSoon()
       return null
     }
-    rec.at = Date.now() // 命中即刷新，做 LRU
-    cacheSaveSoon()
+    // 命中即续期做 LRU，但不必每次都写盘：连点试听会让 index.json
+    // 在几秒内被重写十几次。5 分钟的续期精度对缓存淘汰完全够用。
+    if (!rec.at || Date.now() - rec.at > 5 * 60 * 1000) {
+      rec.at = Date.now()
+      cacheSaveSoon()
+    }
     return { path: fp, rec, cls }
   } catch (err) {
     delete idx[key]
@@ -606,7 +610,6 @@ function cacheStats() {
   }
 }
 
-/** 从磁盘出流，支持 Range（拖动进度条要靠它） */
 /**
  * v3.3.13：这是白名单外的第二条本地读通道，必须断言文件仍落在
  * 缓存目录 / 数据目录之内（realpath 后比较，防被篡改索引 + junction 绕过）。
@@ -2356,7 +2359,22 @@ async function dlRun(task) {
     if (info.headers && typeof info.headers === 'object') Object.assign(headers, info.headers)
     if (offset > 0) headers.Range = 'bytes=' + offset + '-'
 
-    const res = await fetch(info.url, { headers, signal: ctrl.signal, redirect: 'follow' })
+    // v3.3.16：握手阶段单独限时。下载同样会卡在「连接已建立、响应头一直不来」，
+    // 而 ctrl 只服务于用户暂停/删除 —— 拿它当超时会把「超时」误判成「用户暂停」。
+    const headCtrl = new AbortController()
+    const headTimer = setTimeout(() => { try { headCtrl.abort() } catch (e) { /* 忽略 */ } }, 20000)
+    let res
+    try {
+      res = await fetch(info.url, {
+        headers,
+        signal: typeof AbortSignal.any === 'function'
+          ? AbortSignal.any([ctrl.signal, headCtrl.signal])
+          : ctrl.signal,
+        redirect: 'follow'
+      })
+    } finally {
+      clearTimeout(headTimer)
+    }
     if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status)
     // 服务端不认 Range 就会回 200 全量，这时只能从头写
     if (res.status === 200 && offset > 0) offset = 0
@@ -2378,6 +2396,16 @@ async function dlRun(task) {
       }
     })
     const reader = res.body.getReader()
+    // 只建一个 drain 等待器：以前每次写阻塞都新建一个 once('drain')，
+    // 而被 wsError / abort 赢下的 race 不会移除那个监听，长下载会累积到
+    // MaxListenersExceededWarning，且监听闭包一直攥着 buffer 引用
+    let drainWait = null
+    const waitDrain = () => {
+      if (!drainWait) {
+        drainWait = new Promise((r) => ws.once('drain', () => { drainWait = null; r() }))
+      }
+      return drainWait
+    }
     let lastT = Date.now()
     let lastB = task.received
     let lastEmit = 0
@@ -2388,7 +2416,7 @@ async function dlRun(task) {
       task.received += buf.length
       if (!ws.write(buf)) {
         const ev = await Promise.race([
-          new Promise((r) => ws.once('drain', r)),
+          waitDrain(),
           wsError.then((e) => ({ wsErr: e })),
           abortedEv
         ])
@@ -2450,11 +2478,18 @@ async function dlRun(task) {
       dlTasks.delete(task.id)
       dlUnlinkRetry(task.path ? task.path + '.part' : '')
       dlUnlinkRetry(task.path || '')
-    } else if (err && (err.name === 'AbortError' || /abort/i.test(err.message || ''))) {
-      // v3.3.10：回落判据改用 abort 归属（与 finally 同构）——
-      // 上一版用 status==='downloading' 判断，而 dlPause 是先置 pausing 再 abort，
-      // 守卫永不满足 → 每次点暂停任务都永久卡在 pausing（继续/删除/重下全部失效）
-      if (task.abort === ctrl) { task.status = 'paused'; task.speed = 0 }
+    } else if (task.abort !== ctrl) {
+      // 这一轮已被新一轮接管（暂停后立刻点继续）：状态归新一轮管，不要覆盖
+    } else if (ctrl.signal.aborted) {
+      // v3.3.16：判据收紧为「本轮自己的控制器被 abort」。以前只看 err.name/消息里有没有
+      // abort，握手超时（另一个 controller）也会被当成用户暂停，任务永远停在 paused。
+      task.status = 'paused'
+      task.speed = 0
+    } else if (err && err.name === 'AbortError') {
+      task.status = 'error'
+      task.error = '连接超时或已中断'
+      task.speed = 0
+      logLine('[dl] 中断', path.basename(task.path || ''), task.error)
     } else {
       task.status = 'error'
       task.error = (err && err.message) || '下载失败'

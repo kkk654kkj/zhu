@@ -160,6 +160,13 @@ const AudioFx = {
     this._freq = new Uint8Array(this.analyser.frequencyBinCount)
     this._peaks = null
     this._resizeCanvas()
+    // v3.3.16：尺寸交给 ResizeObserver。以前每帧读 clientWidth/clientHeight，
+    // 每次都是强制布局查询（60fps 下等于每秒 120 次），和频谱本身的开销同量级
+    if (typeof ResizeObserver === 'function') {
+      if (this._ro) this._ro.disconnect()
+      this._ro = new ResizeObserver(() => this._resizeCanvas())
+      this._ro.observe(canvas)
+    }
     // 防止重复调用叠出多条 rAF 循环
     if (this._raf) cancelAnimationFrame(this._raf)
     this._raf = 0
@@ -169,6 +176,7 @@ const AudioFx = {
   stopSpectrum() {
     if (this._raf) cancelAnimationFrame(this._raf)
     this._raf = 0
+    if (this._ro) { this._ro.disconnect(); this._ro = null }
   },
 
   _resizeCanvas() {
@@ -181,6 +189,7 @@ const AudioFx = {
       c.width = Math.round(w * dpr)
       c.height = Math.round(h * dpr)
       this._peaks = null
+      this._accentGrad = null   // 渐变坐标与高度绑定，尺寸变了必须重建
     }
     this._cctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     this._w = w
@@ -199,7 +208,10 @@ const AudioFx = {
     const ctx2d = this._cctx
     if (!ctx2d) return
     const canvasEl = this._canvas
-    if (canvasEl.clientWidth !== this._w || canvasEl.clientHeight !== this._h) this._resizeCanvas()
+    // 兜底：没有 ResizeObserver 时仍然每帧比一次（只是不再读布局，读的是上次算好的值）
+    if (!this._ro && canvasEl && (canvasEl.clientWidth !== this._w || canvasEl.clientHeight !== this._h)) {
+      this._resizeCanvas()
+    }
     // 歌词面板隐藏时画布宽度会缩到很小，直接跳过
     if (this._w < 24 || this._h < 8) return
 
@@ -207,6 +219,12 @@ const AudioFx = {
     const h = this._h
     const bins = this._freq
     this.analyser.getByteFrequencyData(bins)
+
+    // v3.3.16：帧间隔归一化 —— 峰值帽的落速以前写死「每帧 0.008*h」，
+    // 120Hz 屏幕上落得比 60Hz 快一倍，窗口高度变化时步长还会跳变
+    const nowMs = performance.now()
+    const dt = this._lastDrawAt ? Math.min(0.1, (nowMs - this._lastDrawAt) / 1000) : 0.016
+    this._lastDrawAt = nowMs
 
     const barCount = Math.max(24, Math.min(72, Math.floor(w / 9)))
     if (!this._peaks || this._peaks.length !== barCount) this._peaks = new Float32Array(barCount)
@@ -220,8 +238,24 @@ const AudioFx = {
     const barW = (w - gap * (barCount - 1)) / barCount
     // v3.3.9：accent+'55' 只对 6 位 hex 成立 —— 主题色若被设成 rgba()/8位hex/命名色，
     // addColorStop 每帧抛 SyntaxError，频谱永久卡死
-    const accentRaw = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#31c27c'
-    const accent = /^#[0-9a-fA-F]{6}$/.test(accentRaw) ? accentRaw : '#31c27c'
+    // v3.3.16：主题色一秒取一次就够，getComputedStyle 会强制一次样式重算
+    if (!this._accentAt || nowMs - this._accentAt > 1000) {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#31c27c'
+      this._accent = /^#[0-9a-fA-F]{6}$/.test(raw) ? raw : '#31c27c'
+      this._accentAt = nowMs
+      this._accentGrad = null
+    }
+    const accent = this._accent
+    // 渐变坐标对所有柱子都一样，建一次复用 —— 以前每帧每柱新建
+    // 72 个渐变对象（约 4300 个/秒，全是垃圾）
+    if (!this._accentGrad) {
+      this._accentGrad = ctx2d.createLinearGradient(0, h, 0, 0)
+      this._accentGrad.addColorStop(0, accent)
+      this._accentGrad.addColorStop(1, accent + '55')
+    }
+    const grad = this._accentGrad
+    ctx2d.fillStyle = grad
+    ctx2d.globalAlpha = 0.85
 
     for (let i = 0; i < barCount; i++) {
       const f0 = fMin * Math.pow(fMax / fMin, i / barCount)
@@ -241,19 +275,16 @@ const AudioFx = {
       const x = i * (barW + gap)
       const y = h - bh
 
-      const grad = ctx2d.createLinearGradient(0, h, 0, 0)
-      grad.addColorStop(0, accent)
-      grad.addColorStop(1, accent + '55')
-      ctx2d.fillStyle = grad
-      ctx2d.globalAlpha = 0.85
       ctx2d.fillRect(x, y, barW, bh)
 
-      // 峰值帽：缓慢下落
-      const pk = Math.max(bh, this._peaks[i] - h * 0.008)
+      // 峰值帽：缓慢下落（0.48*h/秒，与帧率无关）
+      const pk = Math.max(bh, this._peaks[i] - h * 0.48 * dt)
       this._peaks[i] = pk
       ctx2d.globalAlpha = 0.9
       ctx2d.fillStyle = accent
       ctx2d.fillRect(x, h - pk - 1.5, barW, 1.5)
+      ctx2d.fillStyle = grad
+      ctx2d.globalAlpha = 0.85
     }
     ctx2d.globalAlpha = 1
   }

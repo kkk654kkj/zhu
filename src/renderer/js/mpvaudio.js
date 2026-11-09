@@ -65,7 +65,7 @@ class MpvAudio {
     this._endedFired = false
     // v3.3.13：连 700ms 抑制窗一起复位，单曲循环第二遍（短曲目）才不会被吞
     this._lastEndedAt = 0
-    window.api.mpvSeek(sec)
+    window.api.mpvSeek(sec).catch(() => {})
     this._emit('timeupdate')
   }
 
@@ -82,7 +82,7 @@ class MpvAudio {
   set volume(v) {
     const val = Math.max(0, Math.min(1, Number(v) || 0))
     this._volume = val
-    window.api.mpvVolume(val)
+    window.api.mpvVolume(val).catch(() => {})
   }
 
   get src() { return this._srcPath || '' }
@@ -100,7 +100,12 @@ class MpvAudio {
     this._posStamp = performance.now()
     // 先按"暂停"加载，避免非自动播放的场景（会话恢复）先响一下
     const wantPlaying = this._wantPlaying
+    // v3.3.16：回调必须校验代次。快速连点两首在线歌时，A 的 mpv:load 可能晚于
+    // B 才返回；以前 A 的失败回调会把**正在播的 B** 置为暂停并 emit('error')，
+    // player 侧自动跳曲 → 一次操作丢两首。
+    const ep = this._loadEpoch
     window.api.mpvLoad(this._srcPath, { paused: !wantPlaying }).then((ok) => {
+      if (ep !== this._loadEpoch) return
       // 主进程解析在线直链失败会返回 false：必须报错，
       // 否则界面停在这里一直"正在加载"，用户只能手动切歌
       if (ok === false) {
@@ -109,8 +114,9 @@ class MpvAudio {
         this._emit('error')
         return
       }
-      if (wantPlaying && this._wantPlaying) window.api.mpvPlay()
+      if (wantPlaying && this._wantPlaying) window.api.mpvPlay().catch(() => {})
     }).catch(() => {
+      if (ep !== this._loadEpoch) return
       // v3.3.13：直链解析抛异常（畸形 lxstream 等）不能停死在「正在加载」
       this._paused = true
       this._wantPlaying = false
@@ -139,7 +145,7 @@ class MpvAudio {
     this._lastEndedAt = 0
     this._paused = false
     this._posStamp = performance.now()
-    window.api.mpvPlay()
+    window.api.mpvPlay().catch(() => {})
     this._emit('play')
     return Promise.resolve()
   }
@@ -147,7 +153,7 @@ class MpvAudio {
   pause() {
     this._wantPlaying = false
     this._paused = true
-    window.api.mpvPause()
+    window.api.mpvPause().catch(() => {})
     this._emit('pause')
   }
 
@@ -158,7 +164,7 @@ class MpvAudio {
       this._wantPlaying = false
       this._endedFired = false
       this._lastEndedAt = 0
-      window.api.mpvStop()
+      window.api.mpvStop().catch(() => {})
     }
   }
 
@@ -202,7 +208,7 @@ class MpvAudio {
     // 只有之前被冻结过才需要恢复；普通 format / 迟到的 ao-recovered 不碰状态
     if (!wasFrozen) return
     // 显式下发播放命令：只翻标志位 + emit('play') 时 mpv 仍是 paused
-    window.api.mpvPlay()
+    window.api.mpvPlay().catch(() => {})
     if (this._paused) {
       this._paused = false
       this._posStamp = performance.now()
@@ -311,7 +317,7 @@ class MpvAudio {
         this.isExclusive = false
         this.fallbackMessage = e.message || ''
         this._emit('fallback')
-        if (this._wantPlaying) window.api.mpvPlay()
+        if (this._wantPlaying) window.api.mpvPlay().catch(() => {})
         break
       }
       case 'engine-exit': {

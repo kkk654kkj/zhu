@@ -16,6 +16,17 @@ function qualityKey() {
   return 'best'
 }
 
+/**
+ * 安全的事件绑定：元素不存在就跳过。
+ * 在线面板有 12 处直接 getElementById(...).addEventListener，任一处缺失
+ * （裁剪版 / 热替换 / DOM 改动）都会抛 TypeError 让整条 bind() 中断，
+ * 结果是面板完全没有交互且没有任何提示。
+ */
+function onEl(id, ev, fn) {
+  const node = document.getElementById(id)
+  if (node) node.addEventListener(ev, fn)
+}
+
 const Online = {
   list: [],            // 当前搜索结果（OnlineSong）
   keyword: '',
@@ -32,8 +43,21 @@ const Online = {
   _ready: false,
 
   async init() {
-    if (this._ready) return
-    this._ready = true
+    // _ready 只在**全部初始化成功后**才置位：以前一进来就置 true，
+    // 中途抛错（元素缺失 / 接口异常）会留下「已就绪但不可用」的死状态，
+    // 重新进入面板也不会再试一次。
+    if (this._ready || this._initing) return
+    this._initing = true
+    try {
+      await this._initOnce()
+      this._ready = true
+    } finally {
+      this._initing = false
+    }
+  },
+
+  /** 真正的初始化（由 init 包裹，失败会向上抛给调用方提示） */
+  async _initOnce() {
     try {
       this.sources = await window.api.onlineSources()
     } catch (err) {
@@ -90,14 +114,13 @@ const Online = {
   },
 
   bind() {
-    const input = document.getElementById('opInput')
     const go = () => this.search(true)
-    document.getElementById('opGo').addEventListener('click', go)
-    input.addEventListener('keydown', (e) => {
+    onEl('opGo', 'click', go)
+    onEl('opInput', 'keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); go() }
     })
 
-    document.getElementById('opSources').addEventListener('click', (e) => {
+    onEl('opSources', 'click', (e) => {
       const chip = e.target.closest('.op-chip')
       if (!chip) return
       const id = chip.dataset.src
@@ -112,28 +135,28 @@ const Online = {
       if (this.keyword) this.search(true)
     })
 
-    document.getElementById('opQuality').addEventListener('change', (e) => {
+    onEl('opQuality', 'change', (e) => {
       window.api.patchSettings({ onlineQuality: e.target.value }).catch(() => {})
       state.settings.onlineQuality = e.target.value
       const label = { master: '母带（体积很大，拿不到自动降级）', lossless: '无损优先（拿不到自动降级）', best: '音质优先（320k）', '128k': '省流量（128k）' }
       toast('已切换：' + (label[e.target.value] || e.target.value))
     })
 
-    document.getElementById('opCacheBtn').addEventListener('click', () => toggleCachePanel())
+    onEl('opCacheBtn', 'click', () => toggleCachePanel())
 
-    document.getElementById('opDirBtn').addEventListener('click', async () => {
+    onEl('opDirBtn', 'click', async () => {
       const dir = await window.api.onlinePickDownloadDir().catch((err) => { toast('选择目录失败：' + (err.message || err), 2500); return null })
       if (dir) toast('下载目录：' + dir, 3000)
     })
-    document.getElementById('opOpenDir').addEventListener('click', () => window.api.onlineOpenDownloadDir().catch(() => {}))
-    document.getElementById('opDlBtn').addEventListener('click', () => this.toggleDlPanel())
-    document.getElementById('btnDlClose').addEventListener('click', () => this.toggleDlPanel(false))
-    document.getElementById('dlOpenDir').addEventListener('click', () => window.api.onlineOpenDownloadDir().catch(() => {}))
-    document.getElementById('dlClearDone').addEventListener('click', async () => {
+    onEl('opOpenDir', 'click', () => window.api.onlineOpenDownloadDir().catch(() => {}))
+    onEl('opDlBtn', 'click', () => this.toggleDlPanel())
+    onEl('btnDlClose', 'click', () => this.toggleDlPanel(false))
+    onEl('dlOpenDir', 'click', () => window.api.onlineOpenDownloadDir().catch(() => {}))
+    onEl('dlClearDone', 'click', async () => {
       const r = await window.api.onlineDlClearDone().catch(() => null)
       toast(r && r.removed ? '已移除 ' + r.removed + ' 条记录' : '没有已完成的任务')
     })
-    document.getElementById('dlList').addEventListener('click', async (e) => {
+    onEl('dlList', 'click', async (e) => {
       const btn = e.target.closest('button[data-act]')
       const item = e.target.closest('.dl-item')
       if (!btn || !item) return
@@ -146,15 +169,14 @@ const Online = {
       else if (act === 'reveal') await window.api.onlineDlReveal(id).catch(() => {})
     })
 
-    document.getElementById('opMore').addEventListener('click', () => this.search(false))
+    onEl('opMore', 'click', () => this.search(false))
 
     // 行交互：单击选中、双击播放、按钮各管各的
-    const body = document.getElementById('opBody')
-    body.addEventListener('dblclick', (e) => {
+    onEl('opBody', 'dblclick', (e) => {
       const row = e.target.closest('.op-tr')
       if (row && !e.target.closest('.op-act-btn')) this.playAt(Number(row.dataset.index))
     })
-    body.addEventListener('click', (e) => {
+    onEl('opBody', 'click', (e) => {
       const row = e.target.closest('.op-tr')
       if (!row) return
       const act = e.target.closest('.op-act-btn')
@@ -472,6 +494,9 @@ const Online = {
 
   /** 列表每行的下载按钮：显示百分比 / 已有任务的状态 */
   paintDlRows() {
+    // 在线面板没显示时不必每 250ms 把搜索列表全量扫一遍
+    const pane = document.getElementById('onlinePane')
+    if (!pane || pane.hidden) return
     const byKey = new Map()
     for (const t of this.dl) {
       if (t.status === 'done' || t.status === 'error') continue
@@ -525,9 +550,19 @@ const Online = {
       sum.textContent = parts.length ? parts.join(' · ') : '还没有下载任务'
     }
     if (!this.dl.length) {
+      this._dlSig = ''
       list.innerHTML = '<div class="dl-empty">点歌曲行尾的 ↓ 就能下载，任务会出现在这里</div>'
       return
     }
+    // v3.3.16：主进程每 250ms 推一次整表快照。以前每次都整段 innerHTML 重建，
+    // 5 个并发任务就是每秒 20 次全量重排 —— 滚动位置归零、按钮 hover/按下态被抹掉。
+    // 现在按「任务集合 + 各自状态」做签名：状态没变就只改进度条与文字，不重建 DOM。
+    const sig = this.dl.map((t) => t.id + ':' + t.status).join('|')
+    if (sig === this._dlSig && list.firstElementChild) {
+      this.paintDlProgress()
+      return
+    }
+    this._dlSig = sig
     const mb = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.round(n / 1024) + 'KB')
     const speed = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + 'MB/s' : Math.round(n / 1024) + 'KB/s')
     list.innerHTML = this.dl.slice().sort((a, b) => b.at - a.at).map((t) => {
@@ -561,11 +596,34 @@ const Online = {
           <span class="dl-name" title="${esc(t.artist + ' - ' + t.title)}">${esc(t.title || '未知歌曲')}</span>
           <span class="dl-pct">${t.status === 'done' ? '100%' : (t.total ? pct + '%' : '')}</span>
         </div>
-        <div class="dl-sub">${esc(t.artist || '')} · ${esc(line)}</div>
+        <div class="dl-sub">${esc(t.artist || '')} · <span class="dl-line">${esc(line)}</span></div>
         <div class="dl-bar"><i class="${barCls}" style="width:${t.status === 'done' ? 100 : pct}%"></i></div>
         <div class="dl-acts">${acts}</div>
       </div>`
     }).join('')
   },
+
+  /** 只刷新进度（签名不变时走这条，避免整表重建） */
+  paintDlProgress() {
+    const list = document.getElementById('dlList')
+    if (!list) return
+    const mb = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.round(n / 1024) + 'KB')
+    const speed = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + 'MB/s' : Math.round(n / 1024) + 'KB/s')
+    const byId = new Map(this.dl.map((t) => [String(t.id), t]))
+    for (const item of list.children) {
+      const t = byId.get(item.dataset.id)
+      if (!t || t.status !== 'downloading') continue
+      const pct = t.total ? Math.min(100, Math.round((t.received / t.total) * 100)) : 0
+      const pctEl = item.querySelector('.dl-pct')
+      if (pctEl) pctEl.textContent = t.total ? pct + '%' : ''
+      const lineEl = item.querySelector('.dl-line')
+      if (lineEl) {
+        lineEl.textContent = (t.total ? pct + '% · ' + mb(t.received) + ' / ' + mb(t.total) : mb(t.received)) +
+          (t.speed ? ' · ' + speed(t.speed) : '')
+      }
+      const bar = item.querySelector('.dl-bar > i')
+      if (bar) bar.style.width = pct + '%'
+    }
+  }
 
 }

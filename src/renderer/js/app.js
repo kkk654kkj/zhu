@@ -745,6 +745,11 @@ function renderView() {
         const inp = document.getElementById('opInput')
         if (inp) inp.focus()
       }
+    }).catch((err) => {
+      // 在线面板初始化失败（源列表接口异常 / DOM 缺失）不能变成 unhandled rejection，
+      // 否则界面只剩一块空白，用户完全不知道发生了什么
+      console.error('[online] init 失败', err)
+      toast('在线音乐面板初始化失败：' + ((err && err.message) || '未知错误'), 4000)
     })
     return
   }
