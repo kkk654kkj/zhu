@@ -1448,7 +1448,30 @@ function sanitizeSettingsPatch(patch, template = DEFAULT_SETTINGS) {
   return out
 }
 
+/**
+ * 注册全部 IPC 通道。
+ *
+ * 这里只做分发，具体通道按业务域拆到下面的 registerXxxIpc()：
+ * 库 / 设置 / 歌单 / 用户数据 / 歌词 / 系统 / 窗口 / 桌面歌词 / mpv / 诊断 / 电源。
+ * 拆分前是一个 500+ 行的巨型函数，改任意一个通道都要在整段里翻找；
+ * 现在按域定位，通道名的先后顺序与原来完全一致（不影响行为）。
+ */
 function registerIpc() {
+  registerLibraryIpc()
+  registerSettingsIpc()
+  registerPlaylistIpc()
+  registerUserDataIpc()
+  registerLyricIpc()
+  registerSystemIpc()
+  registerWindowIpc()
+  registerDlyricIpc()
+  registerMpvIpc()
+  registerDiagIpc()
+  registerPowerIpc()
+}
+
+/** 音乐库：列表与扫描 */
+function registerLibraryIpc() {
   // —— 音乐库 ——
   // 扫库期间 lib:list 必须等待扫描结束，否则渲染进程会读到半成品列表
   ipcMain.handle('lib:list', async () => {
@@ -1489,6 +1512,10 @@ function registerIpc() {
     }
   })
 
+}
+
+/** 设置读写：patch 走键白名单 + 形状校验；目录/监视开关变化后重挂 watcher */
+function registerSettingsIpc() {
   // —— 设置 ——
   ipcMain.handle('settings:get', () => store.get().settings)
   ipcMain.handle('settings:patch', (e, patch) => {
@@ -1512,6 +1539,10 @@ function registerIpc() {
     return next
   })
 
+}
+
+/** 歌单：增删改 + m3u/m3u8 导入导出 */
+function registerPlaylistIpc() {
   // —— 歌单 ——
   ipcMain.handle('playlists:get', () => store.get().playlists || [])
   ipcMain.handle('playlists:create', (e, name) => {
@@ -1624,6 +1655,10 @@ function registerIpc() {
     }
   })
 
+}
+
+/** 收藏 / 历史 / 播放次数 / 上次会话 */
+function registerUserDataIpc() {
   // —— 收藏 / 历史 / 播放次数 ——
   ipcMain.handle('favorites:get', () => store.get().favorites || [])
   ipcMain.handle('favorites:toggle', (e, trackId) => {
@@ -1658,6 +1693,10 @@ function registerIpc() {
     return true
   })
 
+}
+
+/** 歌词读取：返回 { text, mtimeMs }，并顺手监听对应 .lrc 的改动 */
+function registerLyricIpc() {
   // —— 歌词 ——
   /**
    * v2.8.3：返回值从纯文本改成 { text, mtimeMs }，并顺手监听这个 lrc 文件。
@@ -1704,6 +1743,10 @@ function registerIpc() {
     return null
   })
 
+}
+
+/** 对话框与系统集成（选目录、资源管理器定位、版本信息） */
+function registerSystemIpc() {
   // —— 对话框 / 系统集成 ——
   ipcMain.handle('dialog:pickDirs', async () => {
     const res = await dialog.showOpenDialog(win, {
@@ -1716,6 +1759,10 @@ function registerIpc() {
     if (filePath && fs.existsSync(filePath) && isAllowedMediaPath(filePath)) shell.showItemInFolder(filePath)
   })
 
+}
+
+/** 窗口控制：最小化 / 最大化 / 关闭 / 迷你模式 */
+function registerWindowIpc() {
   // —— 窗口控制 ——
   ipcMain.handle('win:minimize', () => win && win.minimize())
   ipcMain.handle('win:toggleMaximize', () => {
@@ -1740,6 +1787,10 @@ function registerIpc() {
     userData
   }))
 
+}
+
+/** 桌面歌词窗口：开关 / 解锁 / 数据与配置同步 */
+function registerDlyricIpc() {
   // —— 桌面歌词 ——
   ipcMain.handle('dlyric:open', () => {
     store.patch({ settings: { desktopLyric: { enabled: true } } })
@@ -1780,6 +1831,10 @@ function registerIpc() {
     return true
   })
 
+}
+
+/** 独占输出（mpv 后端）：启停 / 加载 / 传输控制 / 设备枚举与切换 / 释放 */
+function registerMpvIpc() {
   // —— 独占输出（mpv 后端） ——
   ipcMain.handle('mpv:start', (e, exclusive) => ensureMpv(exclusive !== false, { forceMode: true }))
   ipcMain.handle('mpv:load', (e, filePath, opts) => {
@@ -1896,6 +1951,10 @@ function registerIpc() {
     return { ok: true, applied: true, error: r.error }
   })
 
+}
+
+/** 诊断面板：环境快照 / 失败清单 / mpv 日志 / 日志文件 */
+function registerDiagIpc() {
   /* ---------------- 诊断面板（v1.8） ---------------- */
 
   // 环境快照：版本、路径、引擎状态、曲库规模
@@ -1995,6 +2054,10 @@ function registerIpc() {
     }
   })
 
+}
+
+/** 播放结束后动作（关机/休眠）+ 睡眠定时 */
+function registerPowerIpc() {
   /* ---------------- 播放结束后动作 / A-B（v2.1） ---------------- */
 
   // 渲染层上报"整队播完"（列表回卷 / 顺序模式最后一首结束）

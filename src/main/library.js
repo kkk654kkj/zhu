@@ -388,9 +388,18 @@ function resolveNameSegments(nameBase, lrcMeta) {
 }
 
 /** 解析单个文件的全部信息 */
-async function parseTrack(filePath, mm, coverDir, lyricDir) {
-  const id = fileId(filePath)
-  const st = await fsp.stat(filePath)
+/**
+ * 读取音频标签：common 字段 + 内嵌封面 + 内嵌歌词 + ReplayGain。
+ *
+ * 标签解析失败不算致命 —— 返回 mmError 让上层用文件名兜底建条目
+ * （坏标签/损坏文件仍然要出现在曲库里，否则用户根本看不到「为什么少了这首歌」）。
+ *
+ * @param {string} filePath
+ * @param {object} mm music-metadata 模块
+ * @param {string} id 曲目 id（内嵌封面按 id 进内存 LRU）
+ * @returns {Promise<{meta:object|null, mmError:string|null, embeddedLyric:string|null, rg:object|null}>}
+ */
+async function readAudioMeta(filePath, mm, id) {
   let meta = null
   let mmError = null
   let embeddedLyric = null
@@ -398,6 +407,7 @@ async function parseTrack(filePath, mm, coverDir, lyricDir) {
   try {
     const parsed = await mm.parseFile(filePath, { duration: true, skipCovers: false })
     const c = parsed.common || {}
+    const fmt = parsed.format || {}
     meta = {
       title: (c.title || '').trim() || null,
       artist: (Array.isArray(c.artists) ? c.artists.join(' / ') : c.artist) || null,
@@ -408,12 +418,12 @@ async function parseTrack(filePath, mm, coverDir, lyricDir) {
       trackNo: c.track && c.track.no ? c.track.no : null,
       discNo: c.disk && c.disk.no ? c.disk.no : null,
       genre: Array.isArray(c.genre) ? c.genre : [],
-      duration: parsed.format && parsed.format.duration ? parsed.format.duration : 0,
-      bitrate: parsed.format && parsed.format.bitrate ? parsed.format.bitrate : 0,
-      sampleRate: parsed.format && parsed.format.sampleRate ? parsed.format.sampleRate : 0,
-      bitsPerSample: parsed.format && parsed.format.bitsPerSample ? parsed.format.bitsPerSample : 0,
-      codec: parsed.format && parsed.format.codec ? parsed.format.codec : null,
-      lossless: !!(parsed.format && parsed.format.lossless)
+      duration: fmt.duration || 0,
+      bitrate: fmt.bitrate || 0,
+      sampleRate: fmt.sampleRate || 0,
+      bitsPerSample: fmt.bitsPerSample || 0,
+      codec: fmt.codec || null,
+      lossless: !!fmt.lossless
     }
     // 内嵌封面（v2.0）：不再落盘，进内存 LRU，页面按需通过 lxcover:// 取
     const pic = c.picture && c.picture.length ? c.picture[0] : null
@@ -438,6 +448,41 @@ async function parseTrack(filePath, mm, coverDir, lyricDir) {
   } catch (err) {
     mmError = err.message
   }
+  return { meta, mmError, embeddedLyric, rg }
+}
+
+/**
+ * 定标题与歌手。优先级：标签 → LRC 的 [ti:]/[ar:] → 文件名分段 → 「未知歌手」。
+ * 歌名会去掉末尾的影视插曲括号（如「某某 (《某剧》主题曲)」）。
+ *
+ * @returns {{title:string, artist:string, nameArtist:string}}
+ *          nameArtist 供上层在标签没有 artists 数组时兜底
+ */
+function resolveTitleArtist(meta, nameBase, lrcMeta) {
+  const named = resolveNameSegments(nameBase, lrcMeta)
+  let nameTitle = named.title
+  let nameArtist = named.artist
+  if (lrcMeta) {
+    if (!(meta && meta.title) && lrcMeta.ti) {
+      nameTitle = lrcMeta.ti.replace(/\s*[（(][^（()）]*[）)]\s*$/, '').trim() || nameTitle
+    }
+    if (!(meta && meta.artist) && lrcMeta.ar) nameArtist = lrcMeta.ar
+  }
+  return {
+    title: (meta && meta.title) || nameTitle,
+    artist: (meta && meta.artist) || nameArtist || '未知歌手',
+    nameArtist
+  }
+}
+
+/**
+ * 解析单个音频文件 → 曲目记录。
+ * 只做「读」：封面/歌词的定位、标签缺失时的兜底都在这里完成，写盘由 scan 负责。
+ */
+async function parseTrack(filePath, mm, coverDir, lyricDir) {
+  const id = fileId(filePath)
+  const st = await fsp.stat(filePath)
+  const { meta, mmError, embeddedLyric, rg } = await readAudioMeta(filePath, mm, id)
 
   const nameBase = path.basename(filePath, path.extname(filePath))
   const cover = (meta && meta.cover) || (await findCover(filePath, meta))
@@ -447,21 +492,10 @@ async function parseTrack(filePath, mm, coverDir, lyricDir) {
   }
   const lrcMeta = readLrcMeta(lyric)
 
-  const named = resolveNameSegments(nameBase, lrcMeta)
-  let nameTitle = named.title
-  let nameArtist = named.artist
-  // 标签缺失时，用 LRC 的 [ti:]/[ar:] 补齐（歌名去掉末尾的影视插曲括号）
-  if (lrcMeta) {
-    if (!(meta && meta.title) && lrcMeta.ti) {
-      nameTitle = lrcMeta.ti.replace(/\s*[（(][^（()）]*[）)]\s*$/, '').trim() || nameTitle
-    }
-    if (!(meta && meta.artist) && lrcMeta.ar) nameArtist = lrcMeta.ar
-  }
-
-  const title = (meta && meta.title) || nameTitle
-  const artist = (meta && meta.artist) || nameArtist || '未知歌手'
+  const names = resolveTitleArtist(meta, nameBase, lrcMeta)
   const album = (meta && meta.album) || ''
-  const pys = buildPinyinSearch([title, artist, album])
+  const pys = buildPinyinSearch([names.title, names.artist, album])
+  const ext = extOf(filePath).slice(1)   // 去点，如 'flac'（codec 兜底与 isDsd 判定都用它）
 
   return {
     id,
@@ -472,9 +506,9 @@ async function parseTrack(filePath, mm, coverDir, lyricDir) {
     // 入库时间（v1.9）：「最近添加」视图按它倒序。首次解析记当前时间，
     // 之后无论重建缓存还是重新解析都由 scan() 沿用旧值（见 scan 内的 addedAt 处理）
     addedAt: Date.now(),
-    title,
-    artist,
-    artists: (meta && meta.artists) || (nameArtist ? [nameArtist] : []),
+    title: names.title,
+    artist: names.artist,
+    artists: (meta && meta.artists) || (names.nameArtist ? [names.nameArtist] : []),
     album,
     albumArtist: (meta && meta.albumArtist) || '',
     year: (meta && meta.year) || null,
@@ -485,13 +519,13 @@ async function parseTrack(filePath, mm, coverDir, lyricDir) {
     bitrate: (meta && meta.bitrate) || 0,
     sampleRate: (meta && meta.sampleRate) || 0,
     bitsPerSample: (meta && meta.bitsPerSample) || 0,
-    codec: (meta && meta.codec) || extOf(filePath).slice(1).toUpperCase(),
+    codec: (meta && meta.codec) || ext.toUpperCase(),
     lossless: !!(meta && meta.lossless),
     cover,
     lyric,
-    ext: extOf(filePath).slice(1),
+    ext,
     // DSD（v2.0）：dsf/dff 在普通输出（Chromium）里根本解不了，必须走独占；界面据此标注
-    isDsd: /^(dsf|dff)$/i.test(extOf(filePath).slice(1)),
+    isDsd: /^(dsf|dff)$/i.test(ext),
     // ReplayGain 标签（v2.0）：有值就优先用，省掉一次整库响度分析
     rgTrackDb: (rg && rg.rgTrackDb) ?? null,
     rgAlbumDb: (rg && rg.rgAlbumDb) ?? null,

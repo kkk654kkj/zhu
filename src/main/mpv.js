@@ -20,6 +20,19 @@ const path = require('path')
 
 const PIPE_PREFIX = '\\\\.\\pipe\\lxmpv-'
 
+/**
+ * 音量/比例类参数的统一收敛：任意输入 → [0,1] 的有限数。
+ * 非数字按 0（与原 `Number(v) || 0` 一致）；±Infinity 收敛到 1/0。
+ */
+function clamp01(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return n > 0 ? 1 : 0
+  return Math.max(0, Math.min(1, n))
+}
+
+/** 简易延时（等进程退出、看门狗轮询用） */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 class MpvEngine {
   /**
    * @param {object} opts
@@ -101,8 +114,7 @@ class MpvEngine {
     this.exclusive = !!exclusive
     this._audioDevice = audioDevice || ''
     // v2.5：启动音量跟随上次设置（以前硬编码 100，每次重启引擎音量都被重置）
-    const vol01 = Math.max(0, Math.min(1, Number(volume) || 0))
-    this._volume01 = vol01
+    this._volume01 = clamp01(volume)
     this._buf = ''
     // v3.3.13：restart 窗口里用户点的歌（排队中的 loadfile）和 reset() 的停止命令
     // 不能丢 —— 保留这两类命令行，其余都是旧进程残留命令（pause/seek/volume 等），丢弃；
@@ -114,6 +126,41 @@ class MpvEngine {
     // 代次闸门：kill() 会 +1，在途的 start() 发现自己过期就自我作废（见构造函数注释）
     const gen = ++this._gen
 
+    const proc = this._spawn(this._buildArgs(this._volume01))
+    if (!proc) return { ok: false, error: '启动 mpv 失败：' + (this._spawnError || '未知错误') }
+
+    const ctx = { gen, proc }
+    const connected = await this._connectWithRetry(20, 120, ctx)
+    // v2.8.6 / v3.3.6：连接期间可能已经被 kill()（关独占、切设备、退出）了。
+    // 这时不能再往下走 —— 必须把**自己刚起的这个进程**收掉，
+    // 否则它会变成没人管的孤儿独占进程，一直霸着声卡。
+    if (gen !== this._gen) {
+      try { proc.kill() } catch (err) { /* 忽略 */ }
+      try { if (proc.exitCode === null) proc.kill('SIGKILL') } catch (err) { /* 忽略 */ }
+      // v3.3.13：仅当全局 sock 仍指向本次连接时才清理，避免迟到作废的 start
+      // 把新引擎刚连上的 socket 覆盖/销毁。
+      const sock = ctx.sock
+      if (sock && this.sock === sock) {
+        try { sock.destroy() } catch (err) { /* 忽略 */ }
+        this.sock = null
+      }
+      return { ok: false, error: '引擎启动已被取消' }
+    }
+    if (!connected) {
+      this.kill()
+      const tail = (this._stderr || '').trim()
+      return { ok: false, error: 'mpv IPC 连接失败（可能是引擎启动异常）' + (tail ? '：' + tail.slice(-200) : '') }
+    }
+    this._onEngineReady()
+    return { ok: true, exclusive: this.exclusive }
+  }
+
+  /**
+   * 组装 mpv 命令行。
+   * 独占/共享、输出设备、测试静音都在这里决定，其余参数是"当播放器用"的固定件。
+   * @param {number} vol01 启动音量（0~1）
+   */
+  _buildArgs(vol01) {
     const args = [
       '--no-config',
       '--no-video',
@@ -137,8 +184,12 @@ class MpvEngine {
     ]
     // 指定输出设备（如 wasapi/{GUID}）。留空表示跟随系统默认设备。
     // 有独占需求的人通常接了 USB DAC，默认设备经常不是它。
-    if (audioDevice) args.push('--audio-device=' + audioDevice)
+    if (this._audioDevice) args.push('--audio-device=' + this._audioDevice)
+    return args
+  }
 
+  /** 起进程；失败返回 null，原因写入 this._spawnError */
+  _spawn(args) {
     let proc = null
     try {
       proc = spawn(this.exePath, args, {
@@ -148,9 +199,18 @@ class MpvEngine {
       this.proc = proc
     } catch (err) {
       this.proc = null
-      return { ok: false, error: '启动 mpv 失败：' + err.message }
+      this._spawnError = err.message
+      return null
     }
+    this._attachProcess(proc)
+    return proc
+  }
 
+  /**
+   * 挂进程生命周期监听。
+   * stderr 只留尾部 800 字符：独占初始化失败的真正原因（AUDCLNT_E_*）都在这里。
+   */
+  _attachProcess(proc) {
     let stderrTail = ''
     this._stderr = ''
     if (proc.stderr) {
@@ -174,28 +234,10 @@ class MpvEngine {
       if (this.proc !== proc) return
       this.onEvent({ type: 'error', message: 'mpv 进程错误：' + err.message })
     })
+  }
 
-    const ctx = { gen, proc }
-    const connected = await this._connectWithRetry(20, 120, ctx)
-    // v2.8.6 / v3.3.6：连接期间可能已经被 kill()（关独占、切设备、退出）了。
-    // 这时不能再往下走 —— 必须把**自己刚起的这个进程**收掉，
-    // 否则它会变成没人管的孤儿独占进程，一直霸着声卡。
-    if (gen !== this._gen) {
-      try { proc.kill() } catch (err) { /* 忽略 */ }
-      try { if (proc.exitCode === null) proc.kill('SIGKILL') } catch (err) { /* 忽略 */ }
-      // v3.3.13：仅当全局 sock 仍指向本次连接时才清理，避免迟到作废的 start
-      // 把新引擎刚连上的 socket 覆盖/销毁。
-      const sock = ctx.sock
-      if (sock && this.sock === sock) {
-        try { sock.destroy() } catch (err) { /* 忽略 */ }
-        this.sock = null
-      }
-      return { ok: false, error: '引擎启动已被取消' }
-    }
-    if (!connected) {
-      this.kill()
-      return { ok: false, error: 'mpv IPC 连接失败（可能是引擎启动异常）' + (stderrTail ? '：' + stderrTail.trim().slice(-200) : '') }
-    }
+  /** IPC 连上后的收尾：观察属性、重放排队命令、起看门狗 */
+  _onEngineReady() {
     this.ready = true
     this._observe()
     this._flush()
@@ -210,8 +252,6 @@ class MpvEngine {
     if (this._wdTimer) clearInterval(this._wdTimer)
     this._wdTimer = setInterval(() => this._wdTick(), 1000)
     if (this._wdTimer.unref) this._wdTimer.unref()
-    // 拿不到音频参数就当没起来（设备被占用等）
-    return { ok: true, exclusive: this.exclusive }
   }
 
   _connectWithRetry(times, delayMs, ctx = {}) {
@@ -313,100 +353,110 @@ class MpvEngine {
     }
   }
 
+  /**
+   * IPC 消息分发。三类消息互斥：命令回执 → 属性推送 → 其余事件。
+   * 回执必须最先处理：get_property 的 data 可能是 null，会被误当成事件。
+   */
   _handle(msg) {
-    // 命令回执（request_id 关联）：先于事件处理，避免 data 为 null 时被当成事件
-    if (msg.request_id !== undefined && this._pending.has(msg.request_id)) {
-      const p = this._pending.get(msg.request_id)
-      clearTimeout(p.timer)
-      this._pending.delete(msg.request_id)
-      if (msg.error && msg.error !== 'success') p.reject(new Error(msg.error))
-      else p.resolve(msg.data)
-      return
-    }
-    if (msg.event === 'property-change') {
-      const { name, data } = msg
-      switch (name) {
-        case 'time-pos':
-          this._lastPos = typeof data === 'number' ? data : 0
-          this.onEvent({ type: 'time', pos: this._lastPos })
-          break
-        case 'duration':
-          this.onEvent({ type: 'duration', duration: typeof data === 'number' ? data : 0 })
-          break
-        case 'pause':
-          this._paused = data !== false
-          this.onEvent({ type: 'pause', paused: data !== false })
-          break
-        case 'eof-reached':
-          // 不抑制：单曲循环第二遍（seek 回 0 后 eof-reached 翻 false 再翻 true）必须能再上报。
-          if (data === true) {
-            this._eofAt = Date.now()
-            this.onEvent({ type: 'eof' })
-          }
-          break
-        case 'audio-out-params':
-          // v3.3.13：只缓存最近状态。mpv 的 observe_property 只在值变化时推送，
-          // 若「重启后 AO 从头就打不开」则不会再有 null 跳变事件——
-          // 所以判定必须由 _wdTick 主动轮询这个缓存，不能靠事件跳变
-          this._aoParams = data || null
-          this.onEvent({ type: 'format', params: data || null })
-          break
-        case 'volume':
-          this.onEvent({ type: 'volume', volume: typeof data === 'number' ? data : 100 })
-          break
-        case 'mute':
-          this.onEvent({ type: 'mute', muted: data === true })
-          break
-        case 'idle-active':
-          this._idle = data === true
-          this.onEvent({ type: 'idle', idle: data === true })
-          break
-      }
-      return
-    }
-    if (msg.event === 'file-loaded') {
-      this._idle = false
-      // v3.3.13：唤醒所有等 file-loaded 的续播等待者（集合方式，不包 onEvent）
-      const waiters = this._loadedWaiters
-      this._loadedWaiters = []
-      for (const w of waiters) w.finish(true)
-      this.onEvent({ type: 'loaded' })
-      return
-    }
-    if (msg.event === 'end-file') {
-      const reason = msg.reason || ''
-      // mpv 在 AO 初始化失败时也会走 end-file/error，这里上报给上层决定是否回退共享
-      if (reason === 'error') {
-        const detail = msg.error || this._lastLog || (this._stderr || '').trim().slice(-300) || 'mpv 无法播放该文件'
-        this.onEvent({ type: 'file-error', message: detail })
-      } else if (reason === 'eof') {
-        // 与刚刚上报的 eof-reached 属于同一对（含切歌后才迟到的情况）→ 吞掉，
-        // 只让渲染层收到一次曲末事件，避免一次曲末跳两首。
-        // 700ms 之外的 end-file(eof) 视为独立事件上报（例如极慢的尾包 / 未观察到 eof-reached）。
-        if (this._eofAt && Date.now() - this._eofAt < 700) {
-          this._eofAt = 0
-        } else {
-          this._eofAt = 0
-          this.onEvent({ type: 'file-eof' })
+    if (this._handleResponse(msg)) return
+    if (msg.event === 'property-change') { this._handleProperty(msg); return }
+    this._handleEvent(msg)
+  }
+
+  /** 命令回执（request_id 关联）。返回 true 表示这条消息已被消费 */
+  _handleResponse(msg) {
+    if (msg.request_id === undefined || !this._pending.has(msg.request_id)) return false
+    const p = this._pending.get(msg.request_id)
+    clearTimeout(p.timer)
+    this._pending.delete(msg.request_id)
+    if (msg.error && msg.error !== 'success') p.reject(new Error(msg.error))
+    else p.resolve(msg.data)
+    return true
+  }
+
+  /** observe_property 推送：只做「缓存状态 + 上报」，不做业务判断 */
+  _handleProperty({ name, data }) {
+    switch (name) {
+      case 'time-pos':
+        this._lastPos = typeof data === 'number' ? data : 0
+        this.onEvent({ type: 'time', pos: this._lastPos })
+        break
+      case 'duration':
+        this.onEvent({ type: 'duration', duration: typeof data === 'number' ? data : 0 })
+        break
+      case 'pause':
+        this._paused = data !== false
+        this.onEvent({ type: 'pause', paused: data !== false })
+        break
+      case 'eof-reached':
+        // 不抑制：单曲循环第二遍（seek 回 0 后 eof-reached 翻 false 再翻 true）必须能再上报。
+        if (data === true) {
+          this._eofAt = Date.now()
+          this.onEvent({ type: 'eof' })
         }
-      }
-      return
+        break
+      case 'audio-out-params':
+        // v3.3.13：只缓存最近状态。mpv 的 observe_property 只在值变化时推送，
+        // 若「重启后 AO 从头就打不开」则不会再有 null 跳变事件——
+        // 所以判定必须由 _wdTick 主动轮询这个缓存，不能靠事件跳变
+        this._aoParams = data || null
+        this.onEvent({ type: 'format', params: data || null })
+        break
+      case 'volume':
+        this.onEvent({ type: 'volume', volume: typeof data === 'number' ? data : 100 })
+        break
+      case 'mute':
+        this.onEvent({ type: 'mute', muted: data === true })
+        break
+      case 'idle-active':
+        this._idle = data === true
+        this.onEvent({ type: 'idle', idle: data === true })
+        break
     }
-    if (msg.event === 'log-message') {
-      const text = (msg.text || '').trim()
-      if (text) {
+  }
+
+  /** 其余事件：文件生命周期、日志 */
+  _handleEvent(msg) {
+    switch (msg.event) {
+      case 'file-loaded': {
+        this._idle = false
+        // v3.3.13：唤醒所有等 file-loaded 的续播等待者（集合方式，不包 onEvent）
+        const waiters = this._loadedWaiters
+        this._loadedWaiters = []
+        for (const w of waiters) w.finish(true)
+        this.onEvent({ type: 'loaded' })
+        return
+      }
+      case 'end-file': {
+        const reason = msg.reason || ''
+        // mpv 在 AO 初始化失败时也会走 end-file/error，这里上报给上层决定是否回退共享
+        if (reason === 'error') {
+          const detail = msg.error || this._lastLog || (this._stderr || '').trim().slice(-300) || 'mpv 无法播放该文件'
+          this.onEvent({ type: 'file-error', message: detail })
+        } else if (reason === 'eof') {
+          // 与刚刚上报的 eof-reached 属于同一对（含切歌后才迟到的情况）→ 吞掉，
+          // 只让渲染层收到一次曲末事件，避免一次曲末跳两首。
+          // 700ms 之外的 end-file(eof) 视为独立事件上报（例如极慢的尾包 / 未观察到 eof-reached）。
+          const paired = this._eofAt && Date.now() - this._eofAt < 700
+          this._eofAt = 0
+          if (!paired) this.onEvent({ type: 'file-eof' })
+        }
+        return
+      }
+      case 'log-message': {
+        const text = (msg.text || '').trim()
+        if (!text) return
         // 保留最近一条 warn/error：AO 初始化失败时 end-file 的 error 字段是空的，
         // 真正的原因（如 AUDCLNT_E_DEVICE_IN_USE）只能从这里拿到
         if (msg.level === 'error' || msg.level === 'fatal' || msg.level === 'warn') {
           this._lastLog = text.slice(0, 300)
         }
         this.onEvent({ type: 'log', level: msg.level, text })
+        return
       }
-      return
-    }
-    if (msg.event === 'start-file') {
-      this.onEvent({ type: 'start-file' })
-      return
+      case 'start-file':
+        this.onEvent({ type: 'start-file' })
+        return
     }
   }
 
@@ -427,8 +477,7 @@ class MpvEngine {
   stop() { this._send(['stop']) }
   seek(sec) { this._send(['seek', Math.max(0, sec), 'absolute']) }
   setVolume(v01) {
-    const v = Math.max(0, Math.min(1, Number(v01) || 0)) * 100
-    this._send(['set_property', 'volume', v])
+    this._send(['set_property', 'volume', clamp01(v01) * 100])
   }
   setMute(m) { this._send(['set_property', 'mute', !!m]) }
 
@@ -453,10 +502,11 @@ class MpvEngine {
     return run
   }
 
-  async _doRestart({ exclusive, audioDevice = this._audioDevice || '', volume = null } = {}) {
+  /** 串行化 + 「重启中」标记的包装。参数默认值只在 _restartBody 里定义一处 */
+  async _doRestart(opts) {
     this._restarting = true
     try {
-      return await this._restartBody({ exclusive, audioDevice, volume })
+      return await this._restartBody(opts)
     } finally {
       this._restarting = false
     }
@@ -539,11 +589,15 @@ class MpvEngine {
     this._pending.clear()
   }
 
-  kill() {
-    // v3.3.11：清掉看门狗
+  /** 清掉看门狗与连接重试定时器（kill / _teardown 共用，避免漏清导致重试打到旧管道） */
+  _clearTimers() {
     if (this._wdTimer) { clearInterval(this._wdTimer); this._wdTimer = null }
-    // v3.3.13：kill 后不能让 _connectWithRetry 的重试继续连
     if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null }
+  }
+
+  kill() {
+    // v3.3.11 / v3.3.13：清掉看门狗与重试定时器
+    this._clearTimers()
     // 代次 +1：让所有「在途的 start()」知道自己过期了（见构造函数注释）。
     // 没有这一步，kill 之后仍可能有 start() 接着 spawn 出没人管的孤儿独占进程。
     this._gen++
@@ -621,14 +675,13 @@ class MpvEngine {
     try {
       execFileSync('taskkill', ['/PID', String(p.pid), '/F'], { windowsHide: true, timeout: 5000 })
     } catch (err) { /* 忽略 */ }
-    await new Promise((resolve) => setTimeout(resolve, 200))
+    await sleep(200)
     return { ok: false, exited: false, pid: p.pid }
   }
 
   _teardown() {
     this.ready = false
-    if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null }
-    if (this._wdTimer) { clearInterval(this._wdTimer); this._wdTimer = null }
+    this._clearTimers()
     this._rejectPending('mpv 进程退出')
     this.sock = null
     this.proc = null
@@ -691,7 +744,7 @@ class MpvEngine {
         this.onEvent({ type: 'ao-recovered' })
         return
       }
-      await new Promise((r) => setTimeout(r, 300))
+      await sleep(300)
     }
     // 连续 3 次夺回失败：设备被别的程序长期占用，停手并告知用户
     if (!this.exclusive || this._disposed) return

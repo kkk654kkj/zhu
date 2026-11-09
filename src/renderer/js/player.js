@@ -221,6 +221,28 @@ class Player extends Emitter {
     this.emit('state-change', false)
   }
 
+  /**
+   * 「往后一首」的公共骨架：index 前进一位并处理越界。
+   * 两种落点策略覆盖了 next() 与 skipToNext() 的全部差异。
+   *
+   * @param {object} opts
+   * @param {boolean} opts.stopAtEnd 越界时是否停在最后一首并停播（顺序模式）
+   * @param {() => void} [opts.onWrap] 绕回第 0 首时的回调（列表循环的 queue-end 在这里发）
+   * @returns {boolean} false = 已停播，调用方不要再 load
+   */
+  _advance({ stopAtEnd, onWrap }) {
+    this.index += 1
+    if (this.index < this.tracks.length) return true
+    if (stopAtEnd) {
+      this.index = this.tracks.length - 1
+      this.stop()
+      return false
+    }
+    this.index = 0
+    if (onWrap) onWrap()
+    return true
+  }
+
   next(auto = false, fromError = false) {
     if (!this.tracks.length) return
     if (this.mode === 'single' && auto) {
@@ -231,15 +253,13 @@ class Player extends Emitter {
     if (this.mode === 'shuffle') {
       this.index = this._nextShuffleIndex(1)
     } else {
-      this.index = this.index + 1
-      if (this.index >= this.tracks.length) {
-        if (this.mode === 'list') {
-          this.index = 0
-          // 列表循环绕过一圈也算"播完一轮"——「播放结束后关机」要的就是这个时刻；
-          // 但坏盘连续跳曲（fromError）绕回不算，别误触发关机。next(true) 行为不变。
-          if (auto && !fromError) this.emit('queue-end')
-        } else { this.index = this.tracks.length - 1; this.stop(); return }
-      }
+      // 列表循环绕过一圈也算"播完一轮"——「播放结束后关机」要的就是这个时刻；
+      // 但坏盘连续跳曲（fromError）绕回不算，别误触发关机。next(true) 行为不变。
+      const ok = this._advance({
+        stopAtEnd: this.mode !== 'list',
+        onWrap: () => { if (auto && !fromError) this.emit('queue-end') }
+      })
+      if (!ok) return
     }
     this._loadCurrent(true)
   }
@@ -251,11 +271,7 @@ class Player extends Emitter {
    */
   skipToNext() {
     if (!this.tracks.length) return
-    this.index = this.index + 1
-    if (this.index >= this.tracks.length) {
-      if (this.mode === 'order') { this.index = this.tracks.length - 1; this.stop(); return }
-      this.index = 0
-    }
+    if (!this._advance({ stopAtEnd: this.mode === 'order' })) return
     this._loadCurrent(true)
   }
 
