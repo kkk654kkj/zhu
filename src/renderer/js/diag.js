@@ -223,12 +223,14 @@ const Diag = {
   async pollLive(reset) {
     // v3.3.7：加 in-flight 防护 —— IPC 偶发慢于 1.2s 时两次请求并行，
     // 同一批日志行会入列两次（「复制」会输出重复行）
-    if (this._polling) return
+    // v3.3.13：reset 要先于 in-flight 判断，否则轮询中点「刷新」毫无反应
     if (reset) {
       this.liveLines = []
       this.lastSeq = 0
       this._renderedSeq = 0
+      try { this.el('diagLog').innerHTML = '' } catch (e) { /* 未挂载 */ }
     }
+    if (this._polling) return
     this._polling = true
     try {
       const r = await window.api.diagMpvLog(this.lastSeq).catch(() => null)

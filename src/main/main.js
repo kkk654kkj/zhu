@@ -181,6 +181,23 @@ function mimeFor(p) {
   return AUDIO_MIME[ext] || MIME_BY_EXT[ext] || 'application/octet-stream'
 }
 
+/**
+ * v3.3.13：媒体路径白名单（模块作用域，协议层与 IPC 共用）。
+ * 只允许曲库目录 / 下载目录 / 数据目录之内的文件，防止渲染层被注入后
+ * 通过 lxfile:// 或 mpv:load 读任意本地文件。
+ */
+function isAllowedMediaPath(p) {
+  const abs = path.resolve(String(p || '')).toLowerCase()
+  const roots = [
+    ...(store.get().settings.musicDirs || []),
+    downloadDir(),
+    DATA_DIR
+  ]
+    .filter((r) => r && String(r).trim())
+    .map((r) => path.resolve(r).toLowerCase().replace(/[\\/]+$/, '') + path.sep)
+  return roots.some((r) => abs.startsWith(r) || (abs + path.sep).startsWith(r))
+}
+
 /* ---------------- 自定义协议：支持 Range 的本地文件读取 ---------------- */
 
 function registerFileProtocol() {
@@ -197,6 +214,8 @@ function registerFileProtocol() {
       if (/^\/[A-Za-z]:\//.test(filePath)) filePath = filePath.slice(1)
       if (process.platform !== 'win32' && !filePath.startsWith('/')) filePath = '/' + filePath
       filePath = path.normalize(filePath)
+      // v3.3.13：协议层也要收口（以前只有 mpv:load / shell:showItem 有）
+      if (!isAllowedMediaPath(filePath)) return new Response('forbidden', { status: 403 })
 
       const stat = await fsp.stat(filePath)
       if (!stat.isFile()) return new Response('not a file', { status: 404 })
@@ -247,7 +266,8 @@ function registerFileProtocol() {
         }
       })
     } catch (err) {
-      return new Response('not found: ' + err.message, { status: 404 })
+      logLine('[lxfile] 读取失败', err.message)
+      return new Response('not found', { status: 404 })   // 不回显绝对路径/系统错误
     }
   })
 }
@@ -274,7 +294,7 @@ function registerCoverProtocol() {
         }
       })
     } catch (err) {
-      return new Response('cover error: ' + err.message, { status: 500 })
+      return new Response('cover error', { status: 500 })
     }
   })
 }
@@ -388,6 +408,7 @@ function cacheTry(song, cls) {
     return { path: fp, rec, cls }
   } catch (err) {
     delete idx[key]
+    cacheSaveSoon()   // v3.3.13：脏索引清理也要落盘，否则重启后重现
     return null
   }
 }
@@ -493,7 +514,14 @@ function cacheStats() {
 
 /** 从磁盘出流，支持 Range（拖动进度条要靠它） */
 function serveLocalFile(filePath, req, res) {
-  const stat = fs.statSync(filePath)
+  let stat
+  try {
+    stat = fs.statSync(filePath)
+  } catch (err) {
+    // v3.3.13：缓存命中到 open 之间文件被淘汰/删除 → 404，不要冒 500
+    try { res.writeHead(404); res.end('file gone') } catch (e) { /* 已断开 */ }
+    return
+  }
   const total = stat.size
   const base = {
     'Content-Type': mimeFor(filePath),
@@ -621,7 +649,8 @@ function startStreamServer() {
         }
       }
       if (req.headers.range) headers.Range = req.headers.range
-      const upstream = await fetch(info.url, { headers, redirect: 'follow' })
+      // v3.3.13：上游挂起会让请求永远不回 —— 15 秒超时
+      const upstream = await fetch(info.url, { headers, redirect: 'follow', signal: AbortSignal.timeout(15000) })
       if (!upstream.ok && upstream.status !== 206) {
         logLine('[online] 上游失败', upstream.status, info.url.slice(0, 70))
         res.writeHead(502).end('upstream ' + upstream.status)
@@ -674,6 +703,8 @@ function startStreamServer() {
         try {
           ps.once('close', del)
           ps.destroy()
+          // v3.3.13：close 可能在监听前就已发出 → 1 秒后兜底再删一次
+          setTimeout(del, 1000)
         } catch (e) {
           del()
         }
@@ -720,6 +751,7 @@ function startStreamServer() {
         ext: info.ext || 'mp3',
         cached: false
       })
+      if (!upstream.body) { try { res.end() } catch (e) {} ; return }
       const reader = upstream.body.getReader()
       // 客户端一断开（切歌、拖进度条）就把上游和写盘一起收掉。
       // 只等 'drain' 是不够的：连接没了就没有 drain，这个请求会永远悬着。
@@ -733,16 +765,19 @@ function startStreamServer() {
       res.on('close', onClose)
       const waitDrain = (emitter) => new Promise((r) => {
         let done = false
+        let timer = null
         const go = () => {
           if (done) return
           done = true
+          if (timer) clearTimeout(timer)
+          // v3.3.13：once 注册的是包装函数，off 必须配对；用 on + off 才能真清掉
           emitter.off('drain', go)
           emitter.off('close', go)
           r()
         }
-        emitter.once('drain', go)
-        emitter.once('close', go)
-        setTimeout(go, 3000) // 宁可丢掉缓存，也不能卡住播放
+        emitter.on('drain', go)
+        emitter.on('close', go)
+        timer = setTimeout(go, 3000) // 宁可丢掉缓存，也不能卡住播放
       })
       let complete = false
       try {
@@ -767,11 +802,15 @@ function startStreamServer() {
         // 正常读完才落缓存；中途断开就把残片丢掉
         if (complete) finishCache()
         else dropPart()
+        // v3.3.13：无论成功/异常/断开，连接都必须收掉
+        try { if (!res.writableEnded) res.end() } catch (e) { /* 已断开 */ }
       }
-      try { res.end() } catch (e) { /* 已断开 */ }
     } catch (err) {
       logLine('[online] 代理异常', err.message)
-      try { res.writeHead(500).end('proxy error') } catch (e) { /* 已断开 */ }
+      try {
+        if (res.headersSent) res.destroy()      // 头已发出，不能再次 writeHead
+        else res.writeHead(500).end('proxy error')
+      } catch (e) { try { res.destroy() } catch (e2) {} }
     }
   })
   streamServer.on('error', (err) => {
@@ -883,14 +922,16 @@ function clampToWorkArea(b) {
 function waitWindowEvent(win, ev, timeout = 500) {
   return new Promise((resolve) => {
     let done = false
+    let timer = null
     const fin = () => {
       if (done) return
       done = true
+      if (timer) clearTimeout(timer)
       try { win.removeListener(ev, fin) } catch {}
       resolve()
     }
-    win.once(ev, fin)
-    setTimeout(fin, timeout)
+    win.on(ev, fin)          // once 的包装函数 removeListener 匹配不到
+    timer = setTimeout(fin, timeout)
   })
 }
 
@@ -971,11 +1012,12 @@ function createWindow() {
   const x = miniActive ? (Number.isFinite(mb.x) ? mb.x : bounds.x) : bounds.x
   const y = miniActive ? (Number.isFinite(mb.y) ? mb.y : bounds.y) : bounds.y
 
+  const placed = clampToWorkArea({ width, height, x, y })
   win = new BrowserWindow({
-    width,
-    height,
-    x,
-    y,
+    width: placed.width,
+    height: placed.height,
+    x: placed.x,
+    y: placed.y,
     minWidth: miniActive ? MINI_MIN_W : FULL_MIN_W,
     minHeight: miniActive ? MINI_MIN_H : FULL_MIN_H,
     maximizable: !miniActive,
@@ -1078,7 +1120,8 @@ function pushSleepState() {
 /** minutes=0 表示关闭。到点只做一件事：让渲染层淡出并暂停。 */
 function setSleepTimer(minutes) {
   if (sleepTimerId) { clearTimeout(sleepTimerId); sleepTimerId = null }
-  sleepMinutes = Number(minutes) || 0
+  // v3.3.13：超 2^31-1ms 会被 Node clamp 成 1ms，定时器立刻触发
+  sleepMinutes = Math.min(24 * 60, Math.max(0, Math.floor(Number(minutes) || 0)))
   sleepEndsAt = 0
   if (sleepMinutes > 0) {
     logLine('[sleep] 定时 ' + sleepMinutes + ' 分钟')
@@ -1119,7 +1162,6 @@ function runPowerAction() {
   const kind = powerAfterQueue
   powerAfterQueue = 'off'
   store.patch({ settings: { powerAfterQueue: 'off' } })
-  refreshTrayMenu()
   sendToRenderer('power-after-queue', 'off')
   sendToRenderer('power-action', { kind, delay: 15 })
   logLine('[power] 队列结束，执行 ' + kind + '（15 秒内可在托盘取消）')
@@ -1130,6 +1172,7 @@ function runPowerAction() {
   if (powerPending) { clearTimeout(powerPending); powerPending = null }
   powerPending = setTimeout(() => {
     powerPending = null
+    refreshTrayMenu()
     if (kind === 'quit') { quitting = true; app.quit(); return }
     try {
       if (kind === 'shutdown') execFile('shutdown', ['/s', '/t', '30'])
@@ -1138,6 +1181,7 @@ function runPowerAction() {
       logLine('[power] 执行失败 ' + err.message)
     }
   }, 15000)
+  refreshTrayMenu()   // v3.3.13：赋值之后重建，「取消关机」菜单项才真的出现
 }
 
 let powerPending = null
@@ -2063,7 +2107,17 @@ async function dlRun(task) {
       }
       if (task.deleted) { try { ctrl.abort() } catch (err) { /* 忽略 */ } break }
     }
-    await new Promise((r) => ws.end(r))
+    // v3.3.13：写流在 end() 前/中出错时 finish 永不触发 → 任务永久挂起。
+    // 与 drain 一样必须与「写错误/abort/超时」竞速
+    const ended = await Promise.race([
+      new Promise((r) => ws.end(r)),
+      wsError.then((e) => ({ wsErr: e })),
+      abortedEv,
+      new Promise((r) => setTimeout(() => r({ timeout: true }), 10000))
+    ])
+    if (ended && ended.wsErr) throw ended.wsErr
+    if (ended && ended.aborted) throw Object.assign(new Error('download aborted'), { name: 'AbortError' })
+    if (ended && ended.timeout) throw new Error('写盘收尾超时')
     ws = null
     if (task.deleted) throw Object.assign(new Error('__deleted'), { name: 'AbortError' })
     if (task.total && task.received + 1024 < task.total) throw new Error('下载不完整（连接中断）')
@@ -2099,6 +2153,8 @@ async function dlRun(task) {
       logLine('[dl] 失败', task.error)
     }
   } finally {
+    // v3.3.13：异常路径也要释放写流句柄
+    if (ws) { try { ws.destroy() } catch (e) { /* 忽略 */ } }
     // v3.3.9：只清掉自己这轮的 abort 控制器，别抹掉新一轮任务的
     if (task.abort === ctrl) task.abort = null
     dlBroadcast(true)
@@ -2458,10 +2514,14 @@ function registerIpc() {
     const run = async () => {
       const probeRun = online.getPlayable(song, prefer)
       probeRun.catch(() => {})   // v3.3.9：超时后丢弃的那份别变成 unhandledRejection
-      const info = await Promise.race([
-        probeRun,
-        new Promise((r) => setTimeout(() => r(null), 8000))
-      ])
+      let probeTimer = null
+      const timerP = new Promise((r) => { probeTimer = setTimeout(() => r(null), 8000) })
+      let info
+      try {
+        info = await Promise.race([probeRun, timerP])
+      } finally {
+        clearTimeout(probeTimer)   // v3.3.13：成功也要清，别留 8 秒空定时器
+      }
       if (!info) throw new Error('no info')
       const data = {
         ok: true,
@@ -2680,21 +2740,6 @@ function registerIpc() {
     })
     return res.canceled ? [] : res.filePaths
   })
-  // v3.3.9：路径收口 —— 只允许曲库目录 / 下载目录 / 数据目录之内的文件
-  function isAllowedMediaPath(p) {
-    const abs = path.resolve(String(p || '')).toLowerCase()
-    // v3.3.10：根路径先把尾分隔符归一化再拼 sep —— 盘符根目录（D:/）resolve 后
-    // 自带尾分隔符，直接拼会变双分隔符，startsWith 永远 false，
-    // 曲库选成盘根时所有文件都被拒。空目录项也过滤（resolve('')=cwd，会放行任意文件）
-    const roots = [
-      ...(store.get().settings.musicDirs || []),
-      downloadDir(),
-      DATA_DIR
-    ]
-      .filter((r) => r && String(r).trim())
-      .map((r) => path.resolve(r).toLowerCase().replace(/[\\/]+$/, '') + path.sep)
-    return roots.some((r) => abs.startsWith(r) || (abs + path.sep).startsWith(r))
-  }
   ipcMain.handle('shell:showItem', (e, filePath) => {
     if (filePath && fs.existsSync(filePath) && isAllowedMediaPath(filePath)) shell.showItemInFolder(filePath)
   })
@@ -3083,7 +3128,10 @@ if (gotLock) cleanChromiumCache()
     // 应用按「文件夹」组织曲库、单文件导入尚未实现，先把路径转给渲染层给出可见反馈
     const media = (argv || [])
       .map(String)
-      .filter((a) => /\.(mp3|flac|m4a|wav|ogg|opus|dsf|dff|aac|wma|ape|alac|m3u|m3u8)$/i.test(a) && fs.existsSync(a))
+      .filter((a) => {
+        if (a.length > 240 || a.startsWith('\\\\') || !/\.(mp3|flac|m4a|wav|ogg|opus|dsf|dff|aac|wma|ape|alac|m3u|m3u8)$/i.test(a)) return false
+        try { return fs.statSync(a).isFile() } catch (e) { return false }  // 排除目录/UNC 阻塞
+      })
     if (media.length) sendToRenderer('open-files', { paths: media })
   })
 
@@ -3183,20 +3231,28 @@ if (gotLock) cleanChromiumCache()
     quitting = true
     stopWatching()
     const hadEngine = !!mpvEngine
+    // v3.3.13：清理链必须能收敛 —— stopMpv 的 Promise 万一永不 settle，
+    // 也不能让用户只能 taskkill。6 秒后无条件退出。
+    const finishQuit = () => {
+      if (quitCleanupDone) return
+      quitCleanupDone = true
+      try { if (store) store.flush() } catch (err) { /* 忽略 */ }
+      try { if (tray) tray.destroy() } catch (err) { /* 忽略 */ }
+      app.quit()
+    }
+    const quitGuard = setTimeout(finishQuit, 6000)
     try {
       stopMpv().catch(() => {}).finally(() => {
         (async () => {
           if (hadEngine) { try { await sweepOurMpv() } catch (err) { /* 忽略 */ } }
           try { dlSaveNow() } catch (err) { /* 忽略 */ }
-          try { if (store) store.flush() } catch (err) { /* 忽略 */ }
-          quitCleanupDone = true
-          app.quit()
+          clearTimeout(quitGuard)
+          finishQuit()
         })()
       })
     } catch (err) {
-      // v3.3.9：stopMpv 若同步抛错也不能把退出卡死
-      quitCleanupDone = true
-      app.quit()
+      clearTimeout(quitGuard)
+      finishQuit()
     }
   })
 

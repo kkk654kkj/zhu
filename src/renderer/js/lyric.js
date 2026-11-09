@@ -23,19 +23,25 @@ function parseLrc(text) {
     // v3.3.9：去掉结尾锚 —— `[ti:标题] 备注` 这种行以前被当纯文本丢掉
     // v3.3.10：值域改 [^\\]]* —— 以前 (.*) 贪婪到行尾最后一个 ]，
     // `[ar:x] [00:12]词` 会把同行歌词整行吞掉
-    const metaMatch = /^\[(ti|ar|al|by|offset|tool|re|ve):([^\]]*)\]/i.exec(line)
-    if (metaMatch) {
-      const key = metaMatch[1].toLowerCase()
-      const val = metaMatch[2].trim()
+    // v3.3.13：循环剥掉行首所有元信息标签（[ti:x][ar:y] 是常见写法），
+    // 余下内容只有带合法时间戳才算歌词，备注/多标签残片不能混进纯文本歌词
+    let hadMeta = false
+    const metaRe = /^\[(ti|ar|al|by|offset|tool|re|ve):([^\]]*)\]\s*/i
+    for (;;) {
+      const mm = metaRe.exec(line)
+      if (!mm) break
+      hadMeta = true
+      const key = mm[1].toLowerCase()
+      const val = mm[2].trim()
       if (key === 'offset') {
         const n = parseInt(val, 10)
         if (!Number.isNaN(n)) offsetMs = n
       } else {
         meta[key] = val
       }
-      line = line.slice(metaMatch[0].length).trim()
-      if (!line) continue
+      line = line.slice(mm[0].length).trim()
     }
+    if (!line) continue
 
     // 时间戳 [mm:ss.xx] 或 [mm:ss:xx]
     const timeRe = /\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g
@@ -55,6 +61,7 @@ function parseLrc(text) {
       tagged++
     }
     if (!stamps.length) {
+      if (hadMeta) continue
       // 纯文本行（无时间戳）→ 作为普通歌词，后续整体按纯文本处理
       lines.push({ t: null, text: line })
       continue

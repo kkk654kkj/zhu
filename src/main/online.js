@@ -36,6 +36,12 @@ async function req(url, opts = {}) {
     // 之后 res.text()/json() 挂起时毫无约束（undici 默认 bodyTimeout 300 秒），
     // 一个慢源能把整次搜索拖死。把清计时器挂到正文消费完成之后。
     const done = () => clearTimeout(timer)
+    // v3.3.13：不消费正文的调用（探测/失败响应）必须能主动释放，
+    // 否则 timer 与连接会一直留到超时（每个探测 8~15 秒）
+    res.release = () => {
+      clearTimeout(timer)
+      try { if (res.body) res.body.cancel() } catch (e) { /* 已释放 */ }
+    }
     const origText = res.text.bind(res)
     res.text = () => origText().finally(done)
     const origJson = res.json.bind(res)
@@ -56,7 +62,7 @@ async function req(url, opts = {}) {
 async function reqText(url, opts) {
   try {
     const res = await req(url, opts)
-    if (!res.ok) return null
+    if (!res.ok) { try { res.release && res.release() } catch (e) {} ; return null }
     return await res.text()
   } catch (err) {
     return null
@@ -561,6 +567,8 @@ async function probeStream(info, realDuration, expectDuration = 0) {
     if (info.referer) headers.Referer = info.referer
     if (info.headers && typeof info.headers === 'object') Object.assign(headers, info.headers)
     const res = await req(info.url, { headers, timeout: 8000 })
+    // v3.3.13：本函数只看响应头，正文必须显式取消，否则每个探测留 8 秒 timer + 连接
+    try { res.release && res.release() } catch (e) { /* 忽略 */ }
     // v3.3.8：先看状态码 —— 404/503 的直链以前只要 content-type 不是 html
     // 就被当有效结果放行（content-range 为空 → total=0 → 原样返回），进 20 分钟缓存
     if (!res.ok && res.status !== 206) return { ...info, broken: true }
@@ -727,7 +735,10 @@ async function qingResolveOnce(source, rid, level) {
         return null
       }
       // 票过期就作废并**当场重领**：继续用捕获的旧票跑剩下的线路必然全挂
-      if (/TICKET|AUTH|TOKEN/i.test(String(j.code || ''))) {
+      const qcode = String(j.code ?? '')
+      // v3.3.13：网关可能用数字码（401/403/419/10001）表示票据过期，
+      // 只匹配字符串关键字会让过期票一直用到超时
+      if (/TICKET|AUTH|TOKEN/i.test(qcode) || /^(401|403|419|10001|10002)$/.test(qcode)) {
         qingTicket = ''
         ticket = await qingEnsureTicket()
       }
@@ -752,7 +763,7 @@ async function qingLossless(song, prefer) {
       duration,
       duration
     )
-    if (probed.broken || probed.partial) continue
+    if (probed.broken || probed.partial || probed.unverified) continue
     return {
       ...probed,
       duration,
@@ -812,7 +823,7 @@ async function chkszLossless(song, key) {
     duration,
     duration
   )
-  if (probed.broken || probed.partial) return null
+  if (probed.broken || probed.partial || probed.unverified) return null
   return {
     ...probed,
     duration,
@@ -906,7 +917,7 @@ async function resolveLossless(song, prefer) {
           twin.duration || song.duration || 0,
           song.duration || 0
         )
-        if (!probed.broken && !probed.partial) {
+        if (!probed.broken && !probed.partial && !probed.unverified) {
           return {
             ...probed,
             // 播放时长以下载得到的这份为准，界面上的时长别被蹭偏
@@ -960,16 +971,19 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
     const fbTimer = setTimeout(startFallback, 1500)
 
     let got = null
+    let losslessTimer = null
+    const losslessTimeout = new Promise((r) => { losslessTimer = setTimeout(() => r(null), 9000) })
     try {
       got = await Promise.race([
         resolveLossless(song, prefer),
         // QQ 那边偶尔要 5 秒才给链，窗口给足；超过就先用降级结果出声
-        new Promise((r) => setTimeout(() => r(null), 9000))
+        losslessTimeout
       ])
     } catch (err) {
       logger('[flac] 解析异常 ' + err.message)
     } finally {
       clearTimeout(fbTimer)
+      clearTimeout(losslessTimer)   // v3.3.13：成功也要清，别留 9 秒空定时器
     }
     if (got) {
       const rec = { ...got, at: Date.now() }
@@ -1117,6 +1131,7 @@ function normText(s) {
 
 function matchScore(s, song) {
   const t = normText(song.title)
+  if (!t) return 0   // v3.3.13：空标题下 st.includes('') 恒真，会把所有候选判成同曲
   const a = normText(String(song.artist || '').split('/')[0])
   const st = normText(s.title)
   const sa = normText(String(s.artist || ''))
@@ -1213,9 +1228,17 @@ async function resolveStreamUrl(rawUrl) {
     return null
   }
   if (u.protocol !== 'lxstream:') return null
-  const parts = u.pathname.replace(/^\/+/, '').split('/')
-  const source = decodeURIComponent(parts[0] || '')
-  const id = decodeURIComponent(parts[1] || '')
+  // v3.3.13：畸形 % 序列的 decodeURIComponent 会抛 URIError（旧会话脏数据），
+  // 以前会让 mpv:load reject、界面永久停在「正在加载」
+  let source = ''
+  let id = ''
+  try {
+    const parts = u.pathname.replace(/^\/+/, '').split('/')
+    source = decodeURIComponent(parts[0] || '')
+    id = decodeURIComponent(parts[1] || '')
+  } catch (err) {
+    return null
+  }
   if (!SOURCES[source] || !id) return null
   const song = {
     source,

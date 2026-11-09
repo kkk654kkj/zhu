@@ -53,10 +53,14 @@ class MpvEngine {
     // _paused/_idle：暂停/空闲时 AO 释放是正常的，不看门狗；
     // _recoverAttempts/_lastRecoverAt：自动夺回的退避与冷却。
     this._aoLostAt = 0
+    this._aoParams = null      // 最近一次 audio-out-params（看门狗按状态判定，不靠事件跳变）
     this._paused = true
     this._idle = true
     this._recoverAttempts = 0
     this._lastRecoverAt = 0
+    this._recovering = false
+    this._restarting = false
+    this._restartChain = Promise.resolve()   // restart 串行化
     this._wdTimer = null
     // v2.8.6 / v3.3.6：「已释放」标记。
     // stop()（= 关独占 / 退出）之后，这个引擎对象就不要再起来了 ——
@@ -170,9 +174,11 @@ class MpvEngine {
     this.ready = true
     this._observe()
     this._flush()
-    // v3.3.11：独占输出看门狗（每秒检查一次，见 _wdTick）
+    // v3.3.13：看门狗（每秒检查一次）。注意不要把 _recoverAttempts/_lastRecoverAt
+    // 清零——restart() 必经 start()，清零会让「连续 3 次失败停手」永远失效，
+    // 设备真被别的程序占着时会无限重启 + 反复弹「已恢复」
     this._aoLostAt = 0
-    this._recoverAttempts = 0
+    this._aoParams = null
     this._paused = true
     this._idle = true
     if (this._wdTimer) clearInterval(this._wdTimer)
@@ -290,19 +296,16 @@ class MpvEngine {
           break
         case 'pause':
           this._paused = data !== false
-          if (this._paused) this._aoLostAt = 0   // 暂停时 AO 释放是正常行为
           this.onEvent({ type: 'pause', paused: data !== false })
           break
         case 'eof-reached':
           if (data === true) this.onEvent({ type: 'eof' })
           break
         case 'audio-out-params':
-          // v3.3.11：独占播放中 params 变 null = 输出流被踢（游戏启动改设备配置、
-          // 系统切换默认设备等）。记下时刻交给看门狗；恢复非 null 即解除
-          if (this.exclusive) {
-            if (!data && !this._idle) this._aoLostAt = Date.now()
-            else if (data) { this._aoLostAt = 0; this._recoverAttempts = 0 }
-          }
+          // v3.3.13：只缓存最近状态。mpv 的 observe_property 只在值变化时推送，
+          // 若「重启后 AO 从头就打不开」则不会再有 null 跳变事件——
+          // 所以判定必须由 _wdTick 主动轮询这个缓存，不能靠事件跳变
+          this._aoParams = data || null
           this.onEvent({ type: 'format', params: data || null })
           break
         case 'volume':
@@ -313,7 +316,6 @@ class MpvEngine {
           break
         case 'idle-active':
           this._idle = data === true
-          if (this._idle) this._aoLostAt = 0
           this.onEvent({ type: 'idle', idle: data === true })
           break
       }
@@ -385,7 +387,23 @@ class MpvEngine {
    * v2.5 修复：以前重启后固定 paused 加载且无人恢复——独占播放中切设备，音乐会停在
    * 原地不再出声（用户看起来就是"切换设备无效"）。现在先记下播放状态，重启后接着播。
    */
-  async restart({ exclusive, audioDevice = this._audioDevice || '', volume = null } = {}) {
+  /** 串行化：设备热插拔 / file-error 回退 / 看门狗可能同时要求重启 */
+  restart(opts = {}) {
+    const run = this._restartChain.catch(() => {}).then(() => this._doRestart(opts))
+    this._restartChain = run.catch(() => {})
+    return run
+  }
+
+  async _doRestart({ exclusive, audioDevice = this._audioDevice || '', volume = null } = {}) {
+    this._restarting = true
+    try {
+      return await this._restartBody({ exclusive, audioDevice, volume })
+    } finally {
+      this._restarting = false
+    }
+  }
+
+  async _restartBody({ exclusive, audioDevice = this._audioDevice || '', volume = null } = {}) {
     let wasPlaying = false
     try { wasPlaying = (await this.request(['get_property', 'pause'], 800)) === false } catch {}
     const file = this._lastFile
@@ -433,13 +451,15 @@ class MpvEngine {
         if (done) return
         done = true
         clearTimeout(timer)
-        this.onEvent = orig
+        // v3.3.13：并发 restart 时别把后注册的那个 wrapper 覆盖掉
+        if (this.onEvent === wrapped) this.onEvent = orig
         resolve(v)
       }
-      this.onEvent = (evt) => {
+      const wrapped = (evt) => {
         if (evt && evt.type === 'loaded') finish(true)
         try { orig(evt) } catch (err) { /* 原回调自己兜 */ }
       }
+      this.onEvent = wrapped
     })
   }
 
@@ -541,27 +561,50 @@ class MpvEngine {
    */
   _wdTick() {
     if (!this.ready || !this.exclusive || this._disposed) return
+    // v3.3.13：测试静音（--ao=null）不参与独占判定
+    if (process.env.LX_TEST_MUTE === '1') return
     if (this._idle || this._paused || !this._lastFile) { this._aoLostAt = 0; return }
-    if (!this._aoLostAt) return
+    // 主动状态判定：AO 参数回来就清零计数（H2 的关键）
+    if (this._aoParams) {
+      this._aoLostAt = 0
+      this._recoverAttempts = 0
+      return
+    }
+    if (!this._aoLostAt) { this._aoLostAt = Date.now(); return }
     const lostFor = Date.now() - this._aoLostAt
     if (lostFor < 2500) return
+    if (this._recovering || this._restarting) return
     if (Date.now() - this._lastRecoverAt < 12000) return
     if (this._recoverAttempts >= 3) return
+    this._recovering = true
     this._lastRecoverAt = Date.now()
     this._recoverAttempts++
     this.onEvent({ type: 'ao-lost', attempt: this._recoverAttempts,
       message: '独占输出已中断 ' + Math.round(lostFor / 1000) + ' 秒，正在自动重启引擎夺回…' })
+    // v3.3.13：start() 返回 ok 只代表进程起来了，不代表拿到声卡。
+    // 重启后必须实测 audio-out-params 非 null 才算夺回成功（H1）
     this.restart({ exclusive: true })
-      .then((r) => {
-        if (r && r.ok) {
-          this._recoverAttempts = 0
-          this.onEvent({ type: 'ao-recovered' })
-        } else if (this._recoverAttempts >= 3) {
-          this.onEvent({ type: 'exclusive-lost',
-            message: '自动夺回独占失败（' + ((r && r.error) || '设备被占用') + '）。游戏可能在用声卡，稍后会自动再试' })
-        }
-      })
       .catch(() => {})
+      .then(() => this._verifyRecover())
+      .finally(() => { this._recovering = false })
+  }
+
+  /** 重启后等最多 6 秒，确认音频输出真的回来了 */
+  async _verifyRecover() {
+    const deadline = Date.now() + 6000
+    while (Date.now() < deadline && !this._disposed) {
+      if (this._aoParams) {
+        this._recoverAttempts = 0
+        this.onEvent({ type: 'ao-recovered' })
+        return
+      }
+      await new Promise((r) => setTimeout(r, 300))
+    }
+    // 连续 3 次夺回失败：设备被别的程序长期占用，停手并告知用户
+    if (this._recoverAttempts >= 3 && !this._aoParams) {
+      this.onEvent({ type: 'exclusive-lost',
+        message: '自动夺回独占失败：声卡被其他程序占用（比如游戏也开了独占）。请关闭占用程序或手动切共享' })
+    }
   }
 }
 
