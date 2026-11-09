@@ -1622,6 +1622,18 @@ function onMpvEvent(evt) {
   if (evt.type === 'engine-exit') {
     pushMpvLog('error', '引擎退出 code=' + evt.code + (evt.stderr ? ' stderr=' + evt.stderr : ''))
   }
+  if (evt.type === 'ao-lost') {
+    logLine('[mpv] ' + (evt.message || '独占输出中断'))
+    pushMpvLog('warn', evt.message || '独占输出中断')
+  }
+  if (evt.type === 'ao-recovered') {
+    logLine('[mpv] 独占输出已自动恢复')
+    pushMpvLog('info', '独占输出已自动恢复')
+  }
+  if (evt.type === 'exclusive-lost') {
+    logLine('[mpv] ' + (evt.message || '自动夺回独占失败'))
+    pushMpvLog('error', evt.message || '自动夺回独占失败')
+  }
   if (evt.type === 'error') pushMpvLog('error', evt.message || '引擎错误')
   if (evt.type === 'loaded') pushMpvLog('info', 'file-loaded')
   sendToRenderer('mpv:event', evt)
