@@ -41,6 +41,12 @@ export ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
 OUT="$PACK/${NAME}-win32-x64"
 mkdir -p "$OUT/engine"
 cp "D:/lx-dev/mpv/mpv.exe" "$OUT/engine/mpv.exe"
+# 附属文件随包自带（以前成品目录里的 vbs/icon.ico 是历史遗留副本，新机器解包才有）
+cp "$LP/packaging/启动播放器.vbs" "$OUT/启动播放器.vbs"
+cp "$LP/src/assets/icon.ico" "$OUT/icon.ico"
+# 附属文件随包自带（以前成品目录里的 vbs/icon.ico 是历史遗留副本，新机器解包才有）
+cp "$LP/packaging/启动播放器.vbs" "$OUT/启动播放器.vbs"
+cp "$LP/src/assets/icon.ico" "$OUT/icon.ico"
 
 echo "== done: $OUT =="
 ls -la "$OUT/resources/app.asar" "$OUT/engine/mpv.exe"
