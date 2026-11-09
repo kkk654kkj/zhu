@@ -20,7 +20,18 @@ function deepMerge(base, patch) {
   if (typeof base !== 'object' || base === null) return patch === undefined ? base : patch
   if (typeof patch !== 'object' || patch === null) return patch === undefined ? base : patch
   const out = { ...base }
-  for (const k of Object.keys(patch)) out[k] = deepMerge(base[k], patch[k])
+  for (const k of Object.keys(patch)) {
+    // v3.3.13：结构化克隆会保留自有 __proto__/constructor/prototype，
+    // 直接 out['__proto__']=... 会触发 setter 改写原型（原型污染）。
+    // 跳过危险键，并用 defineProperty 赋值彻底绕开任何 setter。
+    if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
+    Object.defineProperty(out, k, {
+      value: deepMerge(base[k], patch[k]),
+      enumerable: true,
+      writable: true,
+      configurable: true
+    })
+  }
   return out
 }
 
@@ -32,6 +43,10 @@ class Store {
     this._timer = null
     this._loading = true
     this._needsFlush = false
+    // v3.3.13：写盘失败标记与有上限的自动重试（避免死循环）
+    this._dirty = false
+    this._retries = 0
+    this._retryTimer = null
     this.onError = opts.onError || ((msg) => console.error(msg))
     this.load()
     this._loading = false
@@ -40,10 +55,14 @@ class Store {
   }
 
   load() {
+    // v3.3.13：上次 rename 失败（Windows 文件被占用）会留下已 fsync 的完整 .tmp，
+    // 它比正式文件更新时优先恢复；否则下次 _flush() 用 'w' 打开会覆盖并静默丢数据
+    const recovered = this._recoverTmp()
     try {
-      if (fs.existsSync(this.file)) {
-        const raw = fs.readFileSync(this.file, 'utf8')
-        const parsed = JSON.parse(raw)
+      let parsed
+      if (recovered) parsed = recovered
+      else if (fs.existsSync(this.file)) parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'))
+      if (parsed !== undefined) {
         // v3.3.10：顶层必须是普通对象 —— 合法 JSON 但顶层是数组/原始值时
         // （磁盘损坏/误编辑），deepMerge 会把它整体当数据，之后一次 patch
         // 就把 settings/playlists 全部清空并写回固化
@@ -60,6 +79,36 @@ class Store {
       this.data = JSON.parse(JSON.stringify(this.defaults))
       this.data._v = SCHEMA_VERSION
     }
+  }
+
+  /** 从上次 rename 失败残留的 .tmp 恢复数据；返回可用的顶层对象或 null */
+  _recoverTmp() {
+    const tmp = this.file + '.tmp'
+    let stTmp
+    try { stTmp = fs.statSync(tmp) } catch { return null }
+    let stFile = null
+    try { stFile = fs.statSync(this.file) } catch { /* 正式文件还不存在 */ }
+    // 只有 tmp 比正式文件更新才采用，避免用半写入/陈旧的 tmp 覆盖已提交数据
+    if (stFile && stTmp.mtimeMs <= stFile.mtimeMs) return null
+    let parsed
+    try {
+      parsed = JSON.parse(fs.readFileSync(tmp, 'utf8'))
+    } catch {
+      this._quarantineCorruptTmp(tmp)
+      return null
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      this._quarantineCorruptTmp(tmp)
+      return null
+    }
+    // 采用：先尝试 rename 成正式文件（占用失败也没关系，数据已在内存）
+    try { fs.renameSync(tmp, this.file) } catch (e) { /* Windows 占用，忽略 */ }
+    return parsed
+  }
+
+  /** 损坏的 tmp 不直接删，改名备份留证 */
+  _quarantineCorruptTmp(tmp) {
+    try { fs.renameSync(tmp, tmp + '.corrupt-' + Date.now()) } catch (e) { /* 占用，忽略 */ }
   }
 
   /**
@@ -91,6 +140,12 @@ class Store {
   }
 
   replace(next) {
+    // v3.3.13：与 load() 一致校验顶层结构，防止数组/null 把 this.data
+    // 变成非法结构后 store.get().settings 抛错、当前会话崩
+    if (!next || typeof next !== 'object' || Array.isArray(next)) {
+      this.onError('[store] replace 忽略非法顶层结构（非普通对象）')
+      return this.data
+    }
     this.data = next
     this.save()
     return this.data
@@ -107,6 +162,25 @@ class Store {
     if (this._loading) return
     clearTimeout(this._timer)
     this._timer = setTimeout(() => this._flush(), 250)
+    // v3.3.13：上次写盘失败时，除正常去抖外再挂一条有上限的重试链，
+    // 避免"改一次设置写失败后整个会话都不再落盘"
+    if (this._dirty) this._scheduleRetry()
+  }
+
+  /** 有上限的自动重试：连续失败最多 3 次，超过停手并 onError，避免死循环 */
+  _scheduleRetry() {
+    if (this._retryTimer) return
+    if (this._retries >= 3) {
+      this.onError('[store] 连续重试 3 次仍写入失败，停止自动重试')
+      return
+    }
+    this._retries++
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null
+      if (!this._dirty) { this._retries = 0; return }
+      this._flush()
+      // _flush 失败会自行 _scheduleRetry 续链；成功则 _dirty=false、_retries=0
+    }, 1000)
   }
 
   flush() {
@@ -128,12 +202,28 @@ class Store {
       fd = null
       wrote = true
       fs.renameSync(tmp, this.file)
+      // v3.3.13：rename 后 fsync 父目录，让目录项本身也落盘（防断电丢目录项）。
+      // Windows 对目录 fsync 会抛 EBADF/EINVAL，忽略即可，不影响文件写入成功
+      let dirFd = null
+      try {
+        dirFd = fs.openSync(path.dirname(this.file), 'r')
+        fs.fsyncSync(dirFd)
+      } catch (e) {
+        /* Windows 不支持目录 fsync，忽略 */
+      } finally {
+        if (dirFd !== null) { try { fs.closeSync(dirFd) } catch (e) { /* 已关 */ } }
+      }
+      this._dirty = false
+      this._retries = 0
     } catch (err) {
       if (fd) { try { fs.closeSync(fd) } catch (e) {} }
+      this._dirty = true
       this.onError('[store] 写入失败: ' + err.message)
       // v3.3.13：rename 失败时 tmp 是「已写完并 fsync 的完整新数据」，不能删；
       // 只有写入阶段失败才清理残件
       if (!wrote) { try { fs.unlinkSync(this.file + '.tmp') } catch (e) { /* 忽略 */ } }
+      // 写失败后续上重试链（_scheduleRetry 自带 3 次上限守卫）
+      this._scheduleRetry()
     }
   }
 }

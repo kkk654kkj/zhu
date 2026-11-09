@@ -16,6 +16,7 @@ function bindDragAndDrop() {
 
   let dragQi = null          // 正在拖的队列索引
   let dragQId = null         // v3.3.9：被拖项的曲目 id —— 拖拽期间队列可能重渲染，索引会过期
+  let dragQRef = null        // v3.3.13：被拖项的对象引用（优先用它定位，id 在重复曲目下会串位）
   let dragTrackIds = null    // 正在拖的曲目 id（多选时是整批）
   let dropEl = null          // 当前高亮的放置目标
 
@@ -32,6 +33,7 @@ function bindDragAndDrop() {
   const endDrag = () => {
     dragQi = null
     dragQId = null
+    dragQRef = null
     dragTrackIds = null
     clearDropMark()
     document.querySelectorAll('.qp-item.dragging').forEach((el) => el.classList.remove('dragging'))
@@ -42,8 +44,10 @@ function bindDragAndDrop() {
     const item = e.target.closest('.qp-item')
     if (!item || item.dataset.qi == null) return
     dragQi = Number(item.dataset.qi)
-    // v3.3.9：同时快照曲目 id，drop 时按 id 换算当前索引（自动连播/切歌都会重渲染队列）
-    dragQId = (typeof player !== 'undefined' && player && player.tracks[dragQi]) ? player.tracks[dragQi].id : null
+    // v3.3.13：快照曲目对象引用（重复 id 时用引用才不会串位）；id 仅作兜底
+    const dragTrack = (typeof player !== 'undefined' && player && player.tracks[dragQi]) ? player.tracks[dragQi] : null
+    dragQRef = dragTrack
+    dragQId = dragTrack ? dragTrack.id : null
     dragTrackIds = null
     item.classList.add('dragging')
     e.dataTransfer.effectAllowed = 'move'
@@ -64,11 +68,13 @@ function bindDragAndDrop() {
     if (!item || item.dataset.qi == null) { endDrag(); return }
     e.preventDefault()
     const to = Number(item.dataset.qi)
-    // v3.3.9：起点按 id 换算成当前索引 —— 以前用拖拽开始时的快照索引，
-    // 队列重渲染后会移错行
+    // v3.3.13：起点优先按拖起来的那个对象引用换算当前索引（队列含重复 id 时
+    // findIndex(id) 会定位到错误副本，与 player.moveInQueue 的对象引用口径一致）；
+    // 引用失效（队列整体替换）时才退回 id 兜底
     let from = dragQi
-    if (dragQId && player) {
-      const i = player.tracks.findIndex((t) => t.id === dragQId)
+    if (player) {
+      let i = dragQRef ? player.tracks.indexOf(dragQRef) : -1
+      if (i < 0 && dragQId) i = player.tracks.findIndex((t) => t.id === dragQId)
       if (i >= 0) from = i
     }
     endDrag()

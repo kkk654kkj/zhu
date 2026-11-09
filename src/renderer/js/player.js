@@ -121,6 +121,7 @@ class Player extends Emitter {
     if (from === to) return
     const len = this.tracks.length
     if (from < 0 || to < 0 || from >= len || to >= len) return
+    // v3.3.13：用当前曲对象引用定位 —— 队列含重复 id 时 findIndex 会指向错误副本
     const cur = this.current
     const [item] = this.tracks.splice(from, 1)
     this.tracks.splice(to, 0, item)
@@ -181,6 +182,8 @@ class Player extends Emitter {
     }
     this._loadedTrack = track
     this._endingHandled = false
+    // v3.3.13：跨 load 复位 700ms 抑制窗，短曲目 / 快速切歌的曲末不被误吞
+    this._lastEndedAt = 0
     this._pendingSeek = null
     this.audio.src = track.audio
     this.audio.load()
@@ -218,7 +221,7 @@ class Player extends Emitter {
     this.emit('state-change', false)
   }
 
-  next(auto = false) {
+  next(auto = false, fromError = false) {
     if (!this.tracks.length) return
     if (this.mode === 'single' && auto) {
       this.seek(0)
@@ -232,10 +235,26 @@ class Player extends Emitter {
       if (this.index >= this.tracks.length) {
         if (this.mode === 'list') {
           this.index = 0
-          // 列表循环绕过一圈也算"播完一轮"——「播放结束后关机」要的就是这个时刻
-          if (auto) this.emit('queue-end')
+          // 列表循环绕过一圈也算"播完一轮"——「播放结束后关机」要的就是这个时刻；
+          // 但坏盘连续跳曲（fromError）绕回不算，别误触发关机。next(true) 行为不变。
+          if (auto && !fromError) this.emit('queue-end')
         } else { this.index = this.tracks.length - 1; this.stop(); return }
       }
+    }
+    this._loadCurrent(true)
+  }
+
+  /**
+   * v3.3.13：播放失败自动跳曲（app.js 调用）。
+   * 强制 index+1：忽略单曲循环、不 emit('queue-end')（坏盘不能误触发关机）；
+   * 越界时 list / shuffle 绕回 0，order 停在末尾并停播。
+   */
+  skipToNext() {
+    if (!this.tracks.length) return
+    this.index = this.index + 1
+    if (this.index >= this.tracks.length) {
+      if (this.mode === 'order') { this.index = this.tracks.length - 1; this.stop(); return }
+      this.index = 0
     }
     this._loadCurrent(true)
   }
@@ -270,6 +289,7 @@ class Player extends Emitter {
   }
 
   _onEnded() {
+    // v3.3.13：mpv 曲末双事件；mpvaudio 有 700ms 窗，这里再兜一层
     if (this._endingHandled || Date.now() - (this._lastEndedAt || 0) < 700) return
     this._lastEndedAt = Date.now()
     this._endingHandled = true
@@ -283,6 +303,7 @@ class Player extends Emitter {
       return
     }
     if (this.mode === 'order' && this.index >= this.tracks.length - 1) {
+      // v3.3.13：停在最后一首也要复位守卫，否则手动重播播完会被吞
       this._endingHandled = false
       this.emit('state-change', false)
       // v2.1：整队播完（顺序模式停在最后一首）——主进程据此决定要不要关机/休眠
@@ -363,8 +384,7 @@ class Player extends Emitter {
       // 早先调的是 _clearFade()，它顺手把 _fadeOut 排好的"淡完就暂停"定时器也清了：
       // 淡出 350ms 的 interval 在 360ms 收尾，而暂停定时器排在 380ms，
       // 于是一定先被取消 —— 共享输出下按暂停只会静音，歌其实还在跑。
-      // （独占输出 fadeMs=0 走的是直接暂停的短路，所以这个问题一直没暴露。
-      //   联网版 v3.0.0 就修了，这里补上，两边保持一致。）
+      // （独占输出 fadeMs=0 走的是直接暂停的短路，所以这个问题一直没暴露。）
       if (i >= steps) {
         clearInterval(this._fadeTimer)
         this._fadeTimer = null
@@ -383,6 +403,7 @@ class Player extends Emitter {
   }
 
   _fadeOut(done) {
+    // v3.3.13：早退也要清淡入定时器，否则淡出期间残留的渐变会继续改音量
     if (this.audio.noFade || this.muted || !this.fadeMs) { this._clearFade(); done && done(); return }
     const from = this.audio.volume
     if (from <= 0.01) { this._clearFade(); done && done(); return }

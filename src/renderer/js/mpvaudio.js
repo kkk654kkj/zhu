@@ -30,7 +30,9 @@ class MpvAudio {
     this._wantPlaying = false
     this._lastEmit = 0
     this._endedFired = false
-    this._lastEndedAt = 0      // v3.3.13：曲末双事件（eof-reached + end-file eof）跨 load 抑制
+    this._lastEndedAt = 0      // v3.3.13：同一 load 代次内曲末双事件（eof-reached + end-file eof）的 700ms 抑制窗
+    this._loadEpoch = 0       // v3.3.13：每次 load() 递增，跨 load 区分不同曲末
+    this._endedEpoch = -1     // 上次真正触发 ended 的 load 代次
     this._aoLost = false
     this._exclusiveLost = false
 
@@ -61,6 +63,8 @@ class MpvAudio {
     // 不清 _endedFired 的话第二次播到结尾的 ended 事件会被吞 ——
     // 单曲循环第二遍卡死 / 播完回拖重播不切歌，都是它
     this._endedFired = false
+    // v3.3.13：连 700ms 抑制窗一起复位，单曲循环第二遍（短曲目）才不会被吞
+    this._lastEndedAt = 0
     window.api.mpvSeek(sec)
     this._emit('timeupdate')
   }
@@ -86,8 +90,11 @@ class MpvAudio {
 
   load() {
     if (!this._srcPath) return
+    // v3.3.13：推进 load 代次并复位曲末去重状态，跨 load 的短曲目能正常触发 ended
+    this._loadEpoch++
     this._ended = false
     this._endedFired = false
+    this._lastEndedAt = 0
     this._duration = 0
     this._pos = 0
     this._posStamp = performance.now()
@@ -118,6 +125,7 @@ class MpvAudio {
     if (this._ended && this._srcPath) {
       this._ended = false
       this._endedFired = false
+      this._lastEndedAt = 0
       // v3.3.10：状态与事件同步 —— 以前重载分支不翻 _paused 也不发 play，
       // mpv 回报 unpause 之前 isPlaying 为 false，播放图标短暂回跳
       this._paused = false
@@ -128,6 +136,7 @@ class MpvAudio {
     }
     this._ended = false
     this._endedFired = false
+    this._lastEndedAt = 0
     this._paused = false
     this._posStamp = performance.now()
     window.api.mpvPlay()
@@ -148,6 +157,7 @@ class MpvAudio {
       this._paused = true
       this._wantPlaying = false
       this._endedFired = false
+      this._lastEndedAt = 0
       window.api.mpvStop()
     }
   }
@@ -183,8 +193,16 @@ class MpvAudio {
 
   /** v3.3.13：独占恢复后把状态机与 mpv 对齐（显式发 play，不能只翻标志位） */
   _resumeFromAo() {
+    // 先记下「之前是否被 ao-lost / exclusive-lost 冻结过」，再清标志
+    const wasFrozen = this._aoLost || this._exclusiveLost
     this._aoLost = false
     this._exclusiveLost = false
+    // 用户主动暂停期间不准翻回播放（mpv 继续保持 paused）
+    if (!this._wantPlaying) return
+    // 只有之前被冻结过才需要恢复；普通 format / 迟到的 ao-recovered 不碰状态
+    if (!wasFrozen) return
+    // 显式下发播放命令：只翻标志位 + emit('play') 时 mpv 仍是 paused
+    window.api.mpvPlay()
     if (this._paused) {
       this._paused = false
       this._posStamp = performance.now()
@@ -218,6 +236,7 @@ class MpvAudio {
       case 'loaded': {
         this._ended = false
         this._endedFired = false
+        this._lastEndedAt = 0
         this._pos = 0
         this._posStamp = performance.now()
         this._emit('loadedmetadata')
@@ -237,10 +256,14 @@ class MpvAudio {
       }
       case 'eof':
       case 'file-eof': {
-        // v3.3.13：mpv 曲末会连发 eof-reached 与 end-file(eof)。切歌会清零
-        // _endedFired / player._endingHandled，第二个事件就会再切一首。
-        // 用 1.5 秒时间窗跨 load 抑制，两个守卫都不依赖
-        if (this._endedFired || Date.now() - this._lastEndedAt < 700) break
+        // v3.3.13：mpv 曲末会连发 eof-reached 与 end-file(eof)。
+        // 按「同一 load 代次」去重：本代次已触发过（_endedFired），或 700ms 窗口内
+        // 再次到来的，都视为同一次曲末的第二个事件 → 抑制。
+        // 换歌（load 代次推进 + _lastEndedAt 归零）后 700ms 窗口失效，
+        // 短曲目 / 单曲循环第二遍的正常曲末不再被吞。
+        const sameEpoch = this._endedEpoch === this._loadEpoch
+        if (sameEpoch && (this._endedFired || Date.now() - this._lastEndedAt < 700)) break
+        this._endedEpoch = this._loadEpoch
         this._lastEndedAt = Date.now()
         this._endedFired = true
         this._ended = true

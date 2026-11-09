@@ -67,6 +67,19 @@ class MpvEngine {
     // 否则正在进行的 restart() 会在释放之后又起一个新的独占 mpv，
     // 那个进程没人管，于是变成一个霸着声卡、还在放歌的孤儿。
     this._disposed = false
+    // v3.3.13：_connectWithRetry 的重试定时器句柄，kill() 时要清掉，
+    // 否则 kill 之后重试还会继续去连（可能顶到一个没人管的 socket）。
+    this._retryTimer = null
+    // v3.3.13：load() 代次与「等 file-loaded」的续播等待者集合。
+    // 用集合代替「临时替换 this.onEvent」的 wrapper，避免并发 restart 残留包装函数。
+    this._loadSeq = 0
+    this._loadedWaiters = []
+    // v3.3.14：曲末事件对去重。mpv 播完一首会连发 `eof-reached=true`(property-change)
+    // 与 `end-file(reason=eof)`，两者必须只让渲染层看到一次 ended。
+    // 渲染层已去掉「跨 load 的 700ms 抑制」（否则 <700ms 的短曲目单曲循环第二遍卡死），
+    // 所以配对去重放在主进程：eof-reached 总是上报并记时刻，紧随的 end-file(eof) 吞掉。
+    // 不在 load()/file-loaded 复位，这样切歌后才迟到的旧 end-file 仍能被识别为配对事件。
+    this._eofAt = 0
   }
 
   get running() {
@@ -91,7 +104,11 @@ class MpvEngine {
     const vol01 = Math.max(0, Math.min(1, Number(volume) || 0))
     this._volume01 = vol01
     this._buf = ''
-    this._queue = []
+    // v3.3.13：restart 窗口里用户点的歌（排队中的 loadfile）和 reset() 的停止命令
+    // 不能丢 —— 保留这两类命令行，其余都是旧进程残留命令（pause/seek/volume 等），丢弃；
+    // 连上后 _flush() 会把保留的命令按原顺序重放给新 mpv（stop 排在 loadfile 之后时仍能生效）。
+    this._queue = this._queue.filter((line) => typeof line === 'string' &&
+      (line.indexOf('"loadfile"') >= 0 || line.indexOf('"stop"') >= 0))
     this.ready = false
     this.pipeName = PIPE_PREFIX + process.pid + '-' + Date.now().toString(36)
     // 代次闸门：kill() 会 +1，在途的 start() 发现自己过期就自我作废（见构造函数注释）
@@ -158,13 +175,21 @@ class MpvEngine {
       this.onEvent({ type: 'error', message: 'mpv 进程错误：' + err.message })
     })
 
-    const connected = await this._connectWithRetry(20, 120)
+    const ctx = { gen, proc }
+    const connected = await this._connectWithRetry(20, 120, ctx)
     // v2.8.6 / v3.3.6：连接期间可能已经被 kill()（关独占、切设备、退出）了。
     // 这时不能再往下走 —— 必须把**自己刚起的这个进程**收掉，
     // 否则它会变成没人管的孤儿独占进程，一直霸着声卡。
     if (gen !== this._gen) {
       try { proc.kill() } catch (err) { /* 忽略 */ }
       try { if (proc.exitCode === null) proc.kill('SIGKILL') } catch (err) { /* 忽略 */ }
+      // v3.3.13：仅当全局 sock 仍指向本次连接时才清理，避免迟到作废的 start
+      // 把新引擎刚连上的 socket 覆盖/销毁。
+      const sock = ctx.sock
+      if (sock && this.sock === sock) {
+        try { sock.destroy() } catch (err) { /* 忽略 */ }
+        this.sock = null
+      }
       return { ok: false, error: '引擎启动已被取消' }
     }
     if (!connected) {
@@ -179,6 +204,7 @@ class MpvEngine {
     // 设备真被别的程序占着时会无限重启 + 反复弹「已恢复」
     this._aoLostAt = 0
     this._aoParams = null
+    this._eofAt = 0          // 新进程不继承旧曲的曲末配对标记
     this._paused = true
     this._idle = true
     if (this._wdTimer) clearInterval(this._wdTimer)
@@ -188,27 +214,40 @@ class MpvEngine {
     return { ok: true, exclusive: this.exclusive }
   }
 
-  _connectWithRetry(times, delayMs) {
+  _connectWithRetry(times, delayMs, ctx = {}) {
+    const { gen, proc } = ctx
+    const guarded = gen !== undefined && proc !== undefined
     return new Promise((resolve) => {
       let n = 0
       const tryOnce = () => {
+        this._retryTimer = null
         n++
         const sock = net.connect(this.pipeName)
         let settled = false
         sock.once('connect', () => {
+          ctx.sock = sock
+          // v3.3.13：连接完成时若代次/进程已变（期间被 kill 或切了设备），
+          // 这个 socket 已经过期 —— 不能顶掉新引擎的 sock，也不能挂 data 回调污染新引擎。
+          if (guarded && !(gen === this._gen && this.proc === proc)) {
+            settled = true
+            try { sock.destroy() } catch {}
+            resolve(false)
+            return
+          }
           settled = true
           this.sock = sock
           sock.setEncoding('utf8')
           sock.on('data', (chunk) => this._onData(chunk))
           sock.on('error', () => {})
-          sock.on('close', () => { this.ready = false })
+          // 旧 socket 的 close 不能把新引擎打趴：只有仍是当前 sock 才清 ready
+          sock.on('close', () => { if (this.sock === sock) this.ready = false })
           resolve(true)
         })
         sock.once('error', () => {
           if (settled) return
           try { sock.destroy() } catch {}
           if (n >= times) resolve(false)
-          else setTimeout(tryOnce, delayMs)
+          else this._retryTimer = setTimeout(tryOnce, delayMs)
         })
       }
       tryOnce()
@@ -299,7 +338,11 @@ class MpvEngine {
           this.onEvent({ type: 'pause', paused: data !== false })
           break
         case 'eof-reached':
-          if (data === true) this.onEvent({ type: 'eof' })
+          // 不抑制：单曲循环第二遍（seek 回 0 后 eof-reached 翻 false 再翻 true）必须能再上报。
+          if (data === true) {
+            this._eofAt = Date.now()
+            this.onEvent({ type: 'eof' })
+          }
           break
         case 'audio-out-params':
           // v3.3.13：只缓存最近状态。mpv 的 observe_property 只在值变化时推送，
@@ -323,6 +366,10 @@ class MpvEngine {
     }
     if (msg.event === 'file-loaded') {
       this._idle = false
+      // v3.3.13：唤醒所有等 file-loaded 的续播等待者（集合方式，不包 onEvent）
+      const waiters = this._loadedWaiters
+      this._loadedWaiters = []
+      for (const w of waiters) w.finish(true)
       this.onEvent({ type: 'loaded' })
       return
     }
@@ -332,7 +379,17 @@ class MpvEngine {
       if (reason === 'error') {
         const detail = msg.error || this._lastLog || (this._stderr || '').trim().slice(-300) || 'mpv 无法播放该文件'
         this.onEvent({ type: 'file-error', message: detail })
-      } else if (reason === 'eof') this.onEvent({ type: 'file-eof' })
+      } else if (reason === 'eof') {
+        // 与刚刚上报的 eof-reached 属于同一对（含切歌后才迟到的情况）→ 吞掉，
+        // 只让渲染层收到一次曲末事件，避免一次曲末跳两首。
+        // 700ms 之外的 end-file(eof) 视为独立事件上报（例如极慢的尾包 / 未观察到 eof-reached）。
+        if (this._eofAt && Date.now() - this._eofAt < 700) {
+          this._eofAt = 0
+        } else {
+          this._eofAt = 0
+          this.onEvent({ type: 'file-eof' })
+        }
+      }
       return
     }
     if (msg.event === 'log-message') {
@@ -359,6 +416,8 @@ class MpvEngine {
     this._lastFile = filePath
     this._lastPos = 0
     this._idle = false
+    // v3.3.13：推进 load 代次，让排队中的续播 _waitLoaded 自动作废
+    this._loadSeq++
     if (paused) this._send(['set_property', 'pause', true])
     this._send(['loadfile', filePath, 'replace'])
   }
@@ -421,14 +480,21 @@ class MpvEngine {
       r = await this.start({ exclusive, audioDevice: prevDevice, volume: vol })
       if (r.ok) r.audioDevice = prevDevice
     }
-    if (r.ok && file) {
+    // v3.3.13：restart 窗口里若已有更新的 load（用户点了歌 / reset），就别用旧的
+    // 续播把新歌覆盖掉；此时保留下来的 loadfile 已由 _flush() 重放给新 mpv。
+    if (r.ok && file && this._lastFile === file) {
       this.load(file, { paused: true })
+      const seqAtLoad = this._loadSeq
+      const genAtLoad = this._gen
+      const still = () => this._lastFile === file && !this._disposed && this._gen === genAtLoad
       // v2.8.7 / v3.3.7：等 file-loaded 再 seek/play。以前固定 120ms 后就发 seek，
       // 文件加载慢（在线直链、网络盘）时 mpv 还在 idle，seek 直接失败，续播位置就丢了。
-      this._waitLoaded(2500).then((loaded) => {
+      this._waitLoaded(2500, seqAtLoad).then((loaded) => {
+        // 并发 restart / 释放 / 换歌后的二次校验：过期就放弃续播的 seek/play
+        if (!still()) return
         if (pos > 0.3 && loaded) {
           this.seek(pos)
-          if (wasPlaying) setTimeout(() => this.play(), 80)
+          if (wasPlaying) setTimeout(() => { if (still()) this.play() }, 80)
         } else if (wasPlaying) {
           this.play()
         }
@@ -439,27 +505,29 @@ class MpvEngine {
 
   /**
    * 等 file-loaded 事件（restart 续播用）。超时返回 false，Promise 一定 resolve。
-   * 临时包一层 onEvent 来等事件，原回调照常执行，不影响日志/上报。
+   * v3.3.13：改用 _loadedWaiters 集合 + load 代次，不再临时替换 this.onEvent ——
+   * 并发 restart 不会残留 wrapper，也不会互相覆盖；seq 过期则直接 resolve(false)。
    */
-  _waitLoaded(timeout = 2500) {
+  _waitLoaded(timeout = 2500, seq = this._loadSeq) {
     return new Promise((resolve) => {
       if (!this.ready) return resolve(false)
-      const orig = this.onEvent
       let done = false
-      const timer = setTimeout(() => finish(false), timeout)
-      const finish = (v) => {
+      let timer = null
+      let waiter = null
+      const finish = (loaded) => {
         if (done) return
         done = true
-        clearTimeout(timer)
-        // v3.3.13：并发 restart 时别把后注册的那个 wrapper 覆盖掉
-        if (this.onEvent === wrapped) this.onEvent = orig
-        resolve(v)
+        if (timer) clearTimeout(timer)
+        if (waiter) {
+          const i = this._loadedWaiters.indexOf(waiter)
+          if (i >= 0) this._loadedWaiters.splice(i, 1)
+        }
+        // 只在本 load 代次仍是最新时才算加载成功（并发 restart 不串台）
+        resolve(loaded && seq === this._loadSeq)
       }
-      const wrapped = (evt) => {
-        if (evt && evt.type === 'loaded') finish(true)
-        try { orig(evt) } catch (err) { /* 原回调自己兜 */ }
-      }
-      this.onEvent = wrapped
+      waiter = { finish }
+      this._loadedWaiters.push(waiter)
+      timer = setTimeout(() => finish(false), timeout)
     })
   }
 
@@ -474,6 +542,8 @@ class MpvEngine {
   kill() {
     // v3.3.11：清掉看门狗
     if (this._wdTimer) { clearInterval(this._wdTimer); this._wdTimer = null }
+    // v3.3.13：kill 后不能让 _connectWithRetry 的重试继续连
+    if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null }
     // 代次 +1：让所有「在途的 start()」知道自己过期了（见构造函数注释）。
     // 没有这一步，kill 之后仍可能有 start() 接着 spawn 出没人管的孤儿独占进程。
     this._gen++
@@ -509,6 +579,24 @@ class MpvEngine {
     return this._stopProcess({ timeout })
   }
 
+  /**
+   * v3.3.13：停止当前播放但**不报废引擎**（mpv:stop IPC 用）。
+   * 与 stop() 的区别：绝不 kill 进程、绝不设 _disposed、不动 running、保留看门狗计时器，
+   * 这样紧接着的 load/play 能复用同一个独占 mpv，不必重新抢设备。
+   * 同时作废排队中的续播（推进 load 代次 + 清空等待者），避免停止后又被续播拉起来播。
+   */
+  reset() {
+    this._send(['stop'])
+    this._lastFile = null
+    this._lastPos = 0
+    this._eofAt = 0
+    this._idle = true
+    this._loadSeq++
+    const waiters = this._loadedWaiters
+    this._loadedWaiters = []
+    for (const w of waiters) w.finish(false)
+  }
+
   /** 内部：停掉进程并等它真的退出（不改变「已释放」状态，restart 用） */
   async _stopProcess({ timeout = 3000 } = {}) {
     const p = this.proc
@@ -539,6 +627,7 @@ class MpvEngine {
 
   _teardown() {
     this.ready = false
+    if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null }
     if (this._wdTimer) { clearInterval(this._wdTimer); this._wdTimer = null }
     this._rejectPending('mpv 进程退出')
     this.sock = null
@@ -591,9 +680,13 @@ class MpvEngine {
 
   /** 重启后等最多 6 秒，确认音频输出真的回来了 */
   async _verifyRecover() {
+    // v3.3.13：关独占 / 引擎释放后设备已经不是我们在用，不要再上报「已恢复」或「已丢失」
+    if (!this.exclusive || this._disposed) return
     const deadline = Date.now() + 6000
-    while (Date.now() < deadline && !this._disposed) {
+    while (Date.now() < deadline && !this._disposed && this.exclusive) {
+      // 成功判据保持「实测 _aoParams 非 null」，不退回 start().ok
       if (this._aoParams) {
+        if (!this.exclusive || this._disposed) return
         this._recoverAttempts = 0
         this.onEvent({ type: 'ao-recovered' })
         return
@@ -601,6 +694,7 @@ class MpvEngine {
       await new Promise((r) => setTimeout(r, 300))
     }
     // 连续 3 次夺回失败：设备被别的程序长期占用，停手并告知用户
+    if (!this.exclusive || this._disposed) return
     if (this._recoverAttempts >= 3 && !this._aoParams) {
       this.onEvent({ type: 'exclusive-lost',
         message: '自动夺回独占失败：声卡被其他程序占用（比如游戏也开了独占）。请关闭占用程序或手动切共享' })

@@ -1,6 +1,9 @@
 'use strict'
 /* LRC 歌词解析 */
 
+/** 单行最大字符数：病态超长行会让「时间戳循环 + 反复 slice」退化成 O(n²)，先截断 */
+const MAX_LRC_LINE = 2000
+
 /**
  * 解析 lrc 文本 → { lines: [{t, text}], meta: {ti, ar, al, by, offset}, plain: bool }
  * 支持：一行多时间戳 [00:12.34][01:20.00]词、[offset:+200]、[ti:]/[ar:]/[al:]
@@ -18,6 +21,8 @@ function parseLrc(text) {
     // v3.3.10：let —— 元信息行去掉头部标签后，剩余部分还要继续按时间戳行处理
     let line = row.trim()
     if (!line) continue
+    // v3.3.13：病态超长行先截断，避免后续正则循环 + 反复 slice 退化成 O(n²)
+    if (line.length > MAX_LRC_LINE) line = line.slice(0, MAX_LRC_LINE)
 
     // 元信息标签 [ti:xxx]
     // v3.3.9：去掉结尾锚 —— `[ti:标题] 备注` 这种行以前被当纯文本丢掉

@@ -1,6 +1,10 @@
 const path = require('path')
 const { execFileSync } = require('child_process')
 
+// PowerShell 单引号字符串：内部所有字符（含 $ / 反引号 / 双引号）都按字面处理，
+// 只需把单引号翻倍。避免 USERPROFILE 含 $ 或反引号时被 PowerShell 当变量展开。
+const psq = (s) => "'" + String(s).replace(/'/g, "''") + "'"
+
 const ws = process.argv[2]
 // 成品最终位置在 D:\猪专属播放器（不能放回 default-workspace，那里是低完整性目录，会弹安全警告）
 const dist = 'D:\\猪专属播放器'
@@ -11,11 +15,11 @@ const lnk = path.join(desktop, '猪专属播放器.lnk')
 
 const ps = `
 $W = New-Object -ComObject WScript.Shell
-$S = $W.CreateShortcut(${JSON.stringify(lnk)})
+$S = $W.CreateShortcut(${psq(lnk)})
 $S.TargetPath = 'C:\\Windows\\System32\\wscript.exe'
-$S.Arguments = '"' + ${JSON.stringify(vbs)} + '"'
-$S.WorkingDirectory = ${JSON.stringify(dist)}
-$S.IconLocation = ${JSON.stringify(exe + ',0')}
+$S.Arguments = '"' + ${psq(vbs)} + '"'
+$S.WorkingDirectory = ${psq(dist)}
+$S.IconLocation = ${psq(exe + ',0')}
 $S.Description = '猪专属播放器（本地音乐播放器）'
 $S.WindowStyle = 1
 $S.Save()
@@ -36,7 +40,7 @@ try {
 const fs = require('fs')
 const old = path.join(desktop, '音乐播放器.lnk')
 if (fs.existsSync(old)) {
-  fs.unlinkSync(old)
-  console.log('removed old shortcut:', old)
+  // 快捷方式已建成功，删旧文件失败不应让整个任务报失败
+  try { fs.unlinkSync(old); console.log('removed old shortcut:', old) } catch (e) { /* 忽略 */ }
 }
 console.log('shortcut:', lnk)

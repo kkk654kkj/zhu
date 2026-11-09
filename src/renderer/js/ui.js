@@ -375,6 +375,11 @@ const UI = {
     if (this.eqDisabled) {
       this.els.btnEq.title = '独占输出下不可用（会破坏位完美）'
       this.els.btnNorm.title = '独占输出下不可用（会破坏位完美）'
+    } else {
+      // 独占失败回退共享后要恢复可用提示，别残留「独占下不可用」
+      this.els.btnEq.title = this.els.btnEq.classList.contains('on') ? '均衡器：开' : '均衡器'
+      this.els.btnNorm.title = this.els.btnNorm.classList.contains('on')
+        ? '音量均衡：开（右键分析曲库响度）' : '音量均衡：关'
     }
   },
 
@@ -488,8 +493,34 @@ const UI = {
     const box = this.els.queueBody
     if (!tracks.length) {
       box.innerHTML = '<div class="qp-item" style="cursor:default;color:var(--txt-3)">队列为空</div>'
+      this._queueSig = ''
+      this._queueStructSig = null
       return
     }
+    // 一次 setQueue 会连发 queue-change + track-change，以前整段 innerHTML 被重建
+    // 两次、队列面板滚动位置丢失。用「结构签名」判断列表是否真变了：
+    //  - 结构相同（只是 index / currentId 变化）→ 只 toggle active 与 ♪，不重建 DOM
+    //  - 结构不同（增删/重排/换队列）→ 才重建 innerHTML
+    const structSig = tracks.length + ':' + tracks.map((t) => t.id).join(',')
+    const fullSig = structSig + '|' + index + '|' + (playingId || '')
+    if (fullSig === this._queueSig) return
+    if (structSig === this._queueStructSig) {
+      const items = box.children
+      for (let i = 0; i < items.length; i++) {
+        const el = items[i]
+        const active = i === index
+        el.classList.toggle('active', active)
+        const tspan = el.querySelector('.qi-t')
+        if (tspan) {
+          const want = (active && playingId ? '♪ ' : '') + (tracks[i] ? tracks[i].title : '')
+          if (tspan.textContent !== want) tspan.textContent = want
+        }
+      }
+      this._queueSig = fullSig
+      return
+    }
+    this._queueStructSig = structSig
+    this._queueSig = fullSig
     box.innerHTML = tracks.map((t, i) => `
       <div class="qp-item${i === index ? ' active' : ''}" data-qi="${i}" title="${esc(t.title)}" draggable="true">
         <span class="qi-t">${i === index && playingId ? '♪ ' : ''}${esc(t.title)}</span>
@@ -578,6 +609,10 @@ const UI = {
 
     // v2.6：含子菜单的父项点击不关菜单、不触发动作，改为展开/收起子菜单；
     // 只有叶子项（data-act）才执行并关闭。
+    // 每次弹/关菜单都递增 token：setTimeout(...,0) 里注册监听时比对 token，
+    // 避免 hideContextMenu 落在 0ms 窗口内、remove 对未添加的监听无效、
+    // 随后又把 capture 监听挂回来的竞态残留
+    const token = (this._ctxToken = (this._ctxToken || 0) + 1)
     const handler = (e) => {
       const subParent = e.target.closest('.ctx-sub')
       if (subParent && subParent.contains(e.target) && !e.target.closest('.ctx-submenu')) {
@@ -597,10 +632,12 @@ const UI = {
       document.removeEventListener('click', handler, true)
       document.removeEventListener('contextmenu', cleanup, true)
       window.removeEventListener('blur', cleanup)
+      this.els.ctxMenu.hidden = true   // 非菜单区右键时也要把菜单真正藏掉
       this._ctxCleanup = null
     }
     this._ctxCleanup = cleanup
     setTimeout(() => {
+      if (token !== this._ctxToken) return   // 菜单已被隐藏，别再把监听挂回来
       document.addEventListener('click', handler, true)
       document.addEventListener('contextmenu', cleanup, true)
       window.addEventListener('blur', cleanup)
@@ -608,6 +645,7 @@ const UI = {
   },
 
   hideContextMenu() {
+    this._ctxToken = (this._ctxToken || 0) + 1
     this.els.ctxMenu.hidden = true
     // v3.3.7：外部点击关菜单的路径也要清掉 document 级监听 ——
     // 否则残留的 handler 会让下一次菜单的动作触发两次（重复添加歌单/双 toast）

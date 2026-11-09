@@ -19,14 +19,27 @@ async function importM3uPlaylist() {
       : '这个歌单是空的', 3500)
     return
   }
-  const pl = await window.api.createPlaylist(res.name || '导入的歌单')
-  const full = await window.api.addToPlaylist(pl.id, res.trackIds).catch(() => null)
-  const saved = full || pl
-  state.playlists.push(saved)
-  renderPlaylists()
-  switchView(saved.id)
-  toast('已导入「' + saved.name + '」' + res.trackIds.length + ' 首' +
-    (res.unmatched ? '（' + res.unmatched + ' 条未匹配）' : ''), 3500)
+  let pl = null
+  try {
+    pl = await window.api.createPlaylist(res.name || '导入的歌单')
+    const full = await window.api.addToPlaylist(pl.id, res.trackIds).catch(() => null)
+    if (!full) {
+      // 加歌失败：回滚刚建的空歌单，绝不能把它当成完整歌单 push 进界面 / 报成功数
+      await window.api.removePlaylist(pl.id).catch(() => {})
+      toast('导入失败：写入歌单曲目未成功', 3000)
+      return
+    }
+    state.playlists.push(full)
+    renderPlaylists()
+    switchView(full.id)
+    toast('已导入「' + full.name + '」' + res.trackIds.length + ' 首' +
+      (res.unmatched ? '（' + res.unmatched + ' 条未匹配）' : ''), 3500)
+  } catch (err) {
+    // createPlaylist / addToPlaylist / removePlaylist 任一 reject 都给明确提示，
+    // 并尽力回滚可能已建的空歌单，避免留下半截数据和未捕获的 rejection
+    if (pl && pl.id) await window.api.removePlaylist(pl.id).catch(() => {})
+    toast('导入失败：' + (err && err.message ? err.message : '未知错误'), 3000)
+  }
 }
 
 /** 导出：真实路径由主进程按 id 反查 */

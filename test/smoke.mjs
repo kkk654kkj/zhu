@@ -81,14 +81,14 @@ const CASES = [
     (v) => v === true],
 
   ['拼音检索字段已就位（py/pyf 均为字符串）',
-    `state.tracks.every((t) => typeof t.py === 'string' && typeof t.pyf === 'string')`,
+    `state.tracks.length > 0 && state.tracks.every((t) => typeof t.py === 'string' && typeof t.pyf === 'string')`,
     (v) => v === true],
 
   ['拼音首字母能过滤（zj 至少过滤掉一些歌）',
     `(() => { const all = state.tracks.length
        const hit = state.tracks.filter((t) => (t.pyf || '').replace(/\\s+/g, '').includes('zj')).length
        return { all, hit } })()`,
-    (v) => v && v.all > 0 && v.hit < v.all],
+    (v) => v && v.all > 0 && v.hit > 0 && v.hit < v.all],
 
   ['队列排序 API 存在',
     `typeof player.moveInQueue === 'function'`,
@@ -97,14 +97,15 @@ const CASES = [
   ['队列排序不破坏索引（拖到末尾）',
     `(() => { const n = player.tracks.length
        if (n < 2) return { skip: true }
-       const curId = player.current ? player.current.id : null
+       // 未播放时 player.current 为 null，用 index 指向的曲目对象引用，
+       // 避免 curId===afterId 退化成 null===null 恒真
+       const curRef = player.tracks[player.index >= 0 ? player.index : 0]
        const before = player.index
        player.moveInQueue(0, n - 1)
-       const afterId = player.current ? player.current.id : null
-       const ok = curId === afterId
+       const ok = player.tracks.indexOf(curRef) >= 0
        player.moveInQueue(n - 1, 0)
        return { ok, before, after: player.index } })()`,
-    (v) => v && (v.skip === true || v.ok === true)],
+    (v) => v && (v.skip === true || (v.ok === true && v.before === v.after))],
 
   ['淡出定时器可被取消（连点播放不自停）',
     // 注意：音量被置 0 时 _fadeOut 会直接早退（from <= 0.01），所以先临时抬到 0.5

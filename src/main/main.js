@@ -177,14 +177,24 @@ function mimeFor(p) {
 
 /** v2.8.12：媒体路径白名单（模块作用域，协议层与 IPC 共用） */
 function isAllowedMediaPath(p) {
-  const abs = path.resolve(String(p || '')).toLowerCase()
+  // abs 与每个 root 都取 realpath：曲库里的 junction/符号链接指向系统目录时，
+  // real 之后的绝对路径前缀对不上白名单，从而被拒绝
+  const abs = realpathCached(path.resolve(fixDriveRoot(p)))
+  if (!abs) return false   // realpath 失败（路径不存在/非法）→ 拒绝
+  const real = abs.toLowerCase()
   const roots = [
     ...(store.get().settings.musicDirs || []),
-    DATA_DIR
+    downloadDir(),
+    DATA_DIR,
   ]
     .filter((r) => r && String(r).trim())
-    .map((r) => path.resolve(r).toLowerCase().replace(/[\\/]+$/, '') + path.sep)
-  return roots.some((r) => abs.startsWith(r) || (abs + path.sep).startsWith(r))
+    .map((r) => realpathCached(path.resolve(fixDriveRoot(r))))
+    .filter(Boolean)
+    .map((r) => {
+      const rl = r.toLowerCase()
+      return (rl.endsWith(path.sep) ? rl.slice(0, -path.sep.length) : rl) + path.sep
+    })
+  return roots.some((r) => real.startsWith(r) || (real + path.sep).startsWith(r))
 }
 
 /* ---------------- 自定义协议：支持 Range 的本地文件读取 ---------------- */
@@ -203,6 +213,7 @@ function registerFileProtocol() {
       if (/^\/[A-Za-z]:\//.test(filePath)) filePath = filePath.slice(1)
       if (process.platform !== 'win32' && !filePath.startsWith('/')) filePath = '/' + filePath
       filePath = path.normalize(filePath)
+      // v3.3.13：协议层也要收口（以前只有 mpv:load / shell:showItem 有）
       if (!isAllowedMediaPath(filePath)) return new Response('forbidden', { status: 403 })
 
       const stat = await fsp.stat(filePath)
@@ -213,7 +224,25 @@ function registerFileProtocol() {
       const total = stat.size
 
       if (range) {
-        const m = /bytes=(\d*)-(\d*)/.exec(range)
+        // v3.3.13：Range 语法全文锚定，非法/多段都不按部分内容处理
+        const raw = String(range).trim()
+        if (!/^bytes=\d*-\d*(,\d*-\d*)*$/.test(raw)) {
+          return new Response('bad range', { status: 416, headers: { 'Content-Range': `bytes */${total}` } })
+        }
+        if (raw.includes(',')) {
+          // 多段 Range 不支持：按 200 全量返回（不能假装满足任一单段）
+          const stream = fs.createReadStream(filePath)
+          return new Response(Readable.toWeb(stream), {
+            status: 200,
+            headers: {
+              'Content-Type': type,
+              'Content-Length': String(total),
+              'Accept-Ranges': 'bytes',
+              'Cache-Control': 'no-store'
+            }
+          })
+        }
+        const m = /^bytes=(\d*)-(\d*)$/.exec(raw)
         let start = 0
         let end = total - 1
         if (m) {
@@ -221,14 +250,17 @@ function registerFileProtocol() {
             start = parseInt(m[1], 10)
             end = m[2] ? parseInt(m[2], 10) : total - 1
           } else if (m[2]) {
-            // v2.8.8：后缀区间 bytes=-N = 最后 N 字节（以前解析成开头 N 字节）
+            // v3.3.9：后缀区间 bytes=-N = 最后 N 字节（以前解析成开头 N 字节，
+            // 拖尾元数据/某些下载器会拿到错数据）
             start = Math.max(0, total - parseInt(m[2], 10))
             end = total - 1
           }
         }
         if (Number.isNaN(start)) start = 0
         if (Number.isNaN(end) || end >= total) end = total - 1
-        if (start > end) return new Response('bad range', { status: 416 })
+        if (start > end || start >= total) {
+          return new Response('bad range', { status: 416, headers: { 'Content-Range': `bytes */${total}` } })
+        }
         const stream = fs.createReadStream(filePath, { start, end })
         return new Response(Readable.toWeb(stream), {
           status: 206,
@@ -253,7 +285,8 @@ function registerFileProtocol() {
         }
       })
     } catch (err) {
-      return new Response('not found', { status: 404 })
+      logLine('[lxfile] 读取失败', err.message)
+      return new Response('not found', { status: 404 })   // 不回显绝对路径/系统错误
     }
   })
 }
@@ -396,9 +429,10 @@ async function applyMini(on) {
     // 记下"进迷你前是不是最大化"，回来时要还原成同样的形态
     const wasMax = win.isMaximized()
     if (wasMax) {
+      // Windows 上 unmaximize 是异步的，必须先挂监听再触发，否则会漏掉事件（只剩超时兜底）
+      const wait = waitWindowEvent(win, 'unmaximize')
       win.unmaximize()
-      // Windows 上 unmaximize 是异步的，不等它落地就 setBounds 会被忽略（实测尺寸纹丝不动）
-      await waitWindowEvent(win, 'unmaximize')
+      await wait
     }
     const prev = win.getNormalBounds ? win.getNormalBounds() : win.getBounds()
     // 只有"像完整窗口"的尺寸才写进 fullBounds：万一 prev 本身是卡片尺寸
@@ -613,7 +647,7 @@ function runPowerAction() {
   logLine('[power] 队列结束，执行 ' + kind + '（15 秒内可在托盘取消）')
 
   // 给用户 15 秒反悔时间：误触关机比少关一次机难受得多
-  // v2.8.7：先清掉可能还挂着的旧定时器 —— 反悔窗口内重新设置、队列又播完一次时，
+  // v3.3.7：先清掉可能还挂着的旧定时器 —— 反悔窗口内重新设置、队列又播完一次时，
   // 直接覆盖会让第一个定时器到点照常执行（届时「取消」只能取消第二个）
   if (powerPending) { clearTimeout(powerPending); powerPending = null }
   powerPending = setTimeout(() => {
@@ -621,23 +655,38 @@ function runPowerAction() {
     refreshTrayMenu()
     if (kind === 'quit') { quitting = true; app.quit(); return }
     try {
-      if (kind === 'shutdown') execFile('shutdown', ['/s', '/t', '30'])
-      else if (kind === 'hibernate') execFile('shutdown', ['/h'])
+      if (kind === 'shutdown') {
+        execFile('shutdown', ['/s', '/t', '30'], onShutdownDone)
+        // v3.3.13：shutdown /s /t 30 之后系统还有 30 秒可取消窗口，
+        // 不能随 15 秒反悔窗口一起消失 —— 单独记标志并排一个 30 秒清理定时器
+        systemShutdownPending = true
+        if (systemShutdownTimer) clearTimeout(systemShutdownTimer)
+        systemShutdownTimer = setTimeout(() => {
+          systemShutdownTimer = null
+          systemShutdownPending = false
+          refreshTrayMenu()
+        }, 30000)
+        if (systemShutdownTimer.unref) systemShutdownTimer.unref()
+      } else if (kind === 'hibernate') {
+        execFile('shutdown', ['/h'], onShutdownDone)
+      }
     } catch (err) {
       logLine('[power] 执行失败 ' + err.message)
     }
   }, 15000)
-  refreshTrayMenu()   // v2.8.12：赋值之后重建，「取消关机」菜单项才真的出现
+  refreshTrayMenu()   // v3.3.13：赋值之后重建，「取消关机」菜单项才真的出现
 }
 
 let powerPending = null
 function cancelPowerAction() {
-  if (!powerPending) return false
-  clearTimeout(powerPending)
-  powerPending = null
-  try { execFile('shutdown', ['/a']) } catch {}
+  // v3.3.13：15 秒反悔窗口结束后系统关机还有 30 秒可取消，两种状态都要能取消
+  if (!powerPending && !systemShutdownPending) return false
+  if (powerPending) { clearTimeout(powerPending); powerPending = null }
+  if (systemShutdownTimer) { clearTimeout(systemShutdownTimer); systemShutdownTimer = null }
+  systemShutdownPending = false
+  try { execFile('shutdown', ['/a'], onShutdownDone) } catch (err) { logLine('[power] 取消执行失败 ' + err.message) }
   logLine('[power] 已取消')
-  refreshTrayMenu()   // v2.8.8：不然「⚠ 取消关机」菜单项一直残留
+  refreshTrayMenu()   // v3.3.9：不然「⚠ 取消关机」菜单项一直残留
   sendToRenderer('power-action', { kind: null })
   return true
 }
@@ -814,8 +863,9 @@ async function runWatchScan() {
   const s = store.get().settings
   if (s.watchFolders === false) return
   logLine('[watch] 检测到文件变化，开始增量扫描')
-  // v2.8.9：run 必须声明在 try 外 —— const run 在 try 块内时 finally 引用
-  // 必然 ReferenceError → activeScan 永远清不掉，后续 watch 扫描全部失效
+  // v3.3.10：run 必须声明在 try 外 —— 上一版 const run 在 try 块内，
+  // finally 里引用必然 ReferenceError → activeScan 永远清不掉，
+  // 后续 watch 扫描全部失效（每 8 秒空转重试）+ 每次一个 unhandledRejection
   let run = null
   try {
     run = library.scan(s.musicDirs, (p) => {
@@ -826,6 +876,7 @@ async function runWatchScan() {
     })
     activeScan = run
     const res = await run
+    if (res && res.skipped) return   // 别把 skipped 当成「扫描完成」广播出去
     logLine('[watch] 完成 ' + JSON.stringify({
       added: res.added, updated: res.updated, removed: res.removed, total: res.total, failed: res.failed
     }))
@@ -833,7 +884,7 @@ async function runWatchScan() {
   } catch (err) {
     logLine('[watch] 扫描失败 ' + err.message)
   } finally {
-    // v2.8.7：必须条件清空 —— watch 扫描运行中用户手动扫了库，activeScan 已被
+    // v3.3.7：必须条件清空 —— watch 扫描运行中用户手动扫了库，activeScan 已被
     // 换成手动任务的 promise，这里无条件置 null 会让 lib:list 不再等手动扫描。
     // 注意不能再 scheduleWatchScan()：它是文件事件驱动的，这里无条件排一次
     // 会变成「每 16 秒空扫一遍全库」的死循环；扫描期间来的文件事件本来就有挂起的定时器兜底
@@ -1014,17 +1065,28 @@ function createLyricWindow() {
   dlyricWin.webContents.on('did-finish-load', () => replayDlyricState())
 
   // 位置/尺寸持久化（去抖）
+  let lastLyricBounds = null
   const saveBounds = debounce(() => {
     if (!dlyricWin || dlyricWin.isDestroyed()) return
-    const nb = dlyricWin.getNormalBounds ? dlyricWin.getNormalBounds() : dlyricWin.getBounds()
-    store.patch({ settings: { desktopLyric: { bounds: nb } } })
+    lastLyricBounds = dlyricWin.getNormalBounds ? dlyricWin.getNormalBounds() : dlyricWin.getBounds()
+    store.patch({ settings: { desktopLyric: { bounds: lastLyricBounds } } })
   }, 400)
   dlyricWin.on('resize', saveBounds)
   dlyricWin.on('move', saveBounds)
+  // 关闭前窗口还在，记下最后一次位置（去抖那次可能来不及触发）
+  dlyricWin.on('close', () => {
+    if (dlyricWin && !dlyricWin.isDestroyed()) {
+      try { lastLyricBounds = dlyricWin.getNormalBounds ? dlyricWin.getNormalBounds() : dlyricWin.getBounds() } catch (e) { /* 忽略 */ }
+    }
+  })
 
   // 歌词窗口自行关闭（控制条 ✕ 或系统方式）→ 通知主窗口同步按钮状态。
   // 注意退出App时也会触发 closed，用 quitting 区分，避免把 enabled 改没。
   dlyricWin.on('closed', () => {
+    // v3.3.13：去抖的那次落盘可能被进程退出吞掉，这里用最后一次位置同步兜一次
+    if (lastLyricBounds) {
+      try { store.patch({ settings: { desktopLyric: { bounds: lastLyricBounds } } }) } catch (e) { /* 忽略 */ }
+    }
     dlyricWin = null
     if (!quitting) {
       store.patch({ settings: { desktopLyric: { enabled: false } } })
@@ -1087,7 +1149,7 @@ function onMpvEvent(evt) {
     mpvEngine.restart({ exclusive: false }).then((r) => {
       pushMpvLog(r.ok ? 'warn' : 'error', r.ok ? '已重启引擎为共享输出' : '回退共享也失败：' + (r.error || ''))
       sendToRenderer('mpv:event', r.ok
-        ? { type: 'fallback', message: (evt.message || '') }
+        ? { type: 'fallback', message: (evt.message || ''), exclusive: false }
         : { type: 'error', message: r.error || '独占失败且回退共享也失败' })
     })
     return
@@ -1197,7 +1259,7 @@ async function releaseMpv({ probe = true } = {}) {
 }
 
 /** 列出（并杀掉）属于本进程的残留 mpv —— 竞态产生的孤儿会一直霸着声卡 */
-async function sweepOurMpv() {
+async function sweepOurMpv(listTimeout = 8000, killTimeout = 5000) {
   if (process.platform !== 'win32') return []
   const selfPid = process.pid
   const script = [
@@ -1208,17 +1270,17 @@ async function sweepOurMpv() {
     '  $_.ProcessId',
     '}'
   ].join('\n')
-  // v2.8.8：改异步 —— 同步版（execFileSync 8 秒 + 逐个 taskkill 各 5 秒）会把主进程
-  // 事件循环卡到 13 秒，期间所有 IPC 全部停摆
+  // v3.3.9：改异步 —— 同步版（execFileSync 8 秒 + 逐个 taskkill 各 5 秒）会把主进程
+  // 事件循环卡到 13 秒，期间流代理和所有 IPC 全部停摆
   const listPids = () => new Promise((resolve) => {
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
-      { windowsHide: true, timeout: 8000 }, (err, stdout) => {
+      { windowsHide: true, timeout: listTimeout }, (err, stdout) => {
         if (err || !stdout) return resolve([])
         resolve(String(stdout).split(/\r?\n/).map((x) => x.trim()).filter((x) => /^\d+$/.test(x)))
       })
   })
   const killPid = (pid) => new Promise((resolve) => {
-    execFile('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 }, () => resolve())
+    execFile('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: killTimeout }, () => resolve())
   })
   const pids = await listPids()
   for (const pid of pids) await killPid(pid)
@@ -1345,6 +1407,47 @@ function stopDeviceWatch() {
 
 /* ---------------- IPC ---------------- */
 
+function sanitizeSettingsPatch(patch, template = DEFAULT_SETTINGS) {
+  const out = {}
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return out
+  if (!template || typeof template !== 'object') return out
+  for (const [k, v] of Object.entries(patch)) {
+    if (FORBIDDEN_SETTING_KEYS.has(k)) continue
+    if (!Object.prototype.hasOwnProperty.call(template, k)) continue  // 白名单
+    const tv = template[k]
+    if (Array.isArray(tv)) {
+      if (!Array.isArray(v)) continue
+      if (tv.length && !v.every((x) => typeof x === typeof tv[0])) continue
+      out[k] = v.map(sanitizePlainValue)
+    } else if (tv && typeof tv === 'object') {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) continue
+      const tvKeys = Object.keys(tv)
+      if (tvKeys.length === 0) {
+        // 空对象模板 = 数值 map（lyricOffsetById / trackGains / manualGains / resumePos）
+        const clean = {}
+        for (const [mk, mv] of Object.entries(v)) {
+          if (FORBIDDEN_SETTING_KEYS.has(mk)) continue
+          if (typeof mv === 'number' && Number.isFinite(mv)) clean[mk] = mv
+        }
+        out[k] = clean
+      } else {
+        out[k] = sanitizeSettingsPatch(v, tv)
+      }
+    } else if (tv === null) {
+      // 模板为 null = 自由结构（窗口 bounds 等），只做递归去污染键
+      out[k] = sanitizePlainValue(v)
+    } else if (typeof tv === 'number') {
+      if (typeof v === 'number' && Number.isFinite(v)) out[k] = v
+    } else if (typeof tv === 'boolean') {
+      if (typeof v === 'boolean') out[k] = v
+    } else if (typeof tv === 'string') {
+      if (typeof v === 'string') out[k] = v
+    }
+    // 其余类型（undefined/function/...）→ 拒绝该键
+  }
+  return out
+}
+
 function registerIpc() {
   // —— 音乐库 ——
   // 扫库期间 lib:list 必须等待扫描结束，否则渲染进程会读到半成品列表
@@ -1356,6 +1459,13 @@ function registerIpc() {
   })
 
   ipcMain.handle('lib:scan', async (event, dirs) => {
+    // v3.3.13：已有扫描在跑时 library.scan() 会立刻返回 { skipped: true }。
+    // 绝不能把这个 skipped 的 run 赋给 activeScan（会覆盖真扫描引用，
+    // lib:list 的 await activeScan 便不再等待 → 渲染层读到半成品曲库），
+    // 也不能广播「扫描完成」让界面提前收起进度。
+    if (library.scanning || activeScan) {
+      return { skipped: true, added: 0, updated: 0, removed: 0, failed: 0, total: library.list().length }
+    }
     const targetDirs = Array.isArray(dirs) && dirs.length ? dirs : store.get().settings.musicDirs
     const sender = event.sender
     const run = library.scan(targetDirs, (p) => {
@@ -1371,6 +1481,7 @@ function registerIpc() {
     activeScan = run
     try {
       const res = await run
+      if (res && res.skipped) return res   // 竞态兜底：不要广播 skipped
       if (!sender.isDestroyed()) sender.send('lib:scan-done', res)
       return res
     } finally {
@@ -1656,7 +1767,9 @@ function registerIpc() {
   })
   // 歌词窗口 → 主进程：配置修改（锁定/字号/颜色）→ 同步主窗口按钮
   ipcMain.handle('dlyric:cfg', (e, patch) => {
-    store.patch({ settings: { desktopLyric: patch } })
+    // v3.3.13：复用 settings patch 过滤（只允许 desktopLyric 已有键 + 值校验 + 防原型污染）
+    const clean = sanitizeSettingsPatch(patch, DEFAULT_SETTINGS.desktopLyric)
+    store.patch({ settings: { desktopLyric: clean } })
     applyDlyricLock()
     notifyDlyricState()
     return dlyricCfg()
@@ -1682,7 +1795,7 @@ function registerIpc() {
   })
   ipcMain.handle('mpv:play', () => { if (mpvEngine) mpvEngine.play(); return true })
   ipcMain.handle('mpv:pause', () => { if (mpvEngine) mpvEngine.pause(); return true })
-  ipcMain.handle('mpv:stop', () => { if (mpvEngine) mpvEngine.stop(); return true })
+  ipcMain.handle('mpv:stop', () => { if (mpvEngine) mpvEngine.reset(); return true })
   ipcMain.handle('mpv:seek', (e, sec) => { if (mpvEngine) mpvEngine.seek(Number(sec) || 0); return true })
   ipcMain.handle('mpv:volume', (e, v) => { if (mpvEngine) mpvEngine.setVolume(Number(v) || 0); return true })
   ipcMain.handle('mpv:mute', (e, m) => { if (mpvEngine) mpvEngine.setMute(!!m); return true })
@@ -1753,27 +1866,34 @@ function registerIpc() {
       return { ok: false, devices: [], error: err.message }
     } finally {
       // 只为枚举而临时拉起的引擎用完即关，不留空闲进程。
-      // v2.8.8：但枚举的几百毫秒里用户可能点了播放（引擎被复用加载了文件），
+      // v3.3.9：但枚举的几百毫秒里用户可能点了播放（引擎被复用加载了文件），
       // 这时不能杀 —— 用「引擎还是同一个且从未加载过文件」作判据。
-      if (startedHere && mpvEngine === eng && !eng._lastFile) stopMpv()
+      // v3.3.13：枚举期间被切成独占的引擎（restart 不换实例也不改 _lastFile）不能误杀
+      if (startedHere && mpvEngine === eng && !eng._lastFile && eng.exclusive === false) stopMpv()
     }
   })
 
   /** 切换输出设备：存设置；正在独占播放时重启引擎并回到原位置 */
   ipcMain.handle('mpv:setDevice', async (e, device) => {
     const name = String(device || '')
+    const prevDevice = String(store.get().settings.audioDevice || '')
     store.patch({ settings: { audioDevice: name } })
     if (!mpvEngine || !mpvEngine.running) return { ok: true, applied: false }
     if (!store.get().settings.exclusiveOutput) return { ok: true, applied: false }
     // v2.5：重启时带上当前音量（重启后不再被重置成 100；播放状态由 restart 内部恢复）
     const startVolume = Math.max(0, Math.min(1, Number(store.get().settings.volume ?? 1)))
     const r = await mpvEngine.restart({ exclusive: true, audioDevice: name, volume: startVolume })
+    // v3.3.13：重启彻底失败 → 设置回退到调用前的值，避免界面显示的设备与实际不符
+    if (!r.ok) {
+      store.patch({ settings: { ...store.get().settings, audioDevice: prevDevice } })
+      return { ok: false, applied: true, error: r.error }
+    }
     // 新设备起不来时 mpv.js 会退回原设备；这时设置也得跟着回退，否则界面显示的和实际用的不一致
-    if (r.ok && r.audioDevice && r.audioDevice !== name) {
+    if (r.audioDevice && r.audioDevice !== name) {
       store.patch({ settings: { ...store.get().settings, audioDevice: r.audioDevice } })
       return { ok: true, applied: true, reverted: true, device: r.audioDevice, error: '该设备不可用，已退回原设备' }
     }
-    return { ok: !!r.ok, applied: true, error: r.error }
+    return { ok: true, applied: true, error: r.error }
   })
 
   /* ---------------- 诊断面板（v1.8） ---------------- */
@@ -1878,7 +1998,10 @@ function registerIpc() {
   /* ---------------- 播放结束后动作 / A-B（v2.1） ---------------- */
 
   // 渲染层上报"整队播完"（列表回卷 / 顺序模式最后一首结束）
-  ipcMain.on('player:queue-end', () => runPowerAction())
+  ipcMain.on('player:queue-end', (e) => {
+    if (!win || win.isDestroyed() || e.sender !== win.webContents) return
+    runPowerAction()
+  })
   ipcMain.handle('power:get', () => powerAfterQueue)
   ipcMain.handle('power:set', (e, kind) => { setPowerAfterQueue(kind); return powerAfterQueue })
   ipcMain.handle('power:cancel', () => cancelPowerAction())
@@ -1968,21 +2091,30 @@ if (!gotLock) {
 // 只在确认是唯一实例时清缓存：多实例情况下删的是正在运行实例的文件（多半删不掉）
 if (gotLock) cleanChromiumCache()
 {
-  app.on('second-instance', (event, argv) => {
+  app.on('second-instance', async (event, argv) => {
     if (win) {
       if (!win.isVisible()) win.show()
       if (win.isMinimized()) win.restore()
       win.focus()
     }
-    // v2.8.9：第二实例带的文件参数以前被完全忽略（双击关联文件/拖到 exe 上毫无反应）。
-    // 单文件导入尚未实现，先转给渲染层给出可见反馈
-    const media = (argv || [])
-      .map(String)
-      .filter((a) => {
-        if (a.length > 240 || a.startsWith('\\\\') || !/\.(mp3|flac|m4a|wav|ogg|opus|dsf|dff|aac|wma|ape|alac|m3u|m3u8)$/i.test(a)) return false
-        try { return fs.statSync(a).isFile() } catch (e) { return false }
-      })
-    if (media.length) sendToRenderer('open-files', { paths: media })
+    // v3.3.10：第二实例带的文件参数以前被完全忽略（双击关联文件/拖到 exe 上毫无反应）。
+    // 应用按「文件夹」组织曲库、单文件导入尚未实现，先把路径转给渲染层给出可见反馈
+    // v3.3.13：路径统一 resolve 成绝对路径；stat 改异步；缓存 payload 供窗口就绪后补发
+    const media = []
+    for (const raw of (argv || [])) {
+      const a = String(raw)
+      if (a.length > 240 || a.startsWith('\\\\') ||
+          !/\.(mp3|flac|m4a|wav|ogg|opus|dsf|dff|aac|wma|ape|alac|m3u|m3u8)$/i.test(a)) continue
+      const abs = path.resolve(a)
+      try {
+        const st = await fsp.stat(abs)
+        if (st.isFile()) media.push(abs)
+      } catch (e) { /* 排除目录/不存在/UNC 阻塞 */ }
+    }
+    if (media.length) {
+      lastOpenFiles = { paths: media }
+      sendToRenderer('open-files', lastOpenFiles)
+    }
   })
 
   app.whenReady().then(async () => {
@@ -2028,7 +2160,7 @@ if (gotLock) cleanChromiumCache()
       })
       activeScan = run
       run
-        .then((res) => sendToRenderer('lib:scan-done', res))
+        .then((res) => { if (res && res.skipped) return; sendToRenderer('lib:scan-done', res) })
         .catch((err) => console.error('[library] 首次扫描失败:', err))
         .finally(() => { if (activeScan === run) activeScan = null })
     }
@@ -2059,11 +2191,19 @@ if (gotLock) cleanChromiumCache()
   // 让「等 mpv 进程退出」形同虚设；进程万一没死透就退出，声卡就被孤儿占着。
   let quitCleanupDone = false
   app.on('before-quit', (event) => {
-    if (quitCleanupDone) return
+    // v3.3.13：一进入就置位，清理窗口内重复 app.quit() 不再重复跑整条链；
+    // 未清理完前顺手 preventDefault，避免重复退出请求把进程提前带走、腰斩清理
+    if (cleanupStarted) {
+      if (!quitCleanupDone) event.preventDefault()
+      return
+    }
+    cleanupStarted = true
     event.preventDefault()
     quitting = true
     stopWatching()
     const hadEngine = !!mpvEngine
+    // v3.3.13：清理链必须能收敛 —— stopMpv 的 Promise 万一永不 settle，
+    // 也不能让用户只能 taskkill。20 秒后无条件退出（> _stopProcess 最坏 8.2s + sweep 8s）。
     const finishQuit = () => {
       if (quitCleanupDone) return
       quitCleanupDone = true
@@ -2071,7 +2211,17 @@ if (gotLock) cleanChromiumCache()
       try { if (tray) tray.destroy() } catch (err) { /* 忽略 */ }
       app.quit()
     }
-    const quitGuard = setTimeout(finishQuit, 6000)
+    const quitGuard = setTimeout(() => {
+      // 兜底：清理链没收敛也要退。best-effort 短超时清一次孤儿 mpv，
+      // 用硬超时保证 finishQuit 一定执行，绝不长时间阻塞事件循环
+      const hard = setTimeout(finishQuit, 3500)
+      try {
+        sweepOurMpv(2000, 1500).catch(() => {}).finally(() => {
+          clearTimeout(hard)
+          finishQuit()
+        })
+      } catch (e) { clearTimeout(hard); finishQuit() }
+    }, 20000)
     try {
       stopMpv().catch(() => {}).finally(() => {
         (async () => {

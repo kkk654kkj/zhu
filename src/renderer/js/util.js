@@ -10,9 +10,13 @@ function esc(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+    // v3.3.13：把单引号也转义，防止将来误把结果放进单引号属性
+    .replace(/'/g, '&#39;')
 }
 
 function icon(name) {
+  // v3.3.13：name 只来自代码常量；白名单挡掉非法值，避免被拼进 <use href> 造成注入
+  if (typeof name !== 'string' || !/^[A-Za-z0-9_-]+$/.test(name)) return ''
   return '<svg><use href="#i-' + name + '"/></svg>'
 }
 
@@ -94,10 +98,17 @@ function isHires(t) {
 
 function debounce(fn, ms) {
   let t = null
-  return function (...args) {
+  const debounced = function (...args) {
     clearTimeout(t)
     t = setTimeout(() => fn.apply(this, args), ms)
   }
+  // v3.3.13：暴露取消能力 —— app.js 退出清理时可 _flushSaveSettings.cancel()
+  // 阻止挂起的落盘；仅清 timer 并复位，不改变原有调用语义
+  debounced.cancel = function () {
+    clearTimeout(t)
+    t = null
+  }
+  return debounced
 }
 
 function throttle(fn, ms) {
@@ -132,9 +143,24 @@ function throttle(fn, ms) {
 
 let toastTimer = null
 let toastHideTimer = null
-function toast(msg, ms = 1800) {
+// v3.3.13：全局 toast 同类 30 秒去重 —— 失败连跳 / 设备长期被占时不再刷屏。
+// key=消息文本，value=上次真正显示的时间戳；delete+set 维持 LRU，超过 50 条清最旧。
+const TOAST_DEDUP_MS = 30000
+const TOAST_DEDUP_MAX = 50
+const toastShownAt = new Map()
+function toast(msg, ms = 1800, force = false) {
   const el = $('#toast')
   if (!el) return
+  const key = String(msg)
+  const now = Date.now()
+  const last = toastShownAt.get(key)
+  // force=true 供必须每次出现的紧急错误绕过；否则同一文本 30 秒内只显示一次
+  if (!force && last != null && now - last < TOAST_DEDUP_MS) return
+  if (toastShownAt.has(key)) toastShownAt.delete(key)
+  toastShownAt.set(key, now)
+  while (toastShownAt.size > TOAST_DEDUP_MAX) {
+    toastShownAt.delete(toastShownAt.keys().next().value)
+  }
   el.textContent = msg
   el.hidden = false
   el.classList.add('show')

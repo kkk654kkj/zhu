@@ -7,6 +7,7 @@ function lyricCachePut(id, entry) {
   if (state.lyricCache.size > 50) state.lyricCache.delete(state.lyricCache.keys().next().value)
 }
 
+let maxIntent = 0
 const state = {
   tracks: [],            // 全部曲目（client 结构）
   byId: new Map(),
@@ -24,6 +25,9 @@ const state = {
   lyricCache: new Map(),
   lyricOffset: 0,
   counted: false,
+  consecutiveFails: 0, // 连续播放失败次数（>=3 停止自动跳过）
+  autoSkipping: false,
+  skipTimer: null,
   mini: false,           // 迷你模式（窗口尺寸由主进程管，这里管布局）
   exclusive: false,      // 独占输出（mpv 后端）是否生效
   resumePos: {},         // 长音轨断点位置 {trackId: 秒}（v1.6）
@@ -79,8 +83,9 @@ async function boot() {
       audio = new MpvAudio({ volume: settings.volume ?? 0.8 })
       audio.addEventListener('formatchange', updateHifiBadge)
       audio.addEventListener('fallback', () => {
+        // 不依赖主进程载荷：MpvAudio 自身回退时也把运行时状态同步掉
+        applyExclusiveFallback()
         toast('独占输出失败，已回退共享输出（不再是位完美）')
-        updateHifiBadge()
       })
       audio.addEventListener('error', () => {
         if (audio.lastError) toast(audio.lastError)
@@ -198,7 +203,11 @@ async function boot() {
   }
   window.api.onMpvEvent((e) => {
     if (!e) return
-    if (e.type === 'ao-lost') aoToast('ao-lost', '独占输出被系统中断（可能是游戏启动改了音频设备），正在自动恢复…', 5000)
+    if (e.type === 'fallback') {
+      // 主进程独占失败自动回退共享（载荷带 exclusive:false）：同步运行时状态
+      // 并刷新所有派生 UI，否则 state.exclusive 残留 true 会误命中独占分支
+      applyExclusiveFallback()
+    } else if (e.type === 'ao-lost') aoToast('ao-lost', '独占输出被系统中断（可能是游戏启动改了音频设备），正在自动恢复…', 5000)
     else if (e.type === 'ao-recovered') aoToast('ao-recovered', '独占输出已恢复', 2500)
     else if (e.type === 'exclusive-lost') aoToast('exclusive-lost', e.message || '自动夺回独占失败：设备被其他程序占用', 6000)
   })
@@ -229,11 +238,15 @@ async function boot() {
     UI.setMini(state.mini)
   })
 
-  window.addEventListener('beforeunload', saveSession)
+  window.addEventListener('beforeunload', () => {
+    flushSaveSettingsForExit()
+    saveSession()
+  })
   setInterval(saveSession, 10000)
 
   // v2.8.7：isMaximized 是 IPC 函数，直接放条件里恒为真 —— 必须真的调一次
   window.api.isMaximized().then((max) => {
+    if (maxIntent !== (window.__maxIntent || 0)) return   // 启动回调迟到，别覆盖用户已点过的图标
     document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
   }).catch(() => {})
 }
@@ -445,16 +458,17 @@ async function analyzeLibraryLoudness() {
   const gains = Object.assign({}, state.settings.trackGains || {})
   let done = 0
   let failed = 0
+  let preSkipped = 0
   try {
     for (const t of list) {
       if (state.abortAnalysis) break
       UI.updateScan({ phase: 'parse', done, total: list.length, name: t.title, label: '正在分析响度' })
-      // v2.8.9：超长音轨在解码前就跳过 —— decodeAudioData 整段解码内存峰值无上限，
-      // 1 小时 FLAC ≈ 2.8GB（loudness.js 里还有一道兜底）
+      // v3.3.9：超长音轨在解码前就跳过 —— decodeAudioData 整段解码内存峰值无上限，
+      // 1 小时 FLAC ≈ 2.8GB（analyzBuffer 里还有一道兜底）
+      // v3.3.13：主动跳过不算「失败」，也不进 done（done 只记真正进入分析的曲目）
       if ((t.duration || 0) > 1800) {
-        failed++
+        preSkipped++
         console.warn('[loudness] 跳过长音轨', t.title)
-        done++
         continue
       }
       try {
@@ -474,6 +488,7 @@ async function analyzeLibraryLoudness() {
     if (state.abortAnalysis) toast('响度分析已中断（已完成部分已保存）')
     else toast(`响度分析完成：${done} 首` +
       (skipped ? `，跳过 ${skipped} 首（无解码器 / 自带 ReplayGain）` : '') +
+      (preSkipped ? `，超长跳过 ${preSkipped} 首` : '') +
       (failed ? `，${failed} 首失败` : '') +
       (tagCount ? `，${tagCount} 首直接用标签` : ''), 4000)
   } catch (err) {
@@ -487,7 +502,7 @@ async function analyzeLibraryLoudness() {
 
 function clearAnalyzedGains() {
   state.settings.trackGains = {}
-  window.api.patchSettings({ trackGains: {} })
+  window.api.patchSettings({ trackGains: {} }).catch(() => {})
   applyTrackGain(state.currentId)
   toast('已清除响度分析数据')
 }
@@ -831,9 +846,12 @@ function bindPlayer() {
   player.on('track-change', (track) => {
     state.currentId = track.id
     state.counted = false
-    // v2.8.7：上一首报错排下的「自动跳下一首」定时器要取消，否则会跳掉刚选的歌
-    if (state.skipTimer) { clearTimeout(state.skipTimer); state.skipTimer = null }
-    state.lastErrKey = null
+    // 只有「用户手动切歌 / 重新选曲」才清零连续失败计数；失败自动跳曲的
+    // track-change 保留计数，否则「连跳 3 首就停」的保底永远凑不满。
+    // 真正播过 3 秒也会清（见下面 time 处理器）。
+    if (!state.autoSkipping && state.consecutiveFails) state.consecutiveFails = 0
+    cancelSkipTimer()
+    state.lastErrKey = null        // 换曲后允许重新记错误
     resetAb()                       // A-B 是"这一首之内"的事，换歌就作废
     updateMediaSession(track)
     applyTrackGain(track.id)
@@ -863,11 +881,16 @@ function bindPlayer() {
 
   player.on('state-change', (playing) => {
     UI.setPlayIcon(playing)
-    // v2.8.7：renderQueue 的输出只跟 tracks/index/currentId 有关，播放/暂停
+    // v3.3.7：renderQueue 的输出只跟 tracks/index/currentId 有关，播放/暂停
     // 不改变它 —— 以前每次暂停/恢复都全量重建队列 innerHTML（滚动位置丢失）
     if (player.current) UI.renderNowPlaying(player.current, playing)
     pushDesktopLyric()
-    if (!playing) saveSession()
+    if (!playing) {
+      // 失败自动跳曲窗口内暂停/拖进度/睡眠定时到点：立刻撤掉待跳定时器，
+      // 否则 400/500ms 后仍会强切下一首、打断用户暂停
+      cancelSkipTimer()
+      saveSession()
+    }
     // 任务栏缩略图的播放/暂停按钮要跟着变
     window.api.setPlayState(playing)
     syncMediaSessionState(playing)
@@ -876,6 +899,8 @@ function bindPlayer() {
   })
 
   player.on('time', (cur, dur) => {
+    // 播过 3 秒 = 真的在出声，连续失败计数清零（计数只认「没播出来」）
+    if (cur > 3 && state.consecutiveFails) state.consecutiveFails = 0
     UI.setProgress(cur, dur)
     UI.updateLyricIndex(cur + state.lyricOffset)
     pushDesktopLyric()
@@ -919,25 +944,47 @@ function bindPlayer() {
   })
 
   player.on('error', () => {
-    // v2.8.7：同一首歌的重复报错只处理一次（mpvaudio 对同一文件可能连发两类错误）
-    const errCur = player.current
-    if (errCur && state.lastErrKey === errCur.id && Date.now() - state.lastErrAt < 2000) return
-    if (errCur) { state.lastErrKey = errCur.id; state.lastErrAt = Date.now() }
-    // 独占模式下多半是声卡/引擎问题（设备被占用、格式不支持），不是这个文件坏了：
-    // 此时绝不能自动跳曲，否则会一路把整个队列跳完
+    const cur = player.current
+    // 同一首歌的重复报错只处理一次（mpvaudio 对同一文件可能连发
+    // error / file-error 两类事件，不去重会一次失败跳两首）
+    if (cur && state.lastErrKey === cur.id && Date.now() - state.lastErrAt < 2000) return
+    if (cur) { state.lastErrKey = cur.id; state.lastErrAt = Date.now() }
+
+    // 独占模式下多半是声卡/引擎问题，不是文件坏了：绝不自动跳曲。
+    // （fallback 时 onMpvEvent / audio 'fallback' 已把 state.exclusive 同步为 false）
     if (state.exclusive) {
       toast('音频输出失败：' + ((audio && audio.lastError) || '设备不可用，已暂停'))
       player.pause()
       return
     }
-    // DSD（v2.0）：普通输出（Chromium）没有 DSD 解码器，报错信息必须说清楚原因，
-    // 否则用户只会以为文件坏了
-    const cur = player.current
-    toast(cur && cur.isDsd
-      ? 'DSD 文件需要独占输出才能播放：点标题栏波形按钮开启（已跳过）'
-      : '该歌曲无法播放，已跳过', cur && cur.isDsd ? 4000 : 1800)
-    // v2.8.7：定时器存下来，track-change 时取消
-    state.skipTimer = setTimeout(() => { state.skipTimer = null; player.next(true) }, 400)
+
+    // 在线 / 本地统一计数：连续 3 首放不出来就停，防止移动硬盘掉线、
+    // 格式不支持时每 400ms 一首无限连跳。跳曲一律走 skipToNext()：
+    // 它强制 index+1、忽略 single 模式、且不会 emit queue-end 误触发「播完关机」。
+    state.consecutiveFails = (state.consecutiveFails || 0) + 1
+    if (state.consecutiveFails >= 3) {
+      cancelSkipTimer()
+      // force 绕过全局 toast 的 30s 同类去重：手动切歌清零后再次连败也要提示
+      if (state.consecutiveFails === 3) toast('连续多首无法播放，已停止自动跳过', 4000, true)
+      player.pause()
+      return
+    }
+
+    toast(cur && cur.online
+      ? '这首在线歌曲放不出来（版权或音源失效），已跳过'
+      : (cur && cur.isDsd
+        ? 'DSD 文件需要独占输出才能播放：点标题栏波形按钮开启（已跳过）'
+        : '该歌曲无法播放，已跳过'),
+      cur && cur.isDsd ? 4000 : (cur && cur.online ? 2500 : 1800))
+
+    // 排定时器前先清掉旧的，避免多次失败叠加多个定时器
+    cancelSkipTimer()
+    state.skipTimer = setTimeout(() => {
+      state.skipTimer = null
+      if (!player.isPlaying) return    // 用户在等待窗口里暂停了就别再强跳
+      state.autoSkipping = true
+      try { player.skipToNext() } finally { state.autoSkipping = false }
+    }, cur && cur.online ? 500 : 400)
   })
 }
 
@@ -978,6 +1025,16 @@ function audioFormatLabel(f) {
 }
 
 /** 是否真的处于位完美状态：独占 + 未被回退 + 输出格式已知且与源一致 + 音量 100% */
+/** 独占失败自动回退共享：把运行时状态与所有派生 UI 一次性同步到 false */
+function applyExclusiveFallback() {
+  state.exclusive = false
+  // 恢复 EQ / 音量均衡按钮（去掉 disabled class 与「独占下不可用」提示）
+  UI.setEqDisabled(false)
+  UI.setNorm(state.settings.normalizeVolume === true)
+  updateHifiBadge()
+}
+
+
 function isBitPerfect() {
   if (!state.exclusive) return false
   if (!audio || audio.isExclusive === false) return false
@@ -1036,12 +1093,13 @@ async function toggleExclusiveOutput() {  if (state.settings.exclusiveOutput) {
     state.settings.exclusiveOutput = false
     await window.api.patchSettings({ exclusiveOutput: false }).catch(() => {})
     saveSession()
-    // v2.8.6：关独占要走完整的「释放」流程 ——
+    // v3.3.6 / v2.8.6：关独占要走完整的「释放」流程 ——
     // 等 mpv 进程真退出、扫掉可能残留的孤儿、实测声卡能不能被别人打开。
     // 以前只发个信号就重载界面，设备可能还被占着，用户看到的是
     // 「关了独占，别的软件还是没声音，播放器自己还能继续放」。
     const rel = await window.api.mpvRelease().catch(() => null)
     try { sessionStorage.setItem('lx_release_notice', JSON.stringify(rel || {})) } catch (err) { /* 忽略 */ }
+    await flushSaveSettingsForExit()
     location.reload()
     return
   }
@@ -1050,6 +1108,7 @@ async function toggleExclusiveOutput() {  if (state.settings.exclusiveOutput) {
   state.settings.exclusiveOutput = true
   await window.api.patchSettings({ exclusiveOutput: true }).catch(() => {})
   saveSession()
+  await flushSaveSettingsForExit()
   location.reload()
 }
 
@@ -1551,7 +1610,7 @@ function bindUI() {
     const chip = e.target.closest('.sp-chip')
     if (!chip) return
     const min = Number(chip.dataset.min) || 0
-    window.api.setSleepTimer(min).then((st) => renderSleepState(st))
+    window.api.setSleepTimer(min).then((st) => renderSleepState(st)).catch(() => {})
     toast(min > 0 ? '睡眠定时：' + min + ' 分钟后暂停播放' : '睡眠定时已关闭')
   })
   document.getElementById('btnEqClose').addEventListener('click', () => UI.toggleEq(false))
@@ -1621,11 +1680,12 @@ function bindUI() {
   })
 
   // 窗口控制
-  document.getElementById('btnMin').addEventListener('click', () => window.api.minimize())
+  document.getElementById('btnMin').addEventListener('click', () => window.api.minimize().catch(() => {}))
   document.getElementById('btnMax').addEventListener('click', async () => {
+    window.__maxIntent = (window.__maxIntent || 0) + 1
     const max = await window.api.toggleMaximize()
     document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
-  })
+  }).catch(() => {})
   document.getElementById('btnClose').addEventListener('click', () => {
     saveSession()
     window.api.closeWindow()
@@ -1640,7 +1700,7 @@ function bindUI() {
   // 迷你模式
   document.getElementById('btnMini').addEventListener('click', () => toggleMini(true))
   document.getElementById('miniRestore').addEventListener('click', () => toggleMini(false))
-  document.getElementById('miniMin').addEventListener('click', () => window.api.minimize())
+  document.getElementById('miniMin').addEventListener('click', () => window.api.minimize().catch(() => {}))
   document.getElementById('miniClose').addEventListener('click', () => {
     saveSession()
     window.api.closeWindow()
@@ -1850,7 +1910,7 @@ async function handleCtxAction(act, arg) {
       break
     }
     case 'reveal':
-      window.api.showInFolder(track.path)
+      window.api.showInFolder(track.path).catch(() => {})
       break
     case 'copy':
       navigator.clipboard.writeText(`${track.title} - ${track.artist}`).then(() => toast('已复制'))
@@ -2021,19 +2081,33 @@ function onScanProgress(p) {
  * 主进程侧的扫描结束通知（首次启动自动建库、解析器升级重建曲库都会走这里）。
  * 自己发起的 doScan 有 await 兜着，这条只处理"后台扫描完成"的情况。
  */
-async function onScanDone() {
+async function onScanDone(res) {
   if (scanning) return
+  // 目录不可访问时主进程会跳过清理，这种 scan-done 不能动队列
+  if (res && res.skipped) return
   try {
     const tracks = await window.api.listTracks()
     setTracks(tracks)
-    // 队列里已失效的曲目要剔除，否则点播放会指向不存在的文件
+    // 队列里已失效的曲目要剔除，否则点播放会指向不存在的文件。
+    // v3.3.7：在线曲目（id 形如 on:src:id）永远不在 byId 里，必须放行 ——
+    // 以前任何一次后台扫描都会把在线歌整批踢出队列、打断正在播的在线音乐
     if (player && player.tracks.length) {
-      const kept = player.tracks.filter((t) => state.byId.has(t.id))
+      const curTrack = player.current
+      const kept = player.tracks.filter((t) => state.byId.has(t.id) || t.online)
       if (kept.length !== player.tracks.length) {
-        const curId = player.current ? player.current.id : null
-        const idx = Math.max(0, kept.findIndex((t) => t.id === curId))
-        if (kept.length) player.setQueue(kept, idx, false)
-        else player.stop()
+        // v3.3.13：用对象引用定位 —— 队列含重复 id 时 findIndex(id) 会指向错误副本
+        const idx = kept.indexOf(curTrack)
+        if (idx < 0) {
+          // 只有「当前曲确实被剔除」才重建队列（换曲、重排洗牌池）
+          cancelSkipTimer()
+          if (kept.length) player.setQueue(kept, Math.max(0, Math.min(player.index, kept.length - 1)), false)
+          else player.stop()
+        } else {
+          // 当前曲还在：直接换 tracks，不重建洗牌池、不打断本轮随机顺序
+          player.tracks = kept
+          player.index = idx
+          player.emit('queue-change', player.tracks, player.index)
+        }
       }
     }
     updateNavCounts()
@@ -2306,19 +2380,38 @@ function bindGlobalKeys() {
 
 /* ================= 持久化 ================= */
 
-// v2.8.7：debounce 是「尾触发、参数整体替换」语义 —— 300ms 内两类设置
-// 只有最后一类会落盘。改成先合并再统一发。
+// v3.3.7：debounce 是「尾触发、参数整体替换」语义 —— 300ms 内两类设置
+// （比如 mode-change 后马上拖音量）只有最后一类会落盘，前一类永远丢失。
+// 改成先合并再统一发。
+// v3.3.13：关窗/重载前必须把攒着的 pending 立即发出（只 cancel 会丢设置），
+// 所以这里自管定时器 + flush，不依赖 util.debounce 的 cancel；回包也要增量
+// 合并，不能整体替换（全文件多处直接赋值 state.settings.xxx，整体替换会回滚）。
 let saveSettingsPending = null
-const _flushSaveSettings = debounce(() => {
+let saveSettingsTimer = null
+
+/** 立即发送 pending（幂等），并取消 debounce 定时器 */
+function flushSaveSettings() {
   const patch = saveSettingsPending
   saveSettingsPending = null
-  if (patch && Object.keys(patch).length) {
-    window.api.patchSettings(patch).then((s) => { state.settings = s }).catch(() => {})
-  }
-}, 300)
+  if (saveSettingsTimer) { clearTimeout(saveSettingsTimer); saveSettingsTimer = null }
+  if (!patch || !Object.keys(patch).length) return Promise.resolve()
+  return window.api.patchSettings(patch).then((s) => {
+    if (s && typeof s === 'object') Object.assign(state.settings, s)
+  }).catch(() => {})
+}
+
 function saveSettings(patch) {
   saveSettingsPending = Object.assign({}, saveSettingsPending || {}, patch || {})
-  _flushSaveSettings()
+  if (saveSettingsTimer) clearTimeout(saveSettingsTimer)
+  saveSettingsTimer = setTimeout(() => { saveSettingsTimer = null; flushSaveSettings() }, 300)
+}
+
+/** 重载/关窗前：最多等一小会儿，IPC 卡住也不至于永远不 reload */
+async function flushSaveSettingsForExit() {
+  await Promise.race([
+    flushSaveSettings(),
+    new Promise((r) => setTimeout(r, 250))
+  ]).catch(() => {})
 }
 
 /* ================= 长音轨断点续播见 js/resume.js ================= */

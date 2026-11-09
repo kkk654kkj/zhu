@@ -536,6 +536,9 @@ class Library {
     this.tracks = new Map()
     this.mm = null
     this.scanning = false
+    // v3.3.13：getCover 的 in-flight 去重表，构造函数里就初始化，
+    // 避免 run 同步抛错时 finally 的 delete 因 Map 未就绪而失效
+    this._coverInFlight = new Map()
   }
 
   /** 记一条失败（幂等）：同一文件重复失败只刷新时间与原因，保留首次出现时间 */
@@ -572,14 +575,18 @@ class Library {
   }
 
   async persistFailures() {
+    let tmp = null
     try {
       await fsp.mkdir(path.dirname(this.failuresFile), { recursive: true })
-      // v3.3.13：固定 tmp 会被「扫描结束」与「清空失败记录」并发覆盖
-      const tmp = this.failuresFile + '.tmp-' + process.pid + '-' + Date.now().toString(36)
+      // v3.3.13：毫秒级 tmp 名会在同毫秒并发写时撞名（扫描结束 / 清空失败记录），
+      // 第二次 rename 会 ENOENT 被吞导致写丢一次；加随机后缀保证唯一
+      tmp = this.failuresFile + '.tmp-' + process.pid + '-' + Date.now().toString(36) + '-' + crypto.randomBytes(4).toString('hex')
       await fsp.writeFile(tmp, JSON.stringify({ v: 1, failures: this.listFailures() }), 'utf8')
       await fsp.rename(tmp, this.failuresFile)
     } catch (err) {
       console.error('[library] 失败清单写入失败:', err.message)
+      // rename 失败时清掉残留 tmp，避免多次失败累积垃圾文件
+      if (tmp) await fsp.unlink(tmp).catch(() => {})
     }
   }
 
@@ -663,7 +670,12 @@ class Library {
     if (!t || t.cover !== COVER_EMBEDDED || !t.path) return null
     // v3.3.9：封面墙首屏会并发请求同一 id —— 加 in-flight 去重，
     // 以前每个请求都完整 parseFile 一遍（要读整个音频文件）
-    if (this._coverInFlight && this._coverInFlight.has(id)) return this._coverInFlight.get(id)
+    // v3.3.13：_coverInFlight 必须在 run 之前就绪（构造函数里也已初始化），
+    // 否则 parseFile 同步抛错时 finally 的 delete 被 undefined 守卫吞掉，
+    // 已完成的 run 随后被 set 进 Map 且永不删除，封面再也显示不出来
+    if (!this._coverInFlight) this._coverInFlight = new Map()
+    if (this._coverInFlight.has(id)) return this._coverInFlight.get(id)
+    let settled = false
     const run = (async () => {
       try {
         const parsed = await this.mm.parseFile(t.path, { duration: false, skipCovers: false })
@@ -675,11 +687,14 @@ class Library {
       } catch (err) {
         return null
       } finally {
-        if (this._coverInFlight) this._coverInFlight.delete(id)
+        settled = true
+        this._coverInFlight.delete(id)
       }
     })()
-    if (!this._coverInFlight) this._coverInFlight = new Map()
     this._coverInFlight.set(id, run)
+    // parseFile 同步抛错时 IIFE 会同步走完，finally 的 delete 跑在 set 之前（删空），
+    // 这里补删一次，确保已 resolve(null) 的 run 不会被永久缓存
+    if (settled) this._coverInFlight.delete(id)
     return run
   }
 
@@ -692,9 +707,11 @@ class Library {
   }
 
   async persist() {
+    let tmp = null
     try {
       await fsp.mkdir(path.dirname(this.cacheFile), { recursive: true })
-      const tmp = this.cacheFile + '.tmp-' + process.pid + '-' + Date.now().toString(36)
+      // v3.3.13：毫秒级 tmp 名会在同毫秒并发写时撞名，加随机后缀保证唯一
+      tmp = this.cacheFile + '.tmp-' + process.pid + '-' + Date.now().toString(36) + '-' + crypto.randomBytes(4).toString('hex')
       // v2.8.7：写完先 fsync 再 rename。原子写（tmp+rename）只防「写一半」，
       // 不防「rename 生效了但内容还在页缓存里没落盘」的断电丢数据
       const fh = await fsp.open(tmp, 'w')
@@ -707,6 +724,8 @@ class Library {
       await fsp.rename(tmp, this.cacheFile)
     } catch (err) {
       console.error('[library] 缓存写入失败:', err.message)
+      // rename 抛错时 tmp 会残留，多次失败累积垃圾；这里主动清掉
+      if (tmp) await fsp.unlink(tmp).catch(() => {})
     }
   }
 
@@ -752,7 +771,7 @@ class Library {
       let dirty = false   // v2.8.7：零变更就不写盘（几千首的全量 JSON 不便宜）
       const total = unique.length
 
-      await mapLimit(unique, 4, async (filePath) => {
+      const results = await mapLimit(unique, 4, async (filePath) => {
         const id = fileId(filePath)
         seen.add(id)
         let st
@@ -818,6 +837,16 @@ class Library {
         done++
         onProgress({ phase: 'parse', done, total, track })
       })
+      // v3.3.13：接住 mapLimit 的返回值。worker 已被隔离（异常项 results[i]=null），
+      // 但异常可能发生在 seen.add(id) 之后、tracks.set / done++ 之前 —— 不补记会让
+      // 文件既进不了库、也没有任何失败提示，进度还卡住。这里补一条失败记录并推进进度。
+      for (let i = 0; i < results.length; i++) {
+        if (results[i] !== null) continue
+        const filePath = unique[i]
+        this.recordFailure(filePath, '扫描任务异常（已隔离）', 'parse')
+        done++
+        onProgress({ phase: 'parse', done, total, track: null })
+      }
 
       // 清理已不存在的文件
       // 有根目录本次不可访问时一律跳过：否则拔掉移动硬盘 / 网络盘离线后扫描一次，
