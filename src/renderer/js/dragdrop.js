@@ -120,6 +120,12 @@ function bindDragAndDrop() {
     endDrag()
     if (!plId) return
     e.preventDefault()
-    await addTracksToPlaylist(plId, ids)
+    // 拖进歌单失败（歌单已删 / 写盘失败）不能变成 unhandled rejection：
+    // 界面表现会是「拖过去毫无反应」，用户只能反复重试
+    try {
+      await addTracksToPlaylist(plId, ids)
+    } catch (err) {
+      toast('加入歌单失败：' + ((err && err.message) || err))
+    }
   })
 }

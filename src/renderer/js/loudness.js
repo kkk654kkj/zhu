@@ -55,16 +55,26 @@ async function analyzeLoudness(url, targetLufs = LUFS_DEFAULT_TARGET, opts = {})
   // 1) 已知时长优先：最准，且完全不占内存
   if (knownDuration > maxSeconds) throw new Error(TOO_LONG)
   const BYTES_PER_SEC = 44100 * 2 * 2   // 44.1kHz 立体声 16bit PCM 字节率（保守上界）
-  const res = await fetch(url)
-  if (!res.ok) throw new Error('HTTP ' + res.status)
-  // 2) 解码前：用响应头 Content-Length 先估一次，能早退就不落全量 buffer
-  let clen = 0
+  // v3.3.16：整段取流加 60 秒上限。以前没有任何超时 —— 服务端把连接挂着不回正文时
+  // 这个 Promise 永久 pending，整库分析是串行队列，后面的曲目全部不再分析，
+  // 退出应用也没有取消路径。
+  const ac = new AbortController()
+  const abortTimer = setTimeout(() => { try { ac.abort() } catch (e) { /* 忽略 */ } }, 60000)
+  let ab
   try {
-    const h = res.headers
-    if (h && typeof h.get === 'function') clen = Number(h.get('content-length')) || 0
-  } catch {}
-  if (clen > maxSeconds * BYTES_PER_SEC) throw new Error(TOO_LONG)
-  const ab = await res.arrayBuffer()
+    const res = await fetch(url, { signal: ac.signal })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    // 2) 解码前：用响应头 Content-Length 先估一次，能早退就不落全量 buffer
+    let clen = 0
+    try {
+      const h = res.headers
+      if (h && typeof h.get === 'function') clen = Number(h.get('content-length')) || 0
+    } catch {}
+    if (clen > maxSeconds * BYTES_PER_SEC) throw new Error(TOO_LONG)
+    ab = await res.arrayBuffer()
+  } finally {
+    clearTimeout(abortTimer)
+  }
   // 3) 解码前最后一道：用实际字节数兜底（Content-Length 可能缺失或被压缩格式低估）
   if (ab.byteLength > maxSeconds * BYTES_PER_SEC) throw new Error(TOO_LONG)
   const buf = await getDecodeCtx().decodeAudioData(ab)
@@ -86,14 +96,16 @@ function analyzeBuffer(buf, targetLufs, maxSeconds = 1800) {
   let peak = 0
   for (let c = 0; c < nCh; c++) {
     const src = buf.getChannelData(c)
-    const d = new Float32Array(src) // 拷贝，不动原数据
     for (let i = 0; i < n; i++) {
       const v = Math.abs(src[i])
       if (v > peak) peak = v
     }
-    kFilter(d, K_STAGE1_B, K_STAGE1_A)
-    kFilter(d, K_STAGE2_B, K_STAGE2_A)
-    filtered.push(d)
+    // v3.3.16：直接原地滤波。以前先 new Float32Array(src) 拷一份（30 分钟立体声
+    // 约 0.69GB），而峰值已经算完、buffer 用完即弃 —— 这份拷贝纯属白占内存，
+    // 与 decodeAudioData 的峰值叠加逼近 2GB，整库分析遇到长音轨极易 OOM。
+    kFilter(src, K_STAGE1_B, K_STAGE1_A)
+    kFilter(src, K_STAGE2_B, K_STAGE2_A)
+    filtered.push(src)
   }
 
   // 2) 分块能量（400ms 块 / 100ms 步进）

@@ -61,21 +61,38 @@ function rgDb(obj) {
   return null
 }
 
-/** 递归收集音频文件（跳过隐藏目录与常见垃圾目录） */
-async function collectFiles(dir, out = [], depth = 0) {
-  if (depth > 12) return out
+/**
+ * 递归收集音频文件（跳过隐藏目录与常见垃圾目录）。
+ *
+ * 读不出内容的目录会追加进 errors —— 调用方**必须**把它当作「本次不可达」，
+ * 否则清理阶段会把里面的曲目当成已删除，整批写回 library.json（不可恢复的数据丢失）。
+ * 典型触发：权限变动、网络盘半离线、路径超长、EBUSY。
+ *
+ * @param {string} dir
+ * @param {number} [depth]
+ * @param {string[]} [errors] 收集失败的目录
+ * @returns {Promise<string[]>} 音频文件绝对路径
+ */
+async function collectFiles(dir, depth = 0, errors = []) {
+  if (depth > 12) {
+    // 超深层级不再往下走：记一条，避免上层把整棵深目录当作「已清空」
+    if (depth === 13) errors.push(dir)
+    return []
+  }
   let entries
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true })
   } catch (err) {
-    return out
+    errors.push(dir)
+    return []
   }
+  const out = []
   for (const ent of entries) {
     const full = path.join(dir, ent.name)
     if (ent.isSymbolicLink()) continue
     if (ent.isDirectory()) {
       if (/^\$RECYCLE|^System Volume Information|^\./i.test(ent.name)) continue
-      await collectFiles(full, out, depth + 1)
+      out.push(...await collectFiles(full, depth + 1, errors))
     } else if (ent.isFile() && AUDIO_EXT.has(extOf(ent.name))) {
       out.push(full)
     }
@@ -89,17 +106,34 @@ const MIME_BY_EXT = {
 }
 
 /**
+ * 扫描期间的「目录 → 文件名列表」缓存。
+ *
+ * findCover 对每首歌都要 readdir 同一目录（一张专辑 20 首 = 20 次），
+ * 全库首扫时目录遍历次数约等于曲目数。缓存只在 scan 生命周期内有效，
+ * 扫描外调用（getCover 等）直接走实时 readdir，保证拿到最新状态。
+ */
+let dirNameCache = null
+
+async function listDirNames(dir) {
+  if (dirNameCache && dirNameCache.has(dir)) return dirNameCache.get(dir)
+  let names = []
+  try {
+    names = await fsp.readdir(dir)
+  } catch {
+    names = []
+  }
+  if (dirNameCache) dirNameCache.set(dir, names)
+  return names
+}
+
+/**
  * 找封面：同名图片 > 目录内 <歌手>__ARTIST.jpg > <专辑>__ALBUM.jpg > cover/folder
  */
 async function findCover(audioPath, meta) {
   const dir = path.dirname(audioPath)
   const base = path.basename(audioPath, path.extname(audioPath))
-  let names = []
-  try {
-    names = await fsp.readdir(dir)
-  } catch {
-    return null
-  }
+  const names = await listDirNames(dir)
+  if (!names.length) return null
   const lower = new Map(names.map((n) => [n.toLowerCase(), n]))
   const pick = (candidate) => {
     const hit = lower.get(candidate.toLowerCase())
@@ -283,6 +317,27 @@ function resolveCoverPath(cover, coverDir) {
   return fs.existsSync(inCurrent) ? inCurrent : cover
 }
 
+/**
+ * 把「按字节数硬截断」的位置回退到完整的 UTF-8 序列边界。
+ *
+ * 8KB 截断正好切在汉字中间时，前 8KB 解码会带一个 U+FFFD，
+ * decodeLrcBuffer 因此误判成 GBK，把 [ti:]/[ar:] 整段解成乱码
+ * （乱码仍能被正则匹配到，于是错误标题/歌手被写进曲目）。
+ */
+function safeUtf8Cut(buf, n) {
+  let i = n
+  for (let back = 0; back < 4 && i > 0; back++) {
+    const b = buf[i - 1]
+    if ((b & 0xc0) !== 0x80) {
+      // i-1 是序列首字节：算出它需要几字节，装不下就整段丢掉
+      const need = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1
+      return (i - 1) + need <= n ? n : i - 1
+    }
+    i--
+  }
+  return n
+}
+
 /** 读 LRC 头部标签（ti/ar/al），只读前 8KB；失败返回 null */
 function readLrcMeta(lyricPath) {
   if (!lyricPath) return null
@@ -298,7 +353,7 @@ function readLrcMeta(lyricPath) {
     } finally {
       try { fs.closeSync(fd) } catch (e) { /* 已关 */ }
     }
-    const head = decodeLrcBuffer(buf.subarray(0, n))
+    const head = decodeLrcBuffer(buf.subarray(0, safeUtf8Cut(buf, n)))
     const pick = (tag) => {
       const m = new RegExp('\\[' + tag + ':([^\\]]*)\\]', 'i').exec(head)
       return m && m[1] ? m[1].trim() : null
@@ -771,12 +826,22 @@ class Library {
     if (this.scanning) return { skipped: true, added: 0, updated: 0, removed: 0, failed: 0, total: this.tracks.size }
     this.scanning = true
     const started = Date.now()
+    // 本次扫描期间复用目录列表（见 listDirNames），扫描结束即失效
+    dirNameCache = new Map()
     try {
       onProgress({ phase: 'collect', done: 0, total: 0 })
       const all = []
       const missingRoots = []      // 本次不可访问的根目录（拔盘 / 网络盘离线 / 权限变动）
-      for (const dir of dirs) {
-        if (!dir) continue
+      const scanDirs = (Array.isArray(dirs) ? dirs : []).filter(Boolean)
+      // 没有任何有效目录时绝不能进清理阶段：seen 会是空集，清理会把整个曲库删掉并写回
+      // （触发场景：用户把音乐文件夹列表清空后点扫描 / 设置读回空数组）
+      if (!scanDirs.length) {
+        return {
+          skipped: true, reason: 'no-dirs',
+          added: 0, updated: 0, removed: 0, failed: 0, total: this.tracks.size
+        }
+      }
+      for (const dir of scanDirs) {
         let ok = false
         try {
           const st = await fsp.stat(dir)
@@ -788,8 +853,9 @@ class Library {
           missingRoots.push(dir)
           continue
         }
-        const files = await collectFiles(dir, [])
-        all.push(...files)
+        // 子目录读不进去时 collectFiles 会回传路径，这里并入 missingRoots：
+        // 只要有一个目录不可达，就整体跳过清理（宁可留脏数据，也不能误删曲目）
+        all.push(...await collectFiles(dir, 0, missingRoots))
       }
       // 大小写去重：一次建 Map，O(n)。旧写法对每个唯一路径都遍历整个数组（O(n²)），
       // 千首以上会明显拖慢收集阶段。
@@ -921,6 +987,7 @@ class Library {
       }
     } finally {
       this.scanning = false
+      dirNameCache = null
     }
   }
 }
