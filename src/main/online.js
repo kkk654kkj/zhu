@@ -34,6 +34,29 @@ function anySignal(a, b) {
   b.addEventListener('abort', onAbort, { once: true })
   return c.signal
 }
+/**
+ * 可释放的组合信号（第四轮 §4.5.3 #1）。
+ * AbortSignal.any 不存在时的手工回退会给两个源信号挂 {once:true} 监听，
+ * 而组合信号的生命周期往往比源信号短（一次解析就结束）—— 监听不解绑就会一直累积。
+ * 用法：const { signal, dispose } = anySignalDisposable(a, b)，用完在 finally 里 dispose()。
+ */
+function anySignalDisposable(a, b) {
+  if (!a) return { signal: b, dispose: () => {} }
+  if (!b) return { signal: a, dispose: () => {} }
+  if (typeof AbortSignal.any === 'function') return { signal: AbortSignal.any([a, b]), dispose: () => {} }
+  const c = new AbortController()
+  const onAbort = () => { try { c.abort() } catch (e) { /* 已 abort */ } }
+  a.addEventListener('abort', onAbort, { once: true })
+  b.addEventListener('abort', onAbort, { once: true })
+  return {
+    signal: c.signal,
+    dispose: () => {
+      try { a.removeEventListener('abort', onAbort) } catch (e) { /* 忽略 */ }
+      try { b.removeEventListener('abort', onAbort) } catch (e) { /* 忽略 */ }
+    }
+  }
+}
+
 function sleepAbortable(ms, signal) {
   return new Promise((resolve) => {
     if (!signal) { setTimeout(resolve, ms); return }
@@ -157,9 +180,11 @@ async function reqText(url, opts = {}) {
     }
     return await res.text()
   } catch (err) {
-    if (!err || err.name !== 'AbortError') {
-      logger('[req] ' + ((err && err.message) || err) + ' ' + String(url).slice(0, 80))
-    }
+    // 第四轮 §4.5.1 #2：取消必须让整条链立刻收敛。
+    // 以前所有错误一律 return null，AbortError 在 searchOne / qingResolveOnce 眼里
+    // 等于「本源没结果」，于是被取消的链会把剩下的源继续跑完（ChKSz 还照扣额度）。
+    if (err && err.name === 'AbortError' && opts && opts.signal && opts.signal.aborted) throw abortError()
+    logger('[req] ' + ((err && err.message) || err) + ' ' + String(url).slice(0, 80))
     return null
   }
 }
@@ -278,10 +303,14 @@ function parseKuwoList(text) {
     const obj = {}
     // v3.3.17：值分支以前只认带引号的字符串，无引号的数字（DURATION:245）会整体丢失，
     // duration 变 0 → probeStream 的 expectDuration 与 relevance 的时长加权全部失效
-    const kvRe = /['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?\s*:\s*(?:'((?:[^'\\]|\\.)*)'|(-?\d+(?:\.\d+)?))/g
+    // 第四轮 §4.5.3 #2：补双引号值分支 —— 酷我偶发返回 {"ARTIST":"xxx"} 形态，
+    // 以前只认单引号字符串与数字，整条记录的歌手/歌名会丢
+    const kvRe = /['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?\s*:\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|(-?\d+(?:\.\d+)?))/g
     let kv
     while ((kv = kvRe.exec(body))) {
-      obj[kv[1]] = kv[2] !== undefined ? kv[2].replace(/\\'/g, "'") : kv[3]
+      obj[kv[1]] = kv[2] !== undefined
+        ? kv[2].replace(/\\'/g, "'")
+        : (kv[3] !== undefined ? kv[3].replace(/\\"/g, '"') : kv[4])
     }
     if (obj.DC_TARGETID) out.push(obj)
   }
@@ -651,6 +680,8 @@ function relevance(song, keyword) {
   const k = norm(keyword)
   const t = norm(song.title)
   const a = norm(song.artist)
+  // 第四轮 §4.5.3 #4：k 为空时 t.includes('') 恒真，会给所有候选白送 5 分
+  if (!k) return 0
   let score = 0
   if (t && t === k) score += 12
   else if (t && k.includes(t)) score += 7
@@ -700,7 +731,11 @@ async function searchOne(id, keyword, page, limit) {
 }
 
 async function search(keyword, page = 1, limit = 30, sourceIds = null) {
-  const ids = (sourceIds && sourceIds.length ? sourceIds : SOURCE_ORDER).filter((id) => SOURCES[id])
+  // 第四轮 §4.5.1 #3：源 id 去重 + 白名单夹取 —— 渲染层理论上传进来的数组完全不可信，
+  // 之前重复 id 会并发发两次同样的请求，超长数组会一次性打出十几条连接。
+  const ids = Array.from(new Set((sourceIds && sourceIds.length ? sourceIds : SOURCE_ORDER)
+    .filter((id) => typeof id === 'string' && SOURCES[id]))).slice(0, SOURCE_ORDER.length)
+  if (!ids.length) return []
   const results = await Promise.all(ids.map((id) => searchOne(id, keyword, page, limit)))
   // 交错合并：各家第一首、各家第二首……避免某一源把整页占满
   const merged = []
@@ -806,7 +841,12 @@ async function probeStream(info, realDuration, expectDuration = 0, opts = {}) {
     const total = Number(cr.split('/')[1]) || 0
     const type = res.headers.get('content-type') || ''
     if (/text\/html/i.test(type)) return { ...info, broken: true }
-    if (!total || !realDuration) return { ...info, unverified: true }
+    // 第四轮 §4.5.1 #4：CDN 不回 Content-Range（或接口没给时长）时无法实测码率，
+    // 只能标 unverified —— 但必须保留**归一后的标称码率**，否则调用方的
+    // 「标称码率兜底」分支永远不可达（以前直接返回原值，单位还可能是 bps）。
+    if (!total || !realDuration) {
+      return { ...info, bitrate: normBitrate(info.bitrate), unverified: true }
+    }
     const kbps = Math.round((total * 8) / realDuration / 1000)
     // 兜底换源时，候选的时长不能自己跟自己对——必须跟**用户点的那首歌**比。
     // 否则「45 秒剪辑版」永远判不出来：0.7MB/45s = 130k，看着比谁都健康。
@@ -1107,6 +1147,8 @@ async function chkszLossless(song, key, opts = {}) {
     actual: song,
     lossless: true,
     ext: 'flac',
+    // 第四轮 §4.5.3 #6：缺 level 会让 cacheClassOf 与「高解析」徽标失效
+    level: /master|hires/i.test(fmt) ? 'hires' : 'lossless',
     from: 'chksz'
   }
 }
@@ -1168,6 +1210,7 @@ async function resolveLossless(song, prefer, opts = {}) {
   // ⓪ 青听网关：四家都支持、还快，先问它。失败就往下走，别处照旧
   try {
     const qing = await qingLossless(song, prefer === 'master' ? 'master' : 'lossless', opts)
+    if (stopped()) return null
     if (qing) return qing
   } catch (err) {
     logger('[qing] 解析异常 ' + err.message)
@@ -1181,6 +1224,8 @@ async function resolveLossless(song, prefer, opts = {}) {
   if (key && (song.source === 'qq' || song.source === 'kg')) {
     chkszTried = song.source + ':' + song.id
     const got = await chkszLossless(song, key, opts)
+    // 第四轮 §4.5.1 #6：取消后不能再返回/写缓存，否则被取消的那一轮仍会当结果用
+    if (stopped()) return null
     if (got) return got
   }
 
@@ -1193,9 +1238,10 @@ async function resolveLossless(song, prefer, opts = {}) {
     // 这个聚合 API 抖动挺厉害，同一首歌两次跑结果可能不同。
     // 拿不到响应（超时/502）就再问一次；但它明确回了一个非 flac 地址，说明这首确实没有，别浪费第二次。
     let j = await askUrl()
+    if (stopped()) return null
     if (!j || !j.url) {
-      if (stopped()) return null
       j = await askUrl()
+      if (stopped()) return null
     }
     if (stopped()) return null
     if (j && j.url) {
@@ -1209,6 +1255,7 @@ async function resolveLossless(song, prefer, opts = {}) {
           song.duration || 0,
           opts
         )
+        if (stopped()) return null
         if (!probed.broken && !probed.partial && !probed.unverified &&
             // v3.3.18：与青听链同一把尺子 —— 无 .flac 后缀时用实测码率确认没被塞有损档
             (/\.flac(\?|$)/i.test(j.url) || (probed.bitrate || 0) >= 700)) {
@@ -1235,6 +1282,7 @@ async function resolveLossless(song, prefer, opts = {}) {
     // 同一首已经在上面的 ① 试过一次，这里再试必然同样失败，别白扣额度
     if (tid !== chkszTried) {
       const got = await chkszLossless(target, key, opts)
+      if (stopped()) return null
       if (got) return { ...got, actual: target }
     }
   }
@@ -1251,6 +1299,9 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
   // lossless / master 都走无损链路，区别只在「要求哪一档」；拿不到都降级
   if (prefer === FLAC_PREFER || prefer === 'master') {
     const key = 'flac:' + cacheKey(song, prefer)
+    // 第四轮 §4.5.1 #8：这是全函数唯一没有 signal 检查的提前返回 ——
+    // 被 prev.abort() 取消的旧调用仍会返回 {ok:true}（靠渲染层 token 才没误播）
+    if (opts.signal && opts.signal.aborted) return null
     const hit = urlCache.get(key)
     if (hit && Date.now() - hit.at < URL_TTL_MS) {
       return { ...hit, song: hit.actual || song, fallback: false, lossless: true }
@@ -1263,8 +1314,10 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
     // 先赢时降级链的结果没人用，也要收掉。外部 signal（客户端断开/切歌）一并组合。
     const losslessCtrl = new AbortController()
     const fbCtrl = new AbortController()
-    const losslessSignal = anySignal(opts.signal, losslessCtrl.signal)
-    const fbSignal = anySignal(opts.signal, fbCtrl.signal)
+    const losslessPair = anySignalDisposable(opts.signal, losslessCtrl.signal)
+    const fbPair = anySignalDisposable(opts.signal, fbCtrl.signal)
+    const losslessSignal = losslessPair.signal
+    const fbSignal = fbPair.signal
     let fbPromise = null
     const startFallback = () => {
       if (fbPromise) return fbPromise
@@ -1307,10 +1360,13 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
       if (!losslessDone) losslessCtrl.abort()
       // 无损赢 → 降级链结果无人消费，收掉它
       if (got) fbCtrl.abort()
+      // 组合信号用完即解绑（手工回退分支会挂监听）
+      losslessPair.dispose()
+      fbPair.dispose()
     }
     if (got) {
       const rec = { ...got, at: Date.now() }
-      urlCachePut(key, rec)
+      if (!(opts.signal && opts.signal.aborted)) urlCachePut(key, rec)
       return { ...rec, song: got.actual || song, fallback: false, lossless: true }
     }
     // 降级：注意这里必须把 prefer 换回 best，各家 getUrl 只认 best / 128k
@@ -1320,10 +1376,12 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
   }
   const res = await resolvePlayable(song, prefer, opts)
   if (!res) return null
+  if (opts.signal && opts.signal.aborted) return null
   // v3.3.7：缓存命中不重写时间戳 —— 以前每次命中都续期，平台签名直链
   // 过期后反而拿不到新链，死链被无限续命
   if (res.fromCache) return res
   const up = await maybeUpgrade(res, song, prefer, opts)
+  if (opts.signal && opts.signal.aborted) return null
   urlCachePut(cacheKey(song, prefer), { ...up, at: Date.now() })
   return up
 }
@@ -1495,9 +1553,14 @@ function normText(s) {
 }
 
 /** 各源在歌手缺失时会填这些占位词，比对时必须当成「不知道」而不是「一个叫未知歌手的歌手」 */
-const UNKNOWN_ARTISTS = new Set(['未知歌手', '未知', 'unknown', '未知艺术家', 'various'])
+// 第四轮 §4.5.3 #5：四家给的占位词不止这几个，且多艺术家分隔符有 & , 、 / ; 四种
+const UNKNOWN_ARTISTS = new Set([
+  '未知歌手', '未知', 'unknown', '未知艺术家', '未知艺人', '群星', 'various',
+  'variousartists', '未知作者', 'n/a', 'na', 'null', 'undefined', '暂无歌手', '佚名'
+])
 function normArtist(v) {
-  const s = normText(String(v || '').split('/')[0])
+  const first = String(v || '').split(/[/&,、;]|\s+feat\.?\s+|\s+ft\.?\s+/i)[0]
+  const s = normText(first)
   return UNKNOWN_ARTISTS.has(s) ? '' : s
 }
 
@@ -1537,8 +1600,11 @@ function rankMatches(list, song) {
   // 兜底链空转、用户看到「放不出来」。
   // 现在：最高分够 8 就仍用 8（保持原来的严格度），否则退到「最高分的 80%，但不低于 6」。
   const floor = best >= 8 ? 8 : Math.max(6, Math.round(best * 0.8))
-  return scored
-    .filter((x) => x.score >= floor)
+  let keep = scored.filter((x) => x.score >= floor)
+  // 第四轮 §4.5.1 #7：best < 6 时 floor 仍是 6，会把「只有标题部分匹配」的候选全滤掉，
+  // 兜底链空转、用户看到「放不出来」。这种情况下退化为「取本批最高分那一档」。
+  if (!keep.length && best > 0) keep = scored.filter((x) => x.score >= best)
+  return keep
     .sort((x, y) => y.score - x.score)
     .map((x) => x.s)
 }

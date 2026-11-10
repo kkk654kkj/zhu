@@ -197,6 +197,9 @@ class Player extends Emitter {
       if (this.tracks.length) { this.index = 0; this._loadCurrent(true) }
       return
     }
+    // 第四轮 §4.6(e)：停止后 current 还在、src 已被清掉。以前直接 audio.play()，
+    // 界面显示「播放中」却没有声音、进度按插值空走（假播放）。这里重新加载当前曲。
+    if (!this.audio.src) { this._loadCurrent(true); return }
     const p = this.audio.play()
     if (p && p.catch) p.catch((err) => {
       // 自动播放策略拒绝（NotAllowedError）不是文件坏了，别触发自动跳曲
@@ -218,11 +221,31 @@ class Player extends Emitter {
     else this.play()
   }
 
+  /**
+   * 停止播放并释放当前音源。
+   *
+   * 第四轮 §4.6 补出的四个确切危害，这里一并处理：
+   *  (a) 清 src 之前必须先取 currentTime —— 否则长音轨的断点被归零写盘；
+   *  (b) 只能 emit 一次 track-leave，且要立刻把 _loadedTrack 置空 ——
+   *      否则 _loadCurrent 会再发一次 pos=0，resume.js 会把断点当成「刚开头」删掉（数据删除）；
+   *  (c) _endingHandled / _pendingSeek / _lastEndedAt 必须复位，否则下次曲末被误吞；
+   *  (d) MpvAudio.removeAttribute 推进 load 代次时也要同步 _endedEpoch（见 mpvaudio.js）。
+   */
   stop() {
     this._clearFade()
+    const prev = this._loadedTrack
+    let pos = 0
+    try { pos = Number(this.audio.currentTime) || 0 } catch (e) { pos = 0 }
     this.audio.pause()
+    if (prev) {
+      this._loadedTrack = null
+      this.emit('track-leave', prev, pos)
+    }
     this.audio.removeAttribute('src')
     try { this.audio.load() } catch {}
+    this._endingHandled = false
+    this._pendingSeek = null
+    this._lastEndedAt = 0
     this.emit('state-change', false)
   }
 

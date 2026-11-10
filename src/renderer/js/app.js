@@ -144,17 +144,28 @@ function restoreSession(session) {
   if (session.currentId) {
     const byId = queue.findIndex((t) => t.id === session.currentId)
     if (byId >= 0) startIndex = byId
-    else seekTo = 0   // 上次那首已经不在队列里，别把进度用到别的歌上
+    else { startIndex = 0; seekTo = 0 }   // 上次那首已经不在队列里，别把进度用到别的歌上
   }
+  // 第四轮 §4.3 #2：queue 已被 filter(Boolean) 压缩过，原始 index 可能越界 ——
+  // 以前只判 currentId，没有 currentId 的旧会话会直接用未压缩的 index 索引压缩后的队列，
+  // 恢复出来的「当前曲」是别的歌，概率性地每次启动都错。
+  if (!(startIndex >= 0) || startIndex >= queue.length) { startIndex = 0; seekTo = 0 }
   state.restoringSession = true
   player.setQueue(queue, startIndex, false)
   state.restoringSession = false
   player.mode = session.mode || 'list'
   UI.setMode(player.mode)
   if (seekTo) {
-    audio.addEventListener('loadedmetadata', () => {
+    // 第四轮 §4.3 #3：once 监听挂在 audio 上没有取消路径 —— 用户在这个事件到达前切歌，
+    // once 会被新曲消费，把上一首的进度 seek 进新歌（独占下 MpvAudio 的 setter 直接 mpvSeek）。
+    // 记下目标曲目，回调里比对，代次不符就丢弃。
+    const expectId = queue[startIndex] ? queue[startIndex].id : ''
+    const onMeta = () => {
+      const curId = player.current ? player.current.id : ''
+      if (expectId && curId !== expectId) return
       try { audio.currentTime = seekTo } catch (e) { /* 时长未知时忽略 */ }
-    }, { once: true })
+    }
+    audio.addEventListener('loadedmetadata', onMeta, { once: true })
   }
 }
 
@@ -164,8 +175,10 @@ function restoreSession(session) {
  */
 function setupExitHooks() {
   window.addEventListener('beforeunload', () => {
-    flushSaveSettings()
-    saveSession()
+    // 第四轮 §4.3（退出链）：flush 是 async，浏览器不等 Promise —— 这里只能「发起」。
+    // 真正保证写盘的是下面 btnClose 的串行 await，以及主进程关窗时的兜底 flush。
+    try { saveSession() } catch (e) { /* 忽略 */ }
+    Promise.resolve(flushSaveSettings()).catch(() => {})
   })
   setInterval(saveSession, 10000)
 }
@@ -222,6 +235,10 @@ async function boot() {
     const locked = st && typeof st === 'object' ? !!st.locked : false
     if (typeof st === 'object' && st.locked !== undefined) {
       state.settings.desktopLyric = { ...(state.settings.desktopLyric || {}), locked: !!st.locked }
+    }
+    // 第四轮 §4.3 #1：浮窗自己关掉时也要把内存开关同步掉，否则当前会话就继续空推 IPC
+    if (!open && state.settings.desktopLyric && state.settings.desktopLyric.enabled) {
+      state.settings.desktopLyric = { ...state.settings.desktopLyric, enabled: false }
     }
     UI.setDLyric(open, open && locked)
   })
@@ -627,10 +644,20 @@ async function toggleDesktopLyric() {
         state.settings.desktopLyric = await window.api.dlyricUnlock()
         toast('桌面歌词已解除锁定')
       } else {
+        const prevCfg = state.settings.desktopLyric || {}
         await window.api.dlyricClose()
         // v3.3.17：渲染层配置也要落成 false —— 否则 pushDesktopLyric 的开关判定仍通过，
         // 关窗后每秒还在发 4~5 次 dlyricState IPC，直到重启应用。
-        state.settings.desktopLyric = { ...(state.settings.desktopLyric || {}), enabled: false }
+        state.settings.desktopLyric = { ...prevCfg, enabled: false }
+        // 第四轮 §4.3 #1：只改内存不够，必须落盘 —— 以前重启后读回 enabled:true，
+        // 5~10Hz 的推送又开始了。写盘失败则回滚内存，别让界面与磁盘各说一套。
+        const okSave = await window.api.patchSettings({ desktopLyric: { enabled: false } })
+          .then(() => true, () => false)
+        if (!okSave) {
+          state.settings.desktopLyric = prevCfg
+          toast('桌面歌词已关闭，但状态保存失败（重启后可能自动恢复）')
+          return
+        }
         toast('桌面歌词已关闭')
       }
     } else {
@@ -2065,10 +2092,12 @@ function bindWindowUi() {
     if (max == null) return
     document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
   })
-  document.getElementById('btnClose').addEventListener('click', () => {
-    flushSaveSettings()
-    saveSession()
-    window.api.closeWindow().catch(() => {})
+  document.getElementById('btnClose').addEventListener('click', async () => {
+    // 第四轮 §4.3（退出链）：必须串行等待 —— 以前 fire-and-forget 地发 flush 后立刻关窗，
+    // 最后 300ms 内的设置改动（去抖未落盘的那一批）会直接丢掉。
+    try { saveSession() } catch (e) { /* 忽略 */ }
+    await flushSaveSettingsForExit()
+    await window.api.closeWindow().catch(() => {})
   })
 
   // 双击标题栏最大化
@@ -2832,8 +2861,18 @@ function flushSaveSettings() {
   if (saveSettingsTimer) { clearTimeout(saveSettingsTimer); saveSettingsTimer = null }
   if (!patch || !Object.keys(patch).length) return Promise.resolve()
   return window.api.patchSettings(patch).then((s) => {
-    if (s && typeof s === 'object') Object.assign(state.settings, s)
-  }).catch(() => {})
+    // 第四轮 §4.3 #4：回包是主进程的**全量** settings，以前整个 Object.assign 回来，
+    // 会把本次没提交、但渲染层刚直接赋过值的键（applyEq / btnNorm / toggleExclusiveOutputOnce）
+    // 一起覆盖回旧值。只同步本次 patch 涉及的键。
+    if (s && typeof s === 'object') {
+      for (const k of Object.keys(patch)) {
+        if (Object.prototype.hasOwnProperty.call(s, k)) state.settings[k] = s[k]
+      }
+    }
+  }).catch(() => {
+    // 以前 .catch(()=>{}) 把写盘失败吞得干干净净，用户改了设置却毫无提示
+    toast('设置保存失败（磁盘只读或被占用？）', 3000)
+  })
 }
 
 function saveSettings(patch) {

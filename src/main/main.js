@@ -221,9 +221,20 @@ function fixDriveRoot(s) {
  */
 const DANGEROUS_ROOT = /^[a-z]:[\\/]?$|^[a-z]:[\\/](windows|program files|program files \(x86\)|programdata)([\\/]|$)/i
 
+const EXTRA_FORBIDDEN_ROOT = /^[a-z]:[\\/](users[\\/](public|default|all users|default user)|program files( \(x86\))?|windows|programdata|system volume information|\$recycle\.bin)([\\/]|$)/i
 function isSafeMediaRoot(r) {
   const p = String(r == null ? '' : r).trim()
   if (!p) return false
+  // 第四轮 §4.1 #4：DANGEROUS_ROOT 是黑名单，只挡盘符根与 4 个系统目录，
+  // `\\server\share`（UNC）、`\\?\C://...`（设备路径）、`ftp://` 这类都会漏过，
+  // 变成白名单根之后整个共享/设备树都能当媒体目录读。这里显式拒绝。
+  if (!/[a-zA-Z]:[\\/]|^[\\/]{1,2}[^\\/]/.test(p)) return false
+  if (/^[\\/]{2}(\?|\\.)[\\/]/.test(p)) return false   // \\?\ 与 \\.\ 设备路径
+  if (/^[\\/]{2}/.test(p)) return false                     // UNC：\\server\share
+  if (/^[a-zA-Z]+:\/\//.test(p)) return false               // 带协议的 URL
+  // C://Users//Public 这类「所有用户可写」的共享目录同样是符号链接攻击面，
+  // DANGEROUS_ROOT 只挡了盘符根与四个系统目录，这里补一层
+  if (EXTRA_FORBIDDEN_ROOT.test(p)) return false
   return !DANGEROUS_ROOT.test(p)
 }
 
@@ -852,7 +863,17 @@ async function handleStreamRequest(req, res) {
     }
 
     const headers = buildUpstreamHeaders(info, req)
-    const opened = await openUpstream(info, headers, reqCtrl.signal)
+    let opened
+    try {
+      opened = await openUpstream(info, headers, reqCtrl.signal)
+    } catch (err) {
+      // 第四轮 §4.5.2 #1：openUpstream 抛错（握手超时 / DNS / TLS）以前直接冒到外层，
+      // 既不回 502 也不作废直链缓存 —— 死链会继续在 20 分钟缓存里被反复命中。
+      logLine('[online] 上游打开失败', (err && err.message) || err)
+      try { online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
+      if (!res.writableEnded) res.writeHead(502).end('upstream error')
+      return
+    }
     const upstream = opened.upstream
     if (clientGone) {
       try { if (upstream.body) upstream.body.cancel() } catch (e) { /* 忽略 */ }
@@ -862,6 +883,8 @@ async function handleStreamRequest(req, res) {
       logLine('[online] 上游失败', upstream.status, info.url.slice(0, 70))
       // v3.3.18：签名直链提前失效时不能让 20 分钟的直链缓存继续命中
       try { online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
+      // 第四轮 §4.5.2 #1：非 2xx 的响应体不取消会一直占着连接
+      try { if (upstream.body) upstream.body.cancel() } catch (e) { /* 忽略 */ }
       if (!res.writableEnded) res.writeHead(502).end('upstream ' + upstream.status)
       return
     }
@@ -900,7 +923,14 @@ async function handleStreamRequest(req, res) {
       part.path = null
       removePartFile(p, ps)
     }
-    // 收尾：字节数和预期一致才算缓存成功，半截的直接丢
+    // 上游是否给了「整段」的凭据：第四轮 §4.5.5 #2 指出只比 Content-Length 会被残片骗过 ——
+    // 上游对 bytes=0- 回一段 206 时，bytes === Content-Length 成立，于是残片被 rename 成完整缓存，
+    // 重播只听到开头。这里解析 Content-Range 的分母，只认「真的覆盖到 total-1」。
+    const crHdr = String((upstream.headers && upstream.headers.get && upstream.headers.get('content-range')) || '')
+    const crTotal = Number(crHdr.split('/')[1]) || 0
+    const crEnd = Number((crHdr.match(/bytes\s+\d+-(\d+)/) || [])[1])
+    const crCoversAll = !crTotal || (!Number.isNaN(crEnd) && crEnd === crTotal - 1)
+    // 收尾：字节数、Range 覆盖范围都一致才算缓存成功，半截的直接丢
     const finishCache = () => {
       if (!part.stream || !part.path) return
       const expect = Number(out['Content-Length']) || 0
@@ -916,7 +946,14 @@ async function handleStreamRequest(req, res) {
       part.stream = null
       part.path = null
       stream.end(() => {
-        if (!expect || bytes !== expect) {
+        if (!expect) {
+          // 第四轮 §4.5.2 #2：上游 chunked（无 Content-Length）时永远落不了盘，
+          // 以前是静默丢弃、也没有任何日志，排查时完全看不出「为什么缓存没生效」
+          logLine('[cache] 上游无 Content-Length（chunked），跳过缓存', key)
+          try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
+          return
+        }
+        if (bytes !== expect || !crCoversAll) {
           try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
           return
         }
@@ -1461,6 +1498,17 @@ function createWindow() {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
+  // 第四轮 §4.6：只有 setWindowOpenHandler 不够 —— 把外部文件/目录拖到非拖拽区时，
+  // Chromium 会当成「导航到 file://」，整个渲染层被替换成文件内容、状态全丢。
+  // 这里挡住一切非本应用页面（devtools 与内置页面除外），与渲染层的全局 preventDefault 纵深配合。
+  win.webContents.on('will-navigate', (event, targetUrl) => {
+    const cur = win.webContents.getURL() || ''
+    const isSelf = targetUrl === cur || targetUrl.startsWith('file://' + __dirname.replace(/\\/g, '/'))
+    if (!isSelf) {
+      event.preventDefault()
+      logLine('[win] 已拦截页面导航：' + String(targetUrl).slice(0, 120))
+    }
+  })
 
   win.webContents.on('before-input-event', (event, input) => {
     if (input.type === 'keyDown' && input.key === 'F12') {
@@ -1761,6 +1809,7 @@ let watchTimer = null
 
 /** watcher 失效后的重挂定时器（见 startWatching 的 error 回调） */
 let watchRebuildTimer = null
+let watchRebuildCount = 0   // 连续重挂次数（成功挂上就归零）
 
 function stopWatching() {
   for (const w of watchers) { try { w.close() } catch (e) { /* 已关 */ } }
@@ -1774,6 +1823,21 @@ function stopWatching() {
  * 变化后等 8 秒再扫：拷一张专辑会触发几十个事件，防抖能合成一次
  * （增量扫描本来只解析变了的文件，所以这一次很便宜）。
  */
+/**
+ * 排一次「整体重挂」：目录被删/改名、网络盘掉线、句柄耗尽、启动期不可达都走这里。
+ * 退避上限 5 分钟，避免目录长期不可用时每 30 秒狂刷一轮 fs.watch。
+ */
+function scheduleWatchRebuild() {
+  if (watchRebuildTimer) return
+  watchRebuildCount = Math.min(watchRebuildCount + 1, 4)
+  const delay = Math.min(30000 * Math.pow(2, watchRebuildCount - 1), 300000)
+  watchRebuildTimer = setTimeout(() => {
+    watchRebuildTimer = null
+    try { startWatching() } catch (e) { /* 忽略 */ }
+  }, delay)
+  if (watchRebuildTimer.unref) watchRebuildTimer.unref()
+}
+
 function startWatching() {
   stopWatching()
   const s = store.get().settings
@@ -1794,20 +1858,18 @@ function startWatching() {
         try { w.close() } catch (e) { /* 已关 */ }
         const i = watchers.indexOf(w)
         if (i >= 0) watchers.splice(i, 1)
-        // 30 秒后整体重挂一次（目录可能还在恢复中，失败就等下一次 error 再触发）
-        if (!watchRebuildTimer) {
-          watchRebuildTimer = setTimeout(() => {
-            watchRebuildTimer = null
-            try { startWatching() } catch (e) { /* 忽略 */ }
-          }, 30000)
-          if (watchRebuildTimer.unref) watchRebuildTimer.unref()
-        }
+        scheduleWatchRebuild()
       })
       watchers.push(w)
     } catch (err) {
       logLine('WARN watch 启动失败（目录不存在或无权限）', dir, err.message)
+      // 第四轮 §4.1 #6：fs.watch 对「启动期不可达」的目录是**同步抛错**，
+      // 走这里既不会产生 watcher，也就永远不会触发 error 事件 —— 自动增量入库
+      // 在整个会话里彻底失效。catch 里同样排一次重挂（30 秒后，带退避上限）。
+      scheduleWatchRebuild()
     }
   }
+  if (watchers.length) watchRebuildCount = 0
   logLine('[watch] 监视 ' + watchers.length + ' 个目录')
 }
 
@@ -1867,9 +1929,11 @@ function createTray() {
     tray.setToolTip(APP_NAME)
     refreshTrayMenu()
     tray.on('click', () => {
-      if (!win) return
+      // 第四轮 §4.1 #7：窗口被销毁后模块级 win 不会置 null，win.isVisible() 直接抛
+      // "Object has been destroyed"。统一走 showMainWindow()，它已处理销毁/最小化/隐藏
+      if (!win || win.isDestroyed()) { showMainWindow(); return }
       if (win.isVisible()) win.hide()
-      else { win.show(); win.focus() }
+      else showMainWindow()
     })
   } catch (err) {
     console.error('[tray] 创建失败:', err.message)
@@ -2397,10 +2461,16 @@ function stopMpv() {
 let deviceWatchId = null
 let lostDevice = ''
 
+let deviceWatchBusy = false
 function startDeviceWatch() {
   if (deviceWatchId || process.platform !== 'win32') return
   deviceWatchId = setInterval(async () => {
+    // 第四轮 §4.1 #8：一轮里 listDevices(4s) + restart(可 >8s) 会超过 8 秒间隔，
+    // 没有闸门就会多轮并发，重复写设置、重复发事件、重复排队 restart
+    if (deviceWatchBusy) return
     if (!mpvEngine || !mpvEngine.running || !store.get().settings.exclusiveOutput) return
+    deviceWatchBusy = true
+    try {
     // v3.3.6 / v2.8.6：抓住这一轮的引擎实例。下面 await 期间用户可能已经关了独占
     // （引擎被换掉/停掉）。这时如果还拿旧实例去 restart()，就会在「关独占」之后
     // 又起一个新的独占 mpv —— 那个进程没人管，就是一个霸着声卡的孤儿。
@@ -2450,6 +2520,7 @@ function startDeviceWatch() {
       store.patch({ settings: { audioDevice: back } })
       sendToRenderer('device-lost', { device: back, restored: true })
     }
+    } finally { deviceWatchBusy = false }
   }, 8000)
   if (deviceWatchId.unref) deviceWatchId.unref()
   logLine('[device] 开始监视输出设备（8s 一次）')
@@ -2622,24 +2693,44 @@ async function dlRun(task) {
 
     // v3.3.16：握手阶段单独限时。下载同样会卡在「连接已建立、响应头一直不来」，
     // 而 ctrl 只服务于用户暂停/删除 —— 拿它当超时会把「超时」误判成「用户暂停」。
-    const headCtrl = new AbortController()
-    const headTimer = setTimeout(() => { try { headCtrl.abort() } catch (e) { /* 忽略 */ } }, 20000)
-    let res
-    try {
-      res = await fetch(info.url, {
-        headers,
-        signal: typeof AbortSignal.any === 'function'
-          ? AbortSignal.any([ctrl.signal, headCtrl.signal])
-          : ctrl.signal,
-        redirect: 'follow'
-      })
-    } finally {
-      clearTimeout(headTimer)
+    const openOnce = async (from) => {
+      const headCtrl = new AbortController()
+      const headTimer = setTimeout(() => { try { headCtrl.abort() } catch (e) { /* 忽略 */ } }, 20000)
+      const h = { ...headers }
+      if (from > 0) h.Range = 'bytes=' + from + '-'
+      else delete h.Range
+      try {
+        return await fetch(info.url, {
+          headers: h,
+          signal: typeof AbortSignal.any === 'function'
+            ? AbortSignal.any([ctrl.signal, headCtrl.signal])
+            : ctrl.signal,
+          redirect: 'follow'
+        })
+      } finally {
+        clearTimeout(headTimer)
+      }
     }
+    let res = await openOnce(offset)
     if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status)
     // 服务端不认 Range 就会回 200 全量，这时只能从头写
     if (res.status === 200 && offset > 0) offset = 0
-    const cr = res.headers.get('content-range') || ''
+    let cr = res.headers.get('content-range') || ''
+    // 第四轮 §4.5.2 #6：续传必须校验服务端给的 Content-Range 起点**真的等于**我们请求的 offset。
+    // 以前完全不校验：服务端改回别的段（或忽略 Range 却仍回 206）时，新数据会被 append 到
+    // 已有 .part 后面，直接写出一个损坏文件，而且任务显示「下载完成」。
+    if (offset > 0) {
+      const m = cr.match(/bytes\s+(\d+)-/)
+      if (!m || Number(m[1]) !== offset) {
+        logLine('[dl] 续传起点与请求不符，丢弃残片重下', offset, cr || '(no content-range)')
+        try { if (res.body) res.body.cancel() } catch (e) { /* 忽略 */ }
+        try { fs.unlinkSync(part) } catch (e) { /* 忽略 */ }
+        offset = 0
+        res = await openOnce(0)
+        if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status)
+        cr = res.headers.get('content-range') || ''
+      }
+    }
     const len = Number(res.headers.get('content-length')) || 0
     task.total = /\/\d+/.test(cr) ? Number(cr.split('/')[1]) : (offset + len)
     task.received = offset
@@ -2830,6 +2921,9 @@ const SETTING_RANGES = {
 }
 /** 数值 map（lyricOffsetById / trackGains / resumePos / manualGains）的条数上限 */
 const SETTING_MAP_MAX = 5000
+// 第四轮 §4.1 #5：数组型设置的长度上限。超长 musicDirs 会让 startWatching() 无限
+// fs.watch，句柄耗尽后整个曲库增删都失效（历史 #26 只补了数值范围，没补长度）
+const SETTING_ARRAY_MAX = 200
 
 function clampSetting(key, v) {
   const r = SETTING_RANGES[key]
@@ -2857,7 +2951,11 @@ function sanitizeSettingsPatch(patch, template = DEFAULT_SETTINGS) {
     if (Array.isArray(tv)) {
       if (!Array.isArray(v)) continue
       if (tv.length && !v.every((x) => typeof x === typeof tv[0])) continue
-      out[k] = v.map(sanitizePlainValue)
+      if (v.length > SETTING_ARRAY_MAX) continue
+      let arr = v.map(sanitizePlainValue)
+      // musicDirs 每个元素都要是合法的白名单根，否则等于给 lxfile 开了任意目录读权限
+      if (k === 'musicDirs') arr = arr.filter((d) => typeof d === 'string' && isSafeMediaRoot(d))
+      out[k] = arr
     } else if (tv && typeof tv === 'object') {
       if (!v || typeof v !== 'object' || Array.isArray(v)) continue
       const tvKeys = Object.keys(tv)
@@ -3218,6 +3316,8 @@ function registerOnlineIpc() {
    * 而不是让 <audio> 或 mpv 直接报一个用户看不懂的错误。
    */
   const playableCtrls = new WeakMap()
+  const probeCtrls = new WeakMap()   // 第四轮 §4.5.2 #4：按 sender 取消旧的音质探测
+
   ipcMain.handle('online:playable', async (e, song) => {
     if (!song || !song.source || !song.id) return { ok: false, error: '参数不完整' }
     // v3.3.18：连点几首时旧解析链不该继续跑完（含 ChKSz 请求与 urlCache 写入）
@@ -3226,9 +3326,19 @@ function registerOnlineIpc() {
     const ctrl = new AbortController()
     playableCtrls.set(e.sender, ctrl)
     const prefer = qualityPref()
+    // 第四轮 §4.5.2 #3：online:probe 有 8s 总超时，而真正决定「点歌后多久出声」的
+    // online:playable 反而没有 —— 内部预算再全，也不该让一个 IPC 无限挂着。
+    // 无损档要等 7s/12s 的无损窗口，给 16s；其它档 12s。
+    const totalMs = (prefer === 'lossless' || prefer === 'master') ? 16000 : 12000
+    let playTimer = null
+    const timerP = new Promise((r) => { playTimer = setTimeout(() => r(null), totalMs) })
     try {
-      const info = await online.getPlayable(song, prefer, { signal: ctrl.signal })
-      if (!info) return { ok: false, error: '各音源都没有这首歌的可用地址（多半是版权限制）' }
+      const info = await Promise.race([online.getPlayable(song, prefer, { signal: ctrl.signal }), timerP])
+      if (!info) {
+        // race 输了（或上游 cancel 让 getPlayable 返回 null）→ 收掉在途请求
+        try { ctrl.abort() } catch (err) { /* 忽略 */ }
+        return { ok: false, error: '解析超时，各音源都没有及时返回可用地址（可重试或换源）' }
+      }
       const actual = info.song || song
       // v3.3.13：streamUrl 是无人读取的死字段（渲染层走 online:proxyBase 自己拼 /stream），移除
       return {
@@ -3246,6 +3356,8 @@ function registerOnlineIpc() {
     } catch (err) {
       return { ok: false, error: err.message || '解析失败' }
     } finally {
+      // 超时后必须把整条解析链收掉，否则它会在后台跑完并继续扣 ChKSz 每日额度
+      clearTimeout(playTimer)
       if (playableCtrls.get(e.sender) === ctrl) playableCtrls.delete(e.sender)
     }
   })
@@ -3282,8 +3394,13 @@ function registerOnlineIpc() {
     const ck = `${song.source}:${song.id}:${prefer}`
     const hit = probeCache.get(ck)
     if (hit && Date.now() - hit.at < PROBE_TTL) return hit.data
+    // 第四轮 §4.5.2 #4：按 sender 取消旧轮 —— 换关键词只递增渲染层的 probeToken，
+    // 已发出的 IPC 不可取消，旧轮会跑满 8s 并继续烧 ChKSz 额度。
+    const prevProbe = probeCtrls.get(e.sender)
+    if (prevProbe) { try { prevProbe.abort() } catch (err) { /* 忽略 */ } }
+    const probeCtrl = new AbortController()
+    probeCtrls.set(e.sender, probeCtrl)
     const run = async () => {
-      const probeCtrl = new AbortController()
       const probeRun = online.getPlayable(song, prefer, { signal: probeCtrl.signal })
       probeRun.catch(() => {})   // v3.3.9：超时后丢弃的那份别变成 unhandledRejection
       let probeTimer = null
@@ -3322,6 +3439,8 @@ function registerOnlineIpc() {
       return await probeLimit(run)
     } catch (err) {
       return { ok: false }
+    } finally {
+      if (probeCtrls.get(e.sender) === probeCtrl) probeCtrls.delete(e.sender)
     }
   })
 
@@ -3342,6 +3461,17 @@ function registerOnlineIpc() {
       if (t.key !== key) continue
       if (t.status === 'paused') return { ok: false, error: '这首在下载列表里（已暂停），去列表点继续', id: t.id }
       if (t.status === 'downloading' || t.status === 'queued' || t.status === 'pausing') return { ok: false, error: '这首正在下载中', id: t.id }
+      // 第四轮 §4.5.2 #8：已失败的任务直接复用并重跑，别在列表里再堆一条同 key 的
+      if (t.status === 'error') {
+        t.error = ''
+        t.received = 0
+        t.total = 0
+        t.speed = 0
+        t.status = 'queued'
+        dlBroadcast(true)
+        dlRun(t)
+        return { ok: true, id: t.id, dir: downloadDir() }
+      }
     }
     const task = {
       id: 'd' + Date.now().toString(36) + (++dlSeq),
@@ -3374,7 +3504,14 @@ function registerOnlineIpc() {
     // 且旧循环的 finally 会把新任务的 abort 控制器抹掉，任务从此无法暂停/删除
     // v3.3.13：done/error 也拒绝，避免重跑覆盖已完成/已失败的任务
     if (!t || t.status === 'downloading' || t.status === 'queued' || t.status === 'pausing' ||
-        t.status === 'done' || t.status === 'error') return { ok: false }
+        t.status === 'done') return { ok: false }
+    // 第四轮 §4.5.2 #7：error 状态必须可重试 —— UI 上的「重试」按钮以前点了没反应
+    if (t.status === 'error') {
+      t.error = ''
+      t.received = 0
+      t.total = 0
+      t.speed = 0
+    }
     t.status = 'paused'
     dlRun(t)
     return { ok: true }
@@ -3976,10 +4113,12 @@ if (!gotLock) {
 if (gotLock) cleanChromiumCache()
 {
   app.on('second-instance', async (event, argv) => {
-    if (win) {
+    if (win && !win.isDestroyed()) {
       if (!win.isVisible()) win.show()
       if (win.isMinimized()) win.restore()
       win.focus()
+    } else {
+      showMainWindow()
     }
     // v3.3.10：第二实例带的文件参数以前被完全忽略（双击关联文件/拖到 exe 上毫无反应）。
     // 应用按「文件夹」组织曲库、单文件导入尚未实现，先把路径转给渲染层给出可见反馈
