@@ -39,27 +39,28 @@ window.api.onDlyricCfg((c) => {
 })
 
 els.btnLock.addEventListener('click', () => {
-  window.api.dlyricCfg({ locked: true })
+  // 第四轮 §4.6：这些都是 async IPC，不补 catch 就是 unhandledRejection
+  window.api.dlyricCfg({ locked: true }).catch(() => {})
 })
 els.btnClose.addEventListener('click', () => {
-  window.api.dlyricClose()
+  window.api.dlyricClose().catch(() => {})
 })
 els.btnSmaller.addEventListener('click', () => {
   cfg.fontSize = Math.max(16, cfg.fontSize - 4)
   applyCfg()
-  window.api.dlyricCfg({ fontSize: cfg.fontSize })
+  window.api.dlyricCfg({ fontSize: cfg.fontSize }).catch(() => {})
 })
 els.btnBigger.addEventListener('click', () => {
   cfg.fontSize = Math.min(80, cfg.fontSize + 4)
   applyCfg()
-  window.api.dlyricCfg({ fontSize: cfg.fontSize })
+  window.api.dlyricCfg({ fontSize: cfg.fontSize }).catch(() => {})
 })
 els.btnColor.addEventListener('click', () => {
   cfg.colorIdx = (cfg.colorIdx + 1) % COLORS.length
   cfg.color = COLORS[cfg.colorIdx]
   applyCfg()
-  window.api.dlyricCfg({ color: cfg.color, colorIdx: cfg.colorIdx })
+  window.api.dlyricCfg({ color: cfg.color, colorIdx: cfg.colorIdx }).catch(() => {})
 })
 
 // 通知主进程：窗口已就绪（主进程会立刻回推一次配置）
-window.api.dlyricReady()
+window.api.dlyricReady().catch(() => {})

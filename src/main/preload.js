@@ -154,7 +154,7 @@ contextBridge.exposeInMainWorld('api', {
   powerCancel: () => invoke('power:cancel'),
   /** 播放结束后动作被触发/取消（界面用它显示倒计时与取消按钮） */
   onPowerAction: (cb) => on('power-action', cb),
-  onPowerAfterQueue: (cb) => on('power-after-queue', cb),
+  // 第四轮 §6.4：onPowerAfterQueue 是死接线（主进程从不发 power-after-queue），已移除
   /** 独占输出设备被拔掉 / 插回来 */
   onDeviceLost: (cb) => on('device-lost', cb),
   /** 第二实例带来的关联文件路径 */

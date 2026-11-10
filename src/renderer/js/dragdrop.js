@@ -9,6 +9,23 @@
  * 依赖 app.js 的全局 state / player / addTracksToPlaylist（非 module 脚本共享全局作用域）。
  */
 function bindDragAndDrop() {
+  // 第四轮 §4.6：内部拖拽只在这 3 个区域注册了 dragover/drop，没有 document 级兜底 ——
+  // 把外部文件/目录拖到别处时 Chromium 会执行「导航到 file://」，整个渲染层被替换。
+  // 只拦包含 Files 的拖放，内部行拖拽用的是自定义 data，不受影响。
+  const stopFileDrop = (e) => {
+    const types = e.dataTransfer && e.dataTransfer.types
+    if (!types) return
+    for (const t of types) {
+      if (t === 'Files') {
+        e.preventDefault()
+        e.stopPropagation()
+        return
+      }
+    }
+  }
+  document.addEventListener('dragover', stopFileDrop, true)
+  document.addEventListener('drop', stopFileDrop, true)
+
   const queueBody = document.getElementById('queueBody')
   const tableBody = document.getElementById('tableBody')
   const sidebar = document.getElementById('sidebar')

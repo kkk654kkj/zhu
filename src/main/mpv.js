@@ -603,6 +603,9 @@ class MpvEngine {
   _clearTimers() {
     if (this._wdTimer) { clearInterval(this._wdTimer); this._wdTimer = null }
     if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null }
+    // 第四轮 §4.2 #4：SIGKILL 兜底定时器以前不在清理名单里 ——
+    // kill→start 快速序列时上一轮的 800ms 定时器会留着，可能补刀到新进程
+    if (this._killTimer) { clearTimeout(this._killTimer); this._killTimer = null }
   }
 
   kill() {
@@ -671,18 +674,27 @@ class MpvEngine {
       this.kill()
       return { ok: true, exited: true, pid: null }
     }
+    let removeExit = () => {}
     const exited = new Promise((resolve) => {
       let done = false
       const onExit = () => { if (!done) { done = true; resolve(true) } }
+      removeExit = () => { try { p.removeListener('exit', onExit) } catch (e) { /* 忽略 */ } }
       p.once('exit', onExit)
       // 进程可能在我们挂监听之前就退出了
       if (p.exitCode !== null) onExit()
     })
     this.kill()
+    // 第四轮 §4.2 #4：race 的超时定时器以前既不留句柄、也不清理、也不 unref，
+    // 每次 stop() 都留一个 3 秒空定时器（退出时还会白挂住进程）
+    let raceTimer = null
     const ok = await Promise.race([
       exited,
-      new Promise((resolve) => setTimeout(() => resolve(false), timeout))
-    ])
+      new Promise((resolve) => { raceTimer = setTimeout(() => resolve(false), timeout) })
+    ]).finally(() => {
+      if (raceTimer) clearTimeout(raceTimer)
+      // 超时分支不会再有 exit 事件，监听必须摘掉，否则一直攥着 p 的引用
+      removeExit()
+    })
     if (ok) return { ok: true, exited: true, pid: p.pid }
     // 最后一刀：任务管理器式的强杀，保证不留占着声卡的孤儿
     try {

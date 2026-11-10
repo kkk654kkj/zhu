@@ -38,10 +38,16 @@ class CDP {
     return new CDP(ws)
   }
 
-  call(method, params = {}) {
+  // 第四轮 §4.6：CDP 挂起时以前会永远不退出（没有超时），整个冒烟就卡死在这里
+  call(method, params = {}, timeoutMs = 10000) {
     const id = this.id++
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error('CDP 超时（' + timeoutMs + 'ms）：' + method))
+      }, timeoutMs)
+      const wrap = (fn) => (v) => { clearTimeout(timer); fn(v) }
+      this.pending.set(id, { resolve: wrap(resolve), reject: wrap(reject) })
       this.ws.send(JSON.stringify({ id, method, params }))
     })
   }
@@ -197,7 +203,34 @@ const CASES = [
        const head = document.getElementById('vhTitle').textContent
        switchView(prev)
        return { cards, head, dirs: new Set(state.tracks.map((t) => t.dir).filter(Boolean)).size } })()`,
-    (v) => v && (v.skip === true || (v.cards > 0 && v.cards === v.dirs && v.head === '文件夹'))]
+    (v) => v && (v.skip === true || (v.cards > 0 && v.cards === v.dirs && v.head === '文件夹'))],
+
+  // ---- 主进程断言（v3.3.18 新增，第四轮 §九）----
+  // 以前 17 项全部打在渲染层，主进程零断言 —— 4 条 P1 必抛异常就是这么漏掉的
+  ['主进程：settings:patch 的 volume 越界被夹到 1',
+    `(async () => {
+       const before = state.settings.volume
+       const s = await window.api.patchSettings({ volume: 5 })
+       const good = !!(s && s.volume === 1)
+       await window.api.patchSettings({ volume: before })
+       return good
+     })()`,
+    (v) => v === true],
+
+  ['主进程：关机请求可下发可取消（不 reject）',
+    `(async () => {
+       const r = await window.api.powerSet('shutdown')
+       const c = await window.api.powerCancel()
+       return r === 'shutdown' && c !== undefined
+     })()`,
+    (v) => v === true],
+
+  ['主进程：dlyric:cfg 可写（桌面歌词配置链不抛）',
+    `(async () => {
+       const r = await window.api.dlyricCfg({ fontSize: 34 })
+       return !!r
+     })()`,
+    (v) => v === true]
 ]
 
 
@@ -229,6 +262,26 @@ async function main() {
   const cdp = await CDP.attach(target.webSocketDebuggerUrl)
   await cdp.call('Runtime.enable')
 
+  // 第四轮 §5：脚本以前不挂任何错误收集器，静态审查发现的漏 catch 冒烟永远抓不到
+  await cdp.eval(`(() => {
+    window.__smokeErrors = []
+    if (!window.__smokeHooked) {
+      window.__smokeHooked = true
+      window.addEventListener('unhandledrejection', (e) => {
+        window.__smokeErrors.push('unhandledrejection: ' + ((e.reason && (e.reason.message || e.reason)) || 'unknown'))
+      })
+      window.addEventListener('error', (e) => {
+        window.__smokeErrors.push('error: ' + (e.message || e.filename || 'unknown'))
+      })
+    }
+    return true
+  })()`)
+
+  // 静音环境必须由调用方保证（mpv 走 --ao=null），这里只做提示，不阻断
+  if (process.env.LX_TEST_MUTE !== '1') {
+    console.log('提示：未设置 LX_TEST_MUTE=1，测试期间可能会出声\n')
+  }
+
   let failed = 0
   console.log('冒烟测试 @ ' + target.url + '\n')
   for (const [name, expr, check] of CASES) {
@@ -244,6 +297,17 @@ async function main() {
     try { ok = !!check(value) } catch { ok = false }
     if (!ok) failed++
     console.log((ok ? 'PASS  ' : 'FAIL  ') + name + '   → ' + fmt(value))
+  }
+
+  // 未捕获错误必须为空 —— 有就单独计为失败项
+  let runtimeErrors = []
+  try { runtimeErrors = (await cdp.eval('window.__smokeErrors || []')) || [] } catch (e) { /* 忽略 */ }
+  if (runtimeErrors.length) {
+    failed++
+    console.log('FAIL  运行期未捕获错误 ' + runtimeErrors.length + ' 条')
+    for (const e of runtimeErrors.slice(0, 10)) console.log('       ' + e)
+  } else {
+    console.log('PASS  运行期无未捕获错误')
   }
 
   cdp.close()

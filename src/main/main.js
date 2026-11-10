@@ -6,7 +6,7 @@ const { app, BrowserWindow, ipcMain, protocol, net, dialog, shell, globalShortcu
 const path = require('path')
 const fs = require('fs')
 const fsp = require('fs/promises')
-const { execFile, execFileSync } = require('child_process')
+const { execFile } = require('child_process')
 const { pathToFileURL } = require('url')
 const { Readable } = require('stream')
 
@@ -64,18 +64,20 @@ const CACHE_DIRS = [
   'DawnWebGPUCache', 'GraphiteDawnCache', 'GrShaderCache', 'ShaderCache',
   'Shared Dictionary', 'component_crx_cache'
 ]
-function cleanChromiumCache() {
+async function cleanChromiumCache() {
+  // 第四轮 §4.2 #3：启动路径上的同步递归删除会阻塞首帧（11 个目录 × 上千文件），
+  // 改成异步并限流，删不掉（上一实例还占着）就跳过，不影响启动
   let removed = 0
-  for (const name of CACHE_DIRS) {
+  await Promise.all(CACHE_DIRS.map(async (name) => {
     const dir = path.join(DATA_DIR, name)
     try {
-      if (!fs.existsSync(dir)) continue
-      fs.rmSync(dir, { recursive: true, force: true })
+      if (!fs.existsSync(dir)) return
+      await fsp.rm(dir, { recursive: true, force: true })
       removed++
     } catch (err) {
-      // 文件被占用（例如上一实例还在跑）就跳过，不影响启动
+      // 文件被占用 → 跳过
     }
-  }
+  }))
   if (removed) logLine('stage: cache-cleaned=' + removed + ' dirs')
 }
 
@@ -115,12 +117,14 @@ function killOrphanMpv() {
     (err, stdout) => {
       if (err || !stdout) return
       const pids = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter((s) => /^\d+$/.test(s))
-      for (const pid of pids) {
-        try {
-          execFileSync('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 })
-          logLine('stage: killed-orphan-mpv=' + pid)
-        } catch {}
-      }
+      // 第四轮 §4.2 #3：同步 taskkill 每个最长 5 秒，N 个孤儿就是 N×5s 的主进程卡死。
+      // 改并发异步，全部结束再记一条日志。
+      Promise.all(pids.map((pid) => new Promise((resolve) => {
+        execFile('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 }, (e) => {
+          if (!e) logLine('stage: killed-orphan-mpv=' + pid)
+          resolve()
+        })
+      }))).catch(() => {})
     })
 }
 logLine('=== boot ===', process.argv.join(' '), 'electron', process.versions.electron)
@@ -215,9 +219,19 @@ function fixDriveRoot(s) {
   return /^[A-Za-z]:$/.test(t) ? t + path.sep : t
 }
 
+const EXTRA_FORBIDDEN_ROOT = /^[a-z]:[\\/](users[\\/](public|default|all users|default user)|program files( \(x86\))?|windows|programdata|system volume information|\$recycle\.bin)([\\/]|$)/i
 function isSafeMediaRoot(r) {
   const p = String(r == null ? '' : r).trim()
   if (!p) return false
+  // 第四轮 §4.1 #4：DANGEROUS_ROOT 是黑名单，只挡盘符根与 4 个系统目录，
+  // 共享路径（UNC）、设备路径、带协议的 URL 都会漏过；变成白名单根之后
+  // 整个共享/设备树都能当媒体目录读。这里显式拒绝。
+  if (!/[a-zA-Z]:[\\/]|^[\\/]{1,2}[^\\/]/.test(p)) return false
+  if (/^[\\/]{2}(\?|\\.)[\\/]/.test(p)) return false   // 设备路径
+  if (/^[\\/]{2}/.test(p)) return false                     // UNC
+  if (/^[a-zA-Z]+:\/\//.test(p)) return false               // 带协议的 URL
+  // 所有用户可写的共享目录同样是符号链接攻击面，DANGEROUS_ROOT 没覆盖，这里补一层
+  if (EXTRA_FORBIDDEN_ROOT.test(p)) return false
   return !DANGEROUS_ROOT.test(p)
 }
 
@@ -610,6 +624,15 @@ function createWindow() {
 
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'))
 
+  // 第四轮 §4.1 #1：第二实例可能在页面加载完成前就发来 open-files，这里补发一次
+  win.webContents.on('did-finish-load', () => {
+    if (lastOpenFiles) {
+      const payload = lastOpenFiles
+      lastOpenFiles = null
+      sendToRenderer('open-files', payload)
+    }
+  })
+
   win.once('ready-to-show', () => {
     if (bounds.maximized && !miniActive) win.maximize()
     win.show()
@@ -634,7 +657,8 @@ function createWindow() {
       // v2.4：默认每次点 × 都问一次（最小化到托盘 / 直接退出），勾了「不再提示」后按记住的选择执行
       if (st.closeAsk) {
         e.preventDefault()
-        handleCloseAsk()
+        // 第四轮 §4.2 #7：既不 await 也不 catch，抛错就是 unhandledRejection
+        handleCloseAsk().catch((err) => logLine('[win] 关闭询问失败 ' + ((err && err.message) || err)))
         return
       }
       if (st.closeToTray) {
@@ -654,6 +678,17 @@ function createWindow() {
     // v2.8.7：只放行网页链接。file:// 等任何协议都交给系统打开是不必要的攻击面
     if (/^https?:\/\//i.test(url)) shell.openExternal(url)
     return { action: 'deny' }
+  })
+  // 第四轮 §4.6：只有 setWindowOpenHandler 不够 —— 把外部文件/目录拖到非拖拽区时，
+  // Chromium 会当成「导航到 file://」，整个渲染层被替换成文件内容、状态全丢。
+  // 这里挡住一切非本应用页面（devtools 与内置页面除外），与渲染层的全局 preventDefault 纵深配合。
+  win.webContents.on('will-navigate', (event, targetUrl) => {
+    const cur = win.webContents.getURL() || ''
+    const isSelf = targetUrl === cur || targetUrl.startsWith('file://' + __dirname.replace(/\\/g, '/'))
+    if (!isSelf) {
+      event.preventDefault()
+      logLine('[win] 已拦截页面导航：' + String(targetUrl).slice(0, 120))
+    }
   })
 
   win.webContents.on('before-input-event', (event, input) => {
@@ -772,6 +807,10 @@ function runPowerAction() {
 }
 
 let powerPending = null
+// 第四轮 P1 #2：这两个标志以前只被读写、从未声明 —— 'use strict' 下赋值先抛错，
+// 被本函数的 catch 静默吞掉，「播放结束后关机」100% 失效；取消路径必抛。
+let systemShutdownPending = false
+let systemShutdownTimer = null
 /**
  * shutdown.exe 的回调。
  * 本地版此前**从未定义过这个函数**（v2.8.13 起只有调用），关机/休眠一触发就
@@ -795,7 +834,8 @@ function cancelPowerAction() {
   if (powerPending) { clearTimeout(powerPending); powerPending = null }
   if (systemShutdownTimer) { clearTimeout(systemShutdownTimer); systemShutdownTimer = null }
   systemShutdownPending = false
-  try { execFile('shutdown', ['/a'], onShutdownDone) } catch (err) { logLine('[power] 取消执行失败 ' + err.message) }
+  // 第四轮 §4.2 #5：直接传 onShutdownDone 会把 (err, stdout, stderr) 里的 stdout 当 kind
+  try { execFile('shutdown', ['/a'], (err) => onShutdownDone(err, 'shutdown')) } catch (err) { logLine('[power] 取消执行失败 ' + err.message) }
   logLine('[power] 已取消')
   refreshTrayMenu()   // v3.3.9：不然「⚠ 取消关机」菜单项一直残留
   sendToRenderer('power-action', { kind: null })
@@ -903,7 +943,8 @@ function refreshTrayMenu() {
         click: (item) => store.patch({ settings: { closeToTray: item.checked } })
       },
       { type: 'separator' },
-      ...(powerPending ? [{ label: '⚠ 取消关机 / 休眠', click: () => cancelPowerAction() }] : []),
+      // 第四轮 P1 #2：系统关机已下发（30 秒窗口）时同样要给「取消」入口
+      ...((powerPending || systemShutdownPending) ? [{ label: '⚠ 取消关机 / 休眠', click: () => cancelPowerAction() }] : []),
       { label: '退出', click: () => { quitting = true; app.quit() } }
     ]))
   } catch (err) {
@@ -957,6 +998,7 @@ let watchTimer = null
 
 /** watcher 失效后的重挂定时器（见 startWatching 的 error 回调） */
 let watchRebuildTimer = null
+let watchRebuildCount = 0   // 连续重挂次数（成功挂上就归零）
 
 function stopWatching() {
   for (const w of watchers) { try { w.close() } catch (e) { /* 已关 */ } }
@@ -970,6 +1012,21 @@ function stopWatching() {
  * 变化后等 8 秒再扫：拷一张专辑会触发几十个事件，防抖能合成一次
  * （增量扫描本来只解析变了的文件，所以这一次很便宜）。
  */
+/**
+ * 排一次「整体重挂」：目录被删/改名、网络盘掉线、句柄耗尽、启动期不可达都走这里。
+ * 退避上限 5 分钟，避免目录长期不可用时每 30 秒狂刷一轮 fs.watch。
+ */
+function scheduleWatchRebuild() {
+  if (watchRebuildTimer) return
+  watchRebuildCount = Math.min(watchRebuildCount + 1, 4)
+  const delay = Math.min(30000 * Math.pow(2, watchRebuildCount - 1), 300000)
+  watchRebuildTimer = setTimeout(() => {
+    watchRebuildTimer = null
+    try { startWatching() } catch (e) { /* 忽略 */ }
+  }, delay)
+  if (watchRebuildTimer.unref) watchRebuildTimer.unref()
+}
+
 function startWatching() {
   stopWatching()
   const s = store.get().settings
@@ -990,20 +1047,18 @@ function startWatching() {
         try { w.close() } catch (e) { /* 已关 */ }
         const i = watchers.indexOf(w)
         if (i >= 0) watchers.splice(i, 1)
-        // 30 秒后整体重挂一次（目录可能还在恢复中，失败就等下一次 error 再触发）
-        if (!watchRebuildTimer) {
-          watchRebuildTimer = setTimeout(() => {
-            watchRebuildTimer = null
-            try { startWatching() } catch (e) { /* 忽略 */ }
-          }, 30000)
-          if (watchRebuildTimer.unref) watchRebuildTimer.unref()
-        }
+        scheduleWatchRebuild()
       })
       watchers.push(w)
     } catch (err) {
       logLine('WARN watch 启动失败（目录不存在或无权限）', dir, err.message)
+      // 第四轮 §4.1 #6：fs.watch 对「启动期不可达」的目录是**同步抛错**，
+      // 走这里既不会产生 watcher，也就永远不会触发 error 事件 —— 自动增量入库
+      // 在整个会话里彻底失效。catch 里同样排一次重挂（30 秒后，带退避上限）。
+      scheduleWatchRebuild()
     }
   }
+  if (watchers.length) watchRebuildCount = 0
   logLine('[watch] 监视 ' + watchers.length + ' 个目录')
 }
 
@@ -1063,9 +1118,11 @@ function createTray() {
     tray.setToolTip(APP_NAME)
     refreshTrayMenu()
     tray.on('click', () => {
-      if (!win) return
+      // 第四轮 §4.1 #7：窗口被销毁后模块级 win 不会置 null，win.isVisible() 直接抛
+      // "Object has been destroyed"。统一走 showMainWindow()，它已处理销毁/最小化/隐藏
+      if (!win || win.isDestroyed()) { showMainWindow(); return }
       if (win.isVisible()) win.hide()
-      else { win.show(); win.focus() }
+      else showMainWindow()
     })
   } catch (err) {
     console.error('[tray] 创建失败:', err.message)
@@ -1101,6 +1158,9 @@ function registerShortcuts() {
   return failed
 }
 
+// 第四轮 §4.1 #1：第二实例带来的文件，窗口就绪后补发
+let lastOpenFiles = null
+
 function sendToRenderer(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
 }
@@ -1134,7 +1194,18 @@ function watchLyricFile(files, trackId) {
           }, 800).unref?.()
         }
       })
-      w.on('error', () => { /* 文件被删/改名，下次读的时候重建 */ })
+      // 第四轮 §4.2 #6：error 分支以前只吞错，watcher 永久失效 —— 用户在外面改 .lrc
+      // 就再也不刷新。与 rename 分支一致地 close + 摘链 + 重建。
+      w.on('error', () => {
+        if (closed) return
+        closed = true
+        try { w.close() } catch (e) { /* 已关 */ }
+        const i = lyricWatch.indexOf(w)
+        if (i >= 0) lyricWatch.splice(i, 1)
+        setTimeout(() => {
+          if (currentLyricFiles.includes(f)) watchLyricFile(currentLyricFiles, trackId)
+        }, 800).unref?.()
+      })
       lyricWatch.push(w)
     } catch (err) { /* 监视不了就算了，mtime 兜底 */ }
   }
@@ -1147,7 +1218,13 @@ const embLyricCache = new Map()
 async function readEmbeddedCached(trackId, audioPath, audioMtime) {
   if (!audioPath || !audioMtime) return null
   const hit = embLyricCache.get(trackId)
-  if (hit && hit.audioMtime === audioMtime) return hit.text
+  if (hit && hit.audioMtime === audioMtime) {
+    // 第四轮 §4.2 #6：命中不刷新顺序 → 上限实际是 FIFO，热门曲目被反复淘汰后
+    // 每次都要重新解析整首音频的标签
+    embLyricCache.delete(trackId)
+    embLyricCache.set(trackId, hit)
+    return hit.text
+  }
   const text = await readEmbeddedLyric(audioPath)
   embLyricCache.delete(trackId)   // v2.8.8：先删再插，淘汰才真的是「最久未用」
   embLyricCache.set(trackId, { audioMtime, text })
@@ -1322,11 +1399,15 @@ function onMpvEvent(evt) {
     mpvEngine.fellBack = true
     logLine('[mpv] 独占输出失败，回退共享：' + (evt.message || ''))
     pushMpvLog('warn', '独占输出失败，回退共享：' + (evt.message || ''))
+    // 第四轮 §4.2 #2：没有 catch 就是一次 unhandledRejection，界面还会停在「独占中」
     mpvEngine.restart({ exclusive: false }).then((r) => {
       pushMpvLog(r.ok ? 'warn' : 'error', r.ok ? '已重启引擎为共享输出' : '回退共享也失败：' + (r.error || ''))
       sendToRenderer('mpv:event', r.ok
         ? { type: 'fallback', message: (evt.message || ''), exclusive: false }
         : { type: 'error', message: r.error || '独占失败且回退共享也失败' })
+    }).catch((err) => {
+      pushMpvLog('error', '回退共享异常：' + ((err && err.message) || err))
+      sendToRenderer('mpv:event', { type: 'error', message: '独占失败且回退共享也失败' })
     })
     return
   }
@@ -1509,6 +1590,12 @@ function probeDeviceFree() {
       const out = (stdout || '') + (stderr || '')
       const blocked = /AUDCLNT_E_DEVICE_IN_USE|0x8889000a|EXCLUSIVE_MODE/i.test(out)
       const first = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || ''
+      // 第四轮 §4.2 #5：以前完全忽略 err —— 探测超时被杀、或根本没输出时
+      // blocked=false 会被当成「声卡已释放」，把用户引向一个必然失败的切换
+      if (!blocked && (err || !out)) {
+        resolve({ blocked: null, uncertain: true, detail: '探测未取得结论（超时或无输出）' })
+        return
+      }
       resolve({ blocked, detail: blocked ? first : '' })
     })
   })
@@ -1535,11 +1622,17 @@ function stopMpv() {
 let deviceWatchId = null
 let lostDevice = ''
 
+let deviceWatchBusy = false
 function startDeviceWatch() {
   if (deviceWatchId || process.platform !== 'win32') return
   deviceWatchId = setInterval(async () => {
+    // 第四轮 §4.1 #8：一轮里 listDevices(4s) + restart(可 >8s) 会超过 8 秒间隔，
+    // 没有闸门就会多轮并发，重复写设置、重复发事件、重复排队 restart
+    if (deviceWatchBusy) return
     if (!mpvEngine || !mpvEngine.running || !store.get().settings.exclusiveOutput) return
-    // v2.8.6：抓住这一轮的引擎实例。下面 await 期间用户可能已经关了独占
+    deviceWatchBusy = true
+    try {
+    // v3.3.6 / v2.8.6：抓住这一轮的引擎实例。下面 await 期间用户可能已经关了独占
     // （引擎被换掉/停掉）。这时如果还拿旧实例去 restart()，就会在「关独占」之后
     // 又起一个新的独占 mpv —— 那个进程没人管，就是一个霸着声卡的孤儿。
     const eng = mpvEngine
@@ -1557,9 +1650,19 @@ function startDeviceWatch() {
       lostDevice = cur
       pushMpvLog('error', '输出设备已断开：' + cur + ' → 自动切回系统默认')
       logLine('[device] 设备断开，回退系统默认：' + cur)
+      // v3.3.17：先 restart 成功再写设置与发事件。
+      // 以前顺序反了：设置被清空 + 界面收到「已切回默认」，而 restart 的返回值被丢弃 ——
+      // restart 失败（设备被别的程序独占 / 驱动还没恢复）时用户看到「已切回」却完全没声音，
+      // 而且下次启动 DAC 偏好已经丢了。
+      let ok = false
+      try { ok = !!(await eng.restart({ exclusive: true, audioDevice: '' })).ok } catch (e) { ok = false }
+      if (!ok) {
+        pushMpvLog('error', '切回系统默认设备失败，独占可能已中断')
+        sendToRenderer('device-lost', { device: cur, restored: false, error: '切回系统默认设备失败，请手动重开独占' })
+        return
+      }
       store.patch({ settings: { audioDevice: '' } })
       sendToRenderer('device-lost', { device: cur, restored: false })
-      try { await eng.restart({ exclusive: true, audioDevice: '' }) } catch {}
       return
     }
     if (!cur && lostDevice && names.has(lostDevice)) {
@@ -1567,10 +1670,18 @@ function startDeviceWatch() {
       lostDevice = ''
       pushMpvLog('info', '输出设备已接回：' + back + ' → 自动切回')
       logLine('[device] 设备接回，自动切回：' + back)
+      let ok = false
+      try { ok = !!(await eng.restart({ exclusive: true, audioDevice: back })).ok } catch (e) { ok = false }
+      if (!ok) {
+        // 接回失败：保留 lostDevice，等下一轮（8 秒后）再试，但别写进设置
+        lostDevice = back
+        pushMpvLog('warn', '设备已插回但切换失败，稍后重试：' + back)
+        return
+      }
       store.patch({ settings: { audioDevice: back } })
       sendToRenderer('device-lost', { device: back, restored: true })
-      try { await eng.restart({ exclusive: true, audioDevice: back }) } catch {}
     }
+    } finally { deviceWatchBusy = false }
   }, 8000)
   if (deviceWatchId.unref) deviceWatchId.unref()
   logLine('[device] 开始监视输出设备（8s 一次）')
@@ -1583,12 +1694,19 @@ function stopDeviceWatch() {
 
 /* ---------------- IPC ---------------- */
 
+// 第四轮 P1 #3：sanitizePlainValue / sanitizeSettingsPatch 都在用这个集合，但本地版
+// 从未声明过 —— 桌面歌词配置每次保存都在第一行 `.has(k)` 抛 ReferenceError，配置全废
+const FORBIDDEN_SETTING_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
 /** 已知数值键的取值范围（防止 volume=5 / fadeMs=-1000 这类值直接落盘） */
 const SETTING_RANGES = {
   volume: [0, 1],
   fadeMs: [0, 3000],
   lyricFontSize: [8, 200],
-  lyricOffset: [-60, 60]
+  lyricOffset: [-60, 60],
+  targetLufs: [-40, 0],
+  windowWidth: [200, 10000],
+  windowHeight: [200, 10000]
 }
 /** 数值 map（lyricOffsetById / trackGains / manualGains / resumePos）的条数上限 */
 const SETTING_MAP_MAX = 5000
@@ -1624,7 +1742,11 @@ function sanitizeSettingsPatch(patch, template = DEFAULT_SETTINGS) {
     if (Array.isArray(tv)) {
       if (!Array.isArray(v)) continue
       if (tv.length && !v.every((x) => typeof x === typeof tv[0])) continue
-      out[k] = v.map(sanitizePlainValue)
+      if (v.length > SETTING_ARRAY_MAX) continue
+      let arr = v.map(sanitizePlainValue)
+      // musicDirs 每个元素都要是合法的白名单根，否则等于给 lxfile 开了任意目录读权限
+      if (k === 'musicDirs') arr = arr.filter((d) => typeof d === 'string' && isSafeMediaRoot(d))
+      out[k] = arr
     } else if (tv && typeof tv === 'object') {
       if (!v || typeof v !== 'object' || Array.isArray(v)) continue
       const tvKeys = Object.keys(tv)
@@ -1729,15 +1851,15 @@ function registerSettingsIpc() {
   ipcMain.handle('settings:get', () => store.get().settings)
   ipcMain.handle('settings:patch', (e, patch) => {
     const before = store.get().settings || {}
-    // v2.8.8：键白名单 —— 只放行默认设置里已有的键，挡住未知键注入
-    const allowed = new Set(Object.keys(before))
-    const filtered = {}
+    // 第四轮 P1 #4：以前只做键白名单，**值完全不校验** —— volume:5 直接落盘后
+    // audio.volume 赋值抛 IndexSizeError、fadeMs:-1000 让淡入淡出反向、
+    // musicDirs 写入任意类型。改成按 DEFAULT_SETTINGS 形状做值校验 + 递归防原型污染。
+    const filtered = sanitizeSettingsPatch(patch, DEFAULT_SETTINGS)
     const blocked = []
-    for (const [k, v] of Object.entries(patch && typeof patch === 'object' ? patch : {})) {
-      if (allowed.has(k)) filtered[k] = v
-      else blocked.push(k)
+    for (const k of Object.keys(patch && typeof patch === 'object' ? patch : {})) {
+      if (!Object.prototype.hasOwnProperty.call(filtered, k)) blocked.push(k)
     }
-    if (blocked.length) logLine('[settings] 拒绝未知设置键:', blocked.join(', '))
+    if (blocked.length) logLine('[settings] 拒绝非法/未知设置键:', blocked.join(', '))
     const prevDirs = JSON.stringify(before.musicDirs || [])
     const prevWatch = before.watchFolders
     const next = store.patch({ settings: filtered }).settings
@@ -2388,13 +2510,15 @@ if (!gotLock) {
 }
 
 // 只在确认是唯一实例时清缓存：多实例情况下删的是正在运行实例的文件（多半删不掉）
-if (gotLock) cleanChromiumCache()
+if (gotLock) cleanChromiumCache().catch(() => {})
 {
   app.on('second-instance', async (event, argv) => {
-    if (win) {
+    if (win && !win.isDestroyed()) {
       if (!win.isVisible()) win.show()
       if (win.isMinimized()) win.restore()
       win.focus()
+    } else {
+      showMainWindow()
     }
     // v3.3.10：第二实例带的文件参数以前被完全忽略（双击关联文件/拖到 exe 上毫无反应）。
     // 应用按「文件夹」组织曲库、单文件导入尚未实现，先把路径转给渲染层给出可见反馈
@@ -2489,6 +2613,10 @@ if (gotLock) cleanChromiumCache()
   // 以前 stopMpv 的 Promise 没 await，后面的同步清扫还会阻塞事件循环，
   // 让「等 mpv 进程退出」形同虚设；进程万一没死透就退出，声卡就被孤儿占着。
   let quitCleanupDone = false
+  // 第四轮 P1 #1：before-quit 第一行就读 cleanupStarted，本地版从未声明 ——
+  // 严格模式下立即抛错，而且发生在 event.preventDefault() 之前，整条退出收敛链
+  // （stopMpv / sweepOurMpv / store.flush / tray.destroy）根本没跑，留下霸占声卡的孤儿 mpv
+  let cleanupStarted = false
   app.on('before-quit', (event) => {
     // v3.3.13：一进入就置位，清理窗口内重复 app.quit() 不再重复跑整条链；
     // 未清理完前顺手 preventDefault，避免重复退出请求把进程提前带走、腰斩清理

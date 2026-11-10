@@ -13,6 +13,8 @@ const RESUME_MIN_POS = 30         // 少于 30 秒当作「刚开头」，不记
 
 /** 播放器在切歌 / 暂停 / 定时保存时调用，把位置写进设置（带去抖与变化阈值） */
 function rememberResume(id, pos) {
+  // 第四轮 §4.6：NaN / 负数没有校验 —— NaN 落盘会变成 JSON null，读回来又是 NaN
+  if (!Number.isFinite(pos) || pos < 0) return
   const t = state.byId.get(id)
   if (!t) return
   const dur = t.duration || 0

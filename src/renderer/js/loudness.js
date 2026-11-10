@@ -141,6 +141,11 @@ function analyzeBuffer(buf, targetLufs, maxSeconds = 1800) {
   if (maxByPeak < gain) gain = Math.max(maxByPeak, -20)
   gain = Math.max(-20, Math.min(12, gain))
 
+  // 第四轮 §4.6：NaN/Infinity 样本会一路穿透算出 gain:NaN，落盘后 JSON 变 null，
+  // 本会话还会喂给 AudioFx.setTrackGain（旧版不判会把整条链弄静音）
+  if (![lufs, peakDb, gain].every((v) => Number.isFinite(v))) {
+    throw new Error('响度分析结果无效（样本含 NaN/Infinity）')
+  }
   return {
     lufs: Math.round(lufs * 10) / 10,
     peakDb: Math.round(peakDb * 10) / 10,

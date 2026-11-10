@@ -120,7 +120,10 @@ const AudioFx = {
   /** 每曲增益（dB）——音量均衡/手动增益都走这里 */
   setTrackGain(db) {
     if (!this.ctx || !this.trackGain) return
-    const lin = Math.pow(10, Math.max(-20, Math.min(20, db)) / 20)
+    // 第四轮 §4.6：NaN 会一路穿透 —— Math.min(20, NaN) 仍是 NaN，
+    // setTargetAtTime(NaN) 会让整条链静音且不报错
+    if (!Number.isFinite(Number(db))) return
+    const lin = Math.pow(10, Math.max(-20, Math.min(20, Number(db))) / 20)
     this.trackGain.gain.setTargetAtTime(lin, this.ctx.currentTime, 0.05)
   },
 
@@ -170,6 +173,13 @@ const AudioFx = {
     // 防止重复调用叠出多条 rAF 循环
     if (this._raf) cancelAnimationFrame(this._raf)
     this._raf = 0
+    // 第四轮 §4.6：隐藏期间 _loop 不再排帧，回到可见时必须有人把它拉起来
+    if (!this._visBound) {
+      this._visBound = true
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && this._canvas && !this._raf) this._loop()
+      })
+    }
     this._loop()
   },
 
@@ -181,7 +191,7 @@ const AudioFx = {
 
   _resizeCanvas() {
     const c = this._canvas
-    if (!c) return
+    if (!c || !this._cctx) return   // 第四轮 §4.6：上下文已释放时不再访问
     const dpr = window.devicePixelRatio || 1
     const w = Math.max(1, Math.round(c.clientWidth))
     const h = Math.max(1, Math.round(c.clientHeight))
@@ -197,11 +207,29 @@ const AudioFx = {
   },
 
   _loop() {
+    // 第四轮 §4.6：窗口隐藏时不再排下一帧 —— 以前只跳过绘制，rAF 仍在 60fps 空转，
+    // 笔记本合盖/最小化后仍在烧 CPU。恢复可见时由 visibilitychange 重新拉起。
+    if (document.hidden) { this._raf = 0; return }
     this._raf = requestAnimationFrame(() => this._loop())
     const c = this._canvas
     if (!c) return
-    if (document.hidden) return
     this._draw()
+  },
+
+  /** 释放音频链与 rAF（v3.3.18，第四轮 §4.6）：切引擎/关窗口时不再泄漏 AudioContext */
+  dispose() {
+    if (this._raf) { try { cancelAnimationFrame(this._raf) } catch (e) { /* 忽略 */ } this._raf = 0 }
+    if (this._ro) { try { this._ro.disconnect() } catch (e) { /* 忽略 */ } this._ro = null }
+    try { if (this.ctx && this.ctx.state !== 'closed') this.ctx.close() } catch (e) { /* 忽略 */ }
+    this.ctx = null
+    this.srcNode = null
+    this.trackGain = null
+    this.preamp = null
+    this.analyser = null
+    this.filters = []
+    this.failed = false
+    this._canvas = null
+    this._cctx = null
   },
 
   _draw() {

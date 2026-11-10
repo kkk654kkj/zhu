@@ -32,6 +32,8 @@ const state = {
   skipTimer: null,
   mini: false,           // 迷你模式（窗口尺寸由主进程管，这里管布局）
   exclusive: false,      // 独占输出（mpv 后端）是否生效
+  exclusiveFellBack: false, // mpv 已自行回退到 WASAPI 共享（后端仍是 mpv，不再是位完美）
+  audioGraphReady: false,   // WebAudio 链是否真的建起来了（EQ / 音量均衡 / 频谱的唯一生效前提）
   resumePos: {},         // 长音轨断点位置 {trackId: 秒}（v1.6）
   restoringSession: false,// 正在恢复上次会话（此时不要叠加断点续播）
   selected: new Set(),   // 列表多选（v1.7）
@@ -142,17 +144,28 @@ function restoreSession(session) {
   if (session.currentId) {
     const byId = queue.findIndex((t) => t.id === session.currentId)
     if (byId >= 0) startIndex = byId
-    else seekTo = 0   // 上次那首已经不在队列里，别把进度用到别的歌上
+    else { startIndex = 0; seekTo = 0 }   // 上次那首已经不在队列里，别把进度用到别的歌上
   }
+  // 第四轮 §4.3 #2：queue 已被 filter(Boolean) 压缩过，原始 index 可能越界 ——
+  // 以前只判 currentId，没有 currentId 的旧会话会直接用未压缩的 index 索引压缩后的队列，
+  // 恢复出来的「当前曲」是别的歌，概率性地每次启动都错。
+  if (!(startIndex >= 0) || startIndex >= queue.length) { startIndex = 0; seekTo = 0 }
   state.restoringSession = true
   player.setQueue(queue, startIndex, false)
   state.restoringSession = false
   player.mode = session.mode || 'list'
   UI.setMode(player.mode)
   if (seekTo) {
-    audio.addEventListener('loadedmetadata', () => {
+    // 第四轮 §4.3 #3：once 监听挂在 audio 上没有取消路径 —— 用户在这个事件到达前切歌，
+    // once 会被新曲消费，把上一首的进度 seek 进新歌（独占下 MpvAudio 的 setter 直接 mpvSeek）。
+    // 记下目标曲目，回调里比对，代次不符就丢弃。
+    const expectId = queue[startIndex] ? queue[startIndex].id : ''
+    const onMeta = () => {
+      const curId = player.current ? player.current.id : ''
+      if (expectId && curId !== expectId) return
       try { audio.currentTime = seekTo } catch (e) { /* 时长未知时忽略 */ }
-    }, { once: true })
+    }
+    audio.addEventListener('loadedmetadata', onMeta, { once: true })
   }
 }
 
@@ -162,8 +175,10 @@ function restoreSession(session) {
  */
 function setupExitHooks() {
   window.addEventListener('beforeunload', () => {
-    flushSaveSettingsForExit()
-    saveSession()
+    // 第四轮 §4.3（退出链）：浏览器不等 Promise，这里只能「发起」；
+    // 真正保证写盘的是 btnClose 的串行 await 与主进程关窗时的兜底 flush
+    try { saveSession() } catch (e) { /* 忽略 */ }
+    flushSaveSettingsForExit().catch(() => {})
   })
   setInterval(saveSession, 10000)
 }
@@ -220,6 +235,10 @@ async function boot() {
     const locked = st && typeof st === 'object' ? !!st.locked : false
     if (typeof st === 'object' && st.locked !== undefined) {
       state.settings.desktopLyric = { ...(state.settings.desktopLyric || {}), locked: !!st.locked }
+    }
+    // 第四轮 §4.3 #1：浮窗自己关掉时也要把内存开关同步掉，否则当前会话就继续空推 IPC
+    if (!open && state.settings.desktopLyric && state.settings.desktopLyric.enabled) {
+      state.settings.desktopLyric = { ...state.settings.desktopLyric, enabled: false }
     }
     UI.setDLyric(open, open && locked)
   })
@@ -402,9 +421,22 @@ function applySettings() {
  */
 function setupAudioGraph() {
   const ok = AudioFx.init(audio)
+  state.audioGraphReady = !!ok
   if (!ok) toast('音频特效不可用，将以原声播放')
   return ok
 }
+
+/**
+ * EQ / 音量均衡 / 手动增益 / 频谱是否被禁用。
+ * v3.3.18（第四轮 P1 #8）：判据从「state.exclusive」改成「WebAudio 链没建起来」——
+ * 独占回退共享后 audio 仍是 MpvAudio、AudioFx.ctx 始终为 null，以前靠 state.exclusive
+ * 判定会在回退后误放行，用户拖滑块毫无效果却照样落盘。
+ */
+function eqBlocked() {
+  return state.exclusive || !state.audioGraphReady
+}
+
+const EQ_BLOCKED_MSG = '独占输出下均衡器/音量均衡不可用（软件处理会破坏位完美）'
 
 /** 当前曲目应施加的增益（dB）：手动优先，其次按开关取分析值 */
 function trackGainDb(id) {
@@ -500,7 +532,7 @@ async function analyzeLibraryLoudness() {
 
   state.analyzing = true
   state.abortAnalysis = false
-  UI.showScan('正在分析响度…')
+  UI.showScan('正在分析响度…', 'analyze')
   const target = state.settings.targetLufs || LUFS_DEFAULT_TARGET
   const gains = Object.assign({}, state.settings.trackGains || {})
   let done = 0
@@ -532,7 +564,6 @@ async function analyzeLibraryLoudness() {
     // v3.3.17：中途点了「清除分析数据」就不要再写回 —— 以前分析收尾无条件把
     // 开头快照的 gains 落盘，用户刚清除的数据会整批复活。
     if (state.gainsCleared) {
-      state.gainsCleared = false
       state.settings.trackGains = {}
       applyTrackGain(state.currentId)
       toast('响度分析已中止，数据已清除')
@@ -552,7 +583,8 @@ async function analyzeLibraryLoudness() {
     toast('响度分析失败：' + (err && err.message))
   } finally {
     state.analyzing = false
-    UI.hideScan()
+    state.gainsCleared = false   // 第四轮 §4.4 #1：异常路径也必须复位，否则下一轮正常分析会被整批丢弃
+    UI.hideScan('analyze')
   }
 }
 
@@ -610,10 +642,20 @@ async function toggleDesktopLyric() {
         state.settings.desktopLyric = await window.api.dlyricUnlock()
         toast('桌面歌词已解除锁定')
       } else {
+        const prevCfg = state.settings.desktopLyric || {}
         await window.api.dlyricClose()
         // v3.3.17：渲染层配置也要落成 false —— 否则 pushDesktopLyric 的开关判定仍通过，
         // 关窗后每秒还在发 4~5 次 dlyricState IPC，直到重启应用。
-        state.settings.desktopLyric = { ...(state.settings.desktopLyric || {}), enabled: false }
+        state.settings.desktopLyric = { ...prevCfg, enabled: false }
+        // 第四轮 §4.3 #1：只改内存不够，必须落盘 —— 以前重启后读回 enabled:true，
+        // 5~10Hz 的推送又开始了。写盘失败则回滚内存，别让界面与磁盘各说一套。
+        const okSave = await window.api.patchSettings({ desktopLyric: { enabled: false } })
+          .then(() => true, () => false)
+        if (!okSave) {
+          state.settings.desktopLyric = prevCfg
+          toast('桌面歌词已关闭，但状态保存失败（重启后可能自动恢复）')
+          return
+        }
         toast('桌面歌词已关闭')
       }
     } else {
@@ -1036,7 +1078,7 @@ function bindPlayer() {
     if (cur) { state.lastErrKey = cur.id; state.lastErrAt = Date.now() }
 
     // 独占模式下多半是声卡/引擎问题，不是文件坏了：绝不自动跳曲。
-    // （fallback 时 onMpvEvent / audio 'fallback' 已把 state.exclusive 同步为 false）
+    // （v3.3.18 起回退共享只置 state.exclusiveFellBack，后端仍是 mpv，判据不变）
     if (state.exclusive) {
       toast('音频输出失败：' + ((audio && audio.lastError) || '设备不可用，已暂停'))
       player.pause()
@@ -1110,12 +1152,19 @@ function audioFormatLabel(f) {
 }
 
 /** 是否真的处于位完美状态：独占 + 未被回退 + 输出格式已知且与源一致 + 音量 100% */
-/** 独占失败自动回退共享：把运行时状态与所有派生 UI 一次性同步到 false */
+/**
+ * 独占失败自动回退共享：把运行时状态与所有派生 UI 一次性同步。
+ *
+ * v3.3.18（第四轮 P1 #8）：**不能**把 state.exclusive 置 false。回退的是 mpv 的
+ * WASAPI 共享模式，audio 仍是 MpvAudio，WebAudio 链从来没建过。以前在这里置 false，
+ * 导致下游 7 处「独占下禁用」判据全部误放行：EQ / 音量均衡 / 响度分析 / 手动增益
+ * 可操作但无效还照旧落盘；DSD 被误拦；keepAliveMediaSession 走错分支导致 SMTC 失效；
+ * player.on('error') 进入共享的失败连跳（设备类错误连跳 3 首）。
+ * 现在只立 exclusiveFellBack 供徽标显示，后端语义保持不变。
+ */
 function applyExclusiveFallback() {
-  state.exclusive = false
-  // v3.3.17：回退后**不能**恢复 EQ/音量均衡。回退的是 mpv 的 WASAPI 共享模式，
-  // audio 仍是 MpvAudio，setupAudioGraph() 从来没跑过（独占分支不走 WebAudio）——
-  // 按钮恢复可用只会让用户拖半天滑块毫无效果，还照样落盘。
+  state.exclusiveFellBack = true
+  // 回退后**不能**恢复 EQ：WebAudio 链仍不存在，按钮可点只会让用户白折腾
   UI.setEqDisabled(true)
   UI.setSpectrumVisible(false)
   UI.setNorm(false)
@@ -1681,7 +1730,7 @@ function bindTransportUi() {
 
   // 音量均衡开关 + 右键菜单（分析 / 目标响度 / 清除）
   document.getElementById('btnNorm').addEventListener('click', () => {
-    if (state.exclusive) { toast('独占输出下音量均衡不可用（会破坏位完美）'); return }
+    if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
     const on = !(state.settings.normalizeVolume === true)
     state.settings.normalizeVolume = on
     saveSettings({ normalizeVolume: on })
@@ -1692,7 +1741,7 @@ function bindTransportUi() {
   })
   document.getElementById('btnNorm').addEventListener('contextmenu', (e) => {
     e.preventDefault()
-    if (state.exclusive) { toast('独占输出下响度分析不可用（会破坏位完美）'); return }
+    if (eqBlocked()) { toast('响度分析需要 WebAudio 链：当前输出下不可用'); return }
     const target = state.settings.targetLufs || LUFS_DEFAULT_TARGET
     const lufsItems = [-14, -16, -18, -20].map((v) => ({
       label: `${v} LUFS${v === target ? ' ✓' : ''}`,
@@ -1750,7 +1799,7 @@ function bindEqUi() {
   // 均衡器面板（独占输出下禁用：任何软件处理都会破坏位完美）
   document.getElementById('btnEq').addEventListener('click', (e) => {
     e.stopPropagation()
-    if (state.exclusive) { toast('独占输出下均衡器不可用（会破坏位完美）'); return }
+    if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
     UI.toggleEq()
   })
 
@@ -1769,22 +1818,28 @@ function bindEqUi() {
   })
   document.getElementById('btnEqClose').addEventListener('click', () => UI.toggleEq(false))
   document.getElementById('btnEqPower').addEventListener('click', () => {
+    // v3.3.18（P1 #8）：滑块虽已 el.disabled，按钮仍是可点的，这里补齐早退
+    if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
     const cfg = eqSettings()
     cfg.enabled = !cfg.enabled
     applyEq(cfg)
     toast(cfg.enabled ? '均衡器已开启' : '均衡器已关闭')
   })
   document.getElementById('btnEqFlat').addEventListener('click', () => {
+    if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
     applyEq({ enabled: eqSettings().enabled, preset: 'flat', bands: EQ_PRESETS.flat.bands.slice() })
   })
   document.getElementById('eqPresets').addEventListener('click', (e) => {
     const chip = e.target.closest('.eq-chip')
-    if (chip) applyEqPreset(chip.dataset.preset)
+    if (!chip) return
+    if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
+    applyEqPreset(chip.dataset.preset)
   })
   // 滑块：input 拖动实时生效（applyEq 内部 300ms 去抖落盘）
   const onEqSlider = (e) => {
     const el = e.target
     if (!el.matches || !el.matches('#eqBands input[type="range"]')) return
+    if (eqBlocked()) return
     setEqBand(Number(el.dataset.i), el.value)
   }
   document.getElementById('eqBands').addEventListener('input', debounce(onEqSlider, 30))
@@ -1854,9 +1909,12 @@ function bindWindowUi() {
     if (max == null) return
     document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
   })
-  document.getElementById('btnClose').addEventListener('click', () => {
-    saveSession()
-    window.api.closeWindow()
+  document.getElementById('btnClose').addEventListener('click', async () => {
+    // 第四轮 §4.3（退出链）：必须串行等待 —— 以前发完 flush 立刻关窗，
+    // 最后 300ms 内的设置改动（去抖未落盘的那批）直接丢掉
+    try { saveSession() } catch (e) { /* 忽略 */ }
+    await flushSaveSettingsForExit()
+    await window.api.closeWindow().catch(() => {})
   })
 
   // 双击标题栏最大化
@@ -1919,15 +1977,17 @@ function bindBar(el, onCommit, onPreview, onReset) {
     if (!dragging) return
     onPreview(ratioOf(e))
   })
-  const end = (e) => {
+  // 第四轮 §4.4 #4：pointercancel（滚动/手势打断）以前与 pointerup 共用 end()，
+  // 会把「取消」当成一次真实提交 → 非预期 seek / 音量突变
+  const end = (e, commit) => {
     if (!dragging) return
     dragging = false
     try { el.releasePointerCapture(e.pointerId) } catch {}
-    onCommit(ratioOf(e))
+    if (commit) onCommit(ratioOf(e))
     onReset()
   }
-  el.addEventListener('pointerup', end)
-  el.addEventListener('pointercancel', end)
+  el.addEventListener('pointerup', (e) => end(e, true))
+  el.addEventListener('pointercancel', (e) => end(e, false))
 }
 
 /* ================= 右键菜单 ================= */
@@ -2102,7 +2162,7 @@ async function handleCtxAction(act, arg) {
       break
     }
     case 'set-gain': {
-      if (state.exclusive) { toast('独占输出下手动增益不可用（会破坏位完美）'); return }
+      if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
       const db = parseFloat(arg)
       if (Number.isNaN(db)) return
       const manualGains = Object.assign({}, state.settings.manualGains || {})
@@ -2225,12 +2285,12 @@ async function doScan() {
   // 与响度分析互斥（共用扫描遮罩，同时跑会互相覆盖进度并提前关遮罩）
   if (state.analyzing) { toast('正在分析响度，稍后再扫描'); return }
   scanning = true
-  UI.showScan('正在扫描音乐文件夹…')
+  UI.showScan('正在扫描音乐文件夹…', 'scan')
   try {
     const dirs = state.settings.musicDirs && state.settings.musicDirs.length
       ? state.settings.musicDirs
       : await window.api.pickDirs()
-    if (!dirs.length) { UI.hideScan(); scanning = false; return }
+    if (!dirs.length) { UI.hideScan('scan'); scanning = false; return }
     if (dirs !== state.settings.musicDirs) {
       state.settings.musicDirs = dirs
       await window.api.patchSettings({ musicDirs: dirs })
@@ -2240,14 +2300,14 @@ async function doScan() {
     // 以前照样提示「扫描完成」并收起遮罩，用户看到的是半成品数据。
     if (res && res.skipped) {
       toast('已有扫描在进行，完成后自动刷新', 2500)
-      UI.hideScan()
+      UI.hideScan('scan')
       return
     }
     const tracks = await window.api.listTracks()
     setTracks(tracks)
     updateNavCounts()
     renderView()
-    UI.hideScan()
+    UI.hideScan('scan')
     const bits = []
     if (res.added) bits.push('新增 ' + res.added)
     if (res.updated) bits.push('更新 ' + res.updated)
@@ -2260,11 +2320,11 @@ async function doScan() {
     toast(`扫描完成：${res.total} 首` + (bits.length ? `（${bits.join('，')}）` : ''), bits.length > 1 ? 4000 : 1800)
   } catch (err) {
     console.error('[scan]', err)
-    UI.hideScan()
+    UI.hideScan('scan')
     toast('扫描失败：' + err.message)
   } finally {
     scanning = false
-    UI.hideScan()
+    UI.hideScan('scan')
     // 诊断面板开着时同步刷新失败清单（扫描往往就是用户打开面板的原因）
     if (typeof Diag !== 'undefined' && Diag.isOpen()) Diag.loadFailures()
   }
@@ -2286,6 +2346,8 @@ function onScanProgress(p) {
  */
 async function onScanDone(res) {
   if (scanning) return
+  // 第四轮 §4.4 #3：分析进行中不能重建表格/覆盖遮罩进度（两者共用一块遮罩）
+  if (state.analyzing) return
   // 目录不可访问时主进程会跳过清理，这种 scan-done 不能动队列
   if (res && res.skipped) return
   try {
@@ -2309,10 +2371,13 @@ async function onScanDone(res) {
           // 当前曲还在：直接换 tracks，不打断播放。
           // v3.3.17：洗牌池里存的是**下标**，裁剪后所有下标都平移了 ——
           // 不重建的话随机模式会指向错的歌（同一首连播、有的整轮不出现）。
-          player.tracks = kept
-          player.index = idx
-          // 重建为顺序下标：本轮随机顺序会重置（下一轮重新洗），但绝不会越界或指错
-          player._shufflePool = kept.map((_, i) => i)
+          // 第四轮 §4.4 #2：以前这里给的是「顺序下标」，随机模式整轮变顺序播放。
+          // 用 _buildShufflePool() 真正重洗，并保持 index 指向同一首歌。
+          // 同时用 byId 里的新对象替换旧引用，否则队列/播放条元数据与表格不一致。
+          const newIdx = kept.indexOf(curTrack)
+          player.tracks = kept.map((t) => state.byId.get(t.id) || t)
+          player.index = newIdx >= 0 ? newIdx : idx
+          player._buildShufflePool()
           player.emit('queue-change', player.tracks, player.index)
         }
       }
@@ -2412,6 +2477,7 @@ function enforceAbLoop(cur) {
  * （体积 0 的 8bit WAV，音量 0.001 —— 不能设 0，Chromium 认为"静音"就不算 audible）。
  */
 let mediaKeepAlive = null
+let silentWavCached = ''   // 静音 WAV 的 Blob URL 只建一次，避免每轮重建泄漏
 let mediaPosAt = 0
 
 function silentWavUrl(seconds = 0.2, rate = 8000) {
@@ -2484,10 +2550,16 @@ function keepAliveMediaSession(playing) {
   }
   try {
     if (!mediaKeepAlive) {
-      mediaKeepAlive = new Audio(silentWavUrl())
+      // 第四轮 §4.6：每次重建都新建一个 Blob URL，旧的不 revoke 也不 pause ——
+      // 长会话里 error 一次就漏一份。这里复用同一个 URL，旧元素先 pause + 清 src。
+      if (!silentWavCached) silentWavCached = silentWavUrl()
+      mediaKeepAlive = new Audio(silentWavCached)
       mediaKeepAlive.loop = true
       mediaKeepAlive.volume = 0.001
-      mediaKeepAlive.addEventListener('error', () => { mediaKeepAlive = null })
+      mediaKeepAlive.addEventListener('error', () => {
+        try { mediaKeepAlive.pause() } catch (e) { /* 忽略 */ }
+        mediaKeepAlive = null
+      })
     }
     if (playing) {
       if (mediaKeepAlive.paused) mediaKeepAlive.play().catch(() => {})
@@ -2616,8 +2688,18 @@ function flushSaveSettings() {
   if (saveSettingsTimer) { clearTimeout(saveSettingsTimer); saveSettingsTimer = null }
   if (!patch || !Object.keys(patch).length) return Promise.resolve()
   return window.api.patchSettings(patch).then((s) => {
-    if (s && typeof s === 'object') Object.assign(state.settings, s)
-  }).catch(() => {})
+    // 第四轮 §4.3 #4：回包是主进程的**全量** settings，以前整个 Object.assign 回来，
+    // 会把本次没提交、但渲染层刚直接赋过值的键（applyEq / btnNorm / toggleExclusiveOutputOnce）
+    // 一起覆盖回旧值。只同步本次 patch 涉及的键。
+    if (s && typeof s === 'object') {
+      for (const k of Object.keys(patch)) {
+        if (Object.prototype.hasOwnProperty.call(s, k)) state.settings[k] = s[k]
+      }
+    }
+  }).catch(() => {
+    // 以前 .catch(()=>{}) 把写盘失败吞得干干净净，用户改了设置却毫无提示
+    toast('设置保存失败（磁盘只读或被占用？）', 3000)
+  })
 }
 
 function saveSettings(patch) {

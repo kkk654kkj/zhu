@@ -43,7 +43,8 @@ const Diag = {
       const btn = e.target.closest('[data-reveal]')
       if (!btn) return
       const p = btn.getAttribute('data-reveal')
-      if (p) window.api.showInFolder(p)
+      // 第四轮 §4.6：这些 IPC 都是 async，没有 catch 就会变成 unhandledRejection
+      if (p) window.api.showInFolder(p).catch(() => {})
     })
 
     this.el('btnDiagClear').addEventListener('click', async () => {
@@ -64,7 +65,7 @@ const Diag = {
     })
 
     this.el('btnDiagCopy').addEventListener('click', () => this.copy())
-    this.el('btnDiagOpenLog').addEventListener('click', () => window.api.diagOpenLog())
+    this.el('btnDiagOpenLog').addEventListener('click', () => { window.api.diagOpenLog().catch(() => toast('打开日志失败')) })
     // v3.3.6 / v2.8.6：声卡占用自查 + 一键释放独占。
     // 用户遇到「开了独占再关掉，别的软件还是没声音」时，在诊断面板里点一下就知道
     // 声卡到底被谁占着，不用去翻任务管理器。
@@ -341,7 +342,8 @@ const Diag = {
       pre.innerHTML = `<span class="lg-error">读取日志文件失败：${esc((r && r.error) || '未知错误')}</span>`
       return
     }
-    if (!r.lines.length) {
+    // 第四轮 §4.6：r.lines 未校验类型 —— 主进程返回畸形结构时后面的 .length/.map 直接抛
+    if (!Array.isArray(r.lines) || !r.lines.length) {
       pre.innerHTML = '<span class="lg-dim">（日志文件为空）</span>'
       return
     }
@@ -425,7 +427,7 @@ const Diag = {
   /** file:// 页面里 navigator.clipboard / execCommand 都不可靠，优先走主进程 */
   async writeClipboard(text) {
     try {
-      const r = await window.api.diagCopy(text)
+      const r = await window.api.diagCopy(text).catch(() => null)
       if (r && r.ok) return true
     } catch {}
     try {

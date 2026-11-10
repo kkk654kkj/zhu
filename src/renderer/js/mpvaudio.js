@@ -162,6 +162,12 @@ class MpvAudio {
       // v3.3.18：清 src 也要推进代次，否则在途 mpv:load 回调仍会把刚停止的
       // 界面改回暂停 / emit('error') 触发自动跳曲
       this._loadEpoch++
+      // 第四轮 §4.6(d)：removeAttribute 推进了 _loadEpoch，却漏了 _endedEpoch ——
+      // 迟到的 eof 会被判成「新曲的曲末」（sameEpoch 误命中），停止后凭空多一次 next
+      this._endedEpoch = this._loadEpoch
+      this._ended = false
+      this._pos = 0
+      this._posStamp = performance.now()
       this._srcPath = null
       this._paused = true
       this._wantPlaying = false
