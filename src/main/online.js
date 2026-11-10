@@ -18,6 +18,36 @@ const TIMEOUT = 15000
 let logger = () => {}
 function setLogger(fn) { if (typeof fn === 'function') logger = fn }
 
+/* v3.3.18：整链取消用的三个小工具。Node 18+ 有 AbortSignal.any，老版本退回手工桥接 */
+function abortError() {
+  const e = new Error('aborted')
+  e.name = 'AbortError'
+  return e
+}
+function anySignal(a, b) {
+  if (!a) return b
+  if (!b) return a
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([a, b])
+  const c = new AbortController()
+  const onAbort = () => { try { c.abort() } catch (e) { /* 已 abort */ } }
+  a.addEventListener('abort', onAbort, { once: true })
+  b.addEventListener('abort', onAbort, { once: true })
+  return c.signal
+}
+function sleepAbortable(ms, signal) {
+  return new Promise((resolve) => {
+    if (!signal) { setTimeout(resolve, ms); return }
+    if (signal.aborted) { resolve(); return }
+    const t = setTimeout(done, ms)
+    function done() {
+      signal.removeEventListener('abort', done)
+      clearTimeout(t)
+      resolve()
+    }
+    signal.addEventListener('abort', done, { once: true })
+  })
+}
+
 /**
  * 各平台 CDN 认的 Referer。
  *
@@ -44,6 +74,21 @@ function refererFor(source) {
 async function reqOnce(url, opts = {}) {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), opts.timeout || TIMEOUT)
+  // v3.3.18：外部 signal（无损窗口超时 / 客户端断开 / 切歌）必须能收掉这次请求。
+  // 以前 opts.signal 到这里完全没被读取，上层传了也白传 —— 输家仍跑满 timeout
+  // 并继续扣 ChKSz 的每日额度。
+  const ext = opts.signal
+  const onAbort = () => { clearTimeout(timer); try { ctrl.abort() } catch (e) { /* 已 abort */ } }
+  if (ext) {
+    if (ext.aborted) { clearTimeout(timer); throw abortError() }
+    ext.addEventListener('abort', onAbort, { once: true })
+  }
+  let detached = false
+  const detach = () => {
+    if (detached) return
+    detached = true
+    if (ext) ext.removeEventListener('abort', onAbort)
+  }
   try {
     const headers = { 'User-Agent': UA, ...(opts.headers || {}) }
     const res = await fetch(url, {
@@ -56,11 +101,12 @@ async function reqOnce(url, opts = {}) {
     // v3.3.7：超时必须覆盖到**正文**。以前拿到响应头就 clearTimeout，
     // 之后 res.text()/json() 挂起时毫无约束（undici 默认 bodyTimeout 300 秒），
     // 一个慢源能把整次搜索拖死。把清计时器挂到正文消费完成之后。
-    const done = () => clearTimeout(timer)
+    const done = () => { clearTimeout(timer); detach() }
     // v3.3.13：不消费正文的调用（探测/失败响应）必须能主动释放，
     // 否则 timer 与连接会一直留到超时（每个探测 8~15 秒）
     res.release = () => {
       clearTimeout(timer)
+      detach()
       try { if (res.body) res.body.cancel() } catch (e) { /* 已释放 */ }
     }
     const origText = res.text.bind(res)
@@ -76,6 +122,7 @@ async function reqOnce(url, opts = {}) {
     return res
   } catch (err) {
     clearTimeout(timer)
+    detach()
     throw err
   }
 }
@@ -90,11 +137,13 @@ async function reqOnce(url, opts = {}) {
  */
 async function req(url, opts = {}) {
   for (let attempt = 0; ; attempt++) {
+    if (opts.signal && opts.signal.aborted) throw abortError()
     const res = await reqOnce(url, opts)
     const retriable = res.status === 429 || res.status >= 500
     if (attempt >= 1 || !retriable) return res
     try { res.release && res.release() } catch (e) { /* 已释放 */ }
-    await new Promise((r) => setTimeout(r, 400 + Math.random() * 300))
+    // v3.3.18：abort 后别再睡满 400~700ms，更别再发一次（对 ChKSz 就是再扣一次额度）
+    await sleepAbortable(400 + Math.random() * 300, opts.signal)
   }
 }
 
@@ -108,7 +157,9 @@ async function reqText(url, opts = {}) {
     }
     return await res.text()
   } catch (err) {
-    logger('[req] ' + ((err && err.message) || err) + ' ' + String(url).slice(0, 80))
+    if (!err || err.name !== 'AbortError') {
+      logger('[req] ' + ((err && err.message) || err) + ' ' + String(url).slice(0, 80))
+    }
     return null
   }
 }
@@ -210,11 +261,11 @@ const kw = {
   short: 'KW',
   maxQuality: '320k mp3',
 
-  async search(keyword, page = 1, limit = 30) {
+  async search(keyword, page = 1, limit = 30, opts = {}) {
     const pn = Math.max(0, page - 1)
     const url = `http://search.kuwo.cn/r.s?all=${encode(keyword)}&ft=music&itemset=web_2013`
       + `&client=kt&pn=${pn}&rn=${limit}&rformat=json&encoding=utf8&mobi=1&vipver=1`
-    const txt = await reqText(url)
+    const txt = await reqText(url, opts)
     const rows = parseKuwoList(txt)
     return rows.map((r) => ({
       source: 'kw',
@@ -233,11 +284,11 @@ const kw = {
     })).filter((s) => s.id && s.title)
   },
 
-  async getUrl(song, prefer = 'best') {
+  async getUrl(song, prefer = 'best', opts = {}) {
     const br = prefer === 'lossless' ? 'flac' : prefer === '128k' ? '128kmp3' : '320kmp3'
     const url = `http://nmobi.kuwo.cn/mobi.s?f=web&source=kwplayer_ar_9.3.0.0_B_jiakong_vh.apk`
       + `&type=convert_url_with_sign&br=${br}&rid=${encode(song.id)}`
-    const j = await reqJson(url)
+    const j = await reqJson(url, opts)
     const d = j && j.data
     if (!d || !d.url || d.url === 'None') return null
     return {
@@ -249,8 +300,8 @@ const kw = {
     }
   },
 
-  async getLyric(song) {
-    const j = await reqJson(`http://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=${encode(song.id)}&httpsStatus=1`)
+  async getLyric(song, opts = {}) {
+    const j = await reqJson(`http://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=${encode(song.id)}&httpsStatus=1`, opts)
     const list = j && j.data && j.data.lrclist
     if (!Array.isArray(list) || !list.length) return null
     const meta = j.data.songinfo || {}
@@ -279,18 +330,18 @@ const wy = {
   short: 'WY',
   maxQuality: '320k mp3',
 
-  async search(keyword, page = 1, limit = 30) {
+  async search(keyword, page = 1, limit = 30, opts = {}) {
     const offset = (page - 1) * limit
     // 主用 cloudsearch/pc：不限频，返回也全（带封面、时长）。
     // 老的 /api/search/get/web 现在对同一 IP 限得很死，连搜两次就 405，只作兜底。
     let j = await reqJson(
       `https://music.163.com/api/cloudsearch/pc?s=${encode(keyword)}&type=1&limit=${limit}&offset=${offset}`,
-      { headers: { Referer: 'https://music.163.com' } }
+      { headers: { Referer: 'https://music.163.com' }, ...opts }
     )
     if (!(j && j.code === 200 && j.result && Array.isArray(j.result.songs))) {
       j = await reqJson(
         'https://music.163.com/api/search/get?s=' + encode(keyword) + `&type=1&limit=${limit}&offset=${offset}`,
-        { headers: { Referer: 'https://music.163.com', Cookie: 'appver=2.0.2' } }
+        { headers: { Referer: 'https://music.163.com', Cookie: 'appver=2.0.2' }, ...opts }
       )
     }
     const songs = j && j.result && j.result.songs
@@ -319,12 +370,13 @@ const wy = {
   },
 
   /** 网易没有公开的取链接口，走「外链播放」：无版权的歌会 302 到 404 页面 */
-  async getUrl(song) {
+  async getUrl(song, prefer = 'best', opts = {}) {
     const u = `https://music.163.com/song/media/outer/url?id=${encode(song.id)}.mp3`
     try {
       // 用 Range 取 2 字节验证：既确认是音频，也确认支持断点（mpv 拖动进度需要）
       const res = await req(u, {
-        headers: { Referer: 'https://music.163.com', Range: 'bytes=0-1' }
+        headers: { Referer: 'https://music.163.com', Range: 'bytes=0-1' },
+        ...opts
       })
       // 只读响应头，正文必须显式释放：否则每次取链留一个 15 秒 timer + 未归还连接
       try { res.release && res.release() } catch (e) { /* 忽略 */ }
@@ -348,9 +400,9 @@ const wy = {
     }
   },
 
-  async getLyric(song) {
+  async getLyric(song, opts = {}) {
     const j = await reqJson(`https://music.163.com/api/song/lyric?id=${encode(song.id)}&lv=1&kv=1&tv=-1`, {
-      headers: { Referer: 'https://music.163.com' }
+      headers: { Referer: 'https://music.163.com' }, ...opts
     })
     const lrc = j && j.lrc && j.lrc.lyric
     return lrc && /\[\d{1,3}:/.test(lrc) ? lrc : null
@@ -365,10 +417,10 @@ const qq = {
   short: 'QQ',
   maxQuality: '128k m4a（非会员）',
 
-  async search(keyword, page = 1, limit = 30) {
+  async search(keyword, page = 1, limit = 30, opts = {}) {
     const url = `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?format=json&w=${encode(keyword)}`
       + `&n=${limit}&p=${page}&cr=1&new_json=1&aggr=1&lossless=0`
-    const txt = await reqText(url, { headers: { Referer: 'https://y.qq.com/' } })
+    const txt = await reqText(url, { headers: { Referer: 'https://y.qq.com/' }, ...opts })
     if (!txt) return []
     let j = null
     try {
@@ -396,7 +448,7 @@ const qq = {
     }).filter((s) => s.id && s.title)
   },
 
-  async getUrl(song) {
+  async getUrl(song, prefer = 'best', opts = {}) {
     // 未登录只能拿到非 VIP 歌曲的试听链（m4a）
     const payload = {
       req_0: {
@@ -416,7 +468,8 @@ const qq = {
     const j = await reqJson('https://u.y.qq.com/cgi-bin/musicu.fcg', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Referer: 'https://y.qq.com/' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      ...opts
     })
     const d = j && j.req_0 && j.req_0.data
     const info = d && d.midurlinfo && d.midurlinfo[0]
@@ -435,10 +488,10 @@ const qq = {
     }
   },
 
-  async getLyric(song) {
+  async getLyric(song, opts = {}) {
     const url = `https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=${encode(song.id)}`
       + `&format=json&nobase64=1&g_tk=5381`
-    const txt = await reqText(url, { headers: { Referer: 'https://y.qq.com/portal/player.html' } })
+    const txt = await reqText(url, { headers: { Referer: 'https://y.qq.com/portal/player.html' }, ...opts })
     if (!txt) return null
     try {
       const j = JSON.parse(txt.replace(/^MusicJsonCallback\(|\)$/g, ''))
@@ -458,11 +511,11 @@ const kg = {
   short: 'KG',
   maxQuality: '128k mp3（部分）',
 
-  async search(keyword, page = 1, limit = 30) {
+  async search(keyword, page = 1, limit = 30, opts = {}) {
     const url = `https://songsearch.kugou.com/song_search_v2?keyword=${encode(keyword)}&page=${page}`
       + `&pagesize=${limit}&platform=WebFilter&userid=0&clientver=2000&iscorrection=1`
       + `&privilege_filter=0&filter=10&area_code=1&tag_aggr=1`
-    const j = await reqJson(url)
+    const j = await reqJson(url, opts)
     const list = j && j.data && j.data.lists
     if (!Array.isArray(list)) return []
     return list.map((s) => ({
@@ -483,7 +536,7 @@ const kg = {
   },
 
   /** 走 tracker 接口；热门版权歌会返回 status=2（无授权），此时按失败处理交给别的源 */
-  async getUrl(song) {
+  async getUrl(song, prefer = 'best', opts = {}) {
     // v3.3.17：idHq 与 id 相同时前两条请求完全一样，白跑一次 15 秒超时的请求。
     // 用 seen 去重（hash + br 相同即视为同一次尝试）。
     const tries = []
@@ -503,7 +556,8 @@ const kg = {
       const key = crypto.createHash('md5').update(t.hash + 'kgcloudv2').digest('hex')
       const url = `https://trackercdn.kugou.com/i/v2/?key=${key}&hash=${t.hash}&br=${t.br}`
         + `&appid=1005&pid=2&cmd=25&behavior=play`
-      const j = await reqJson(url, { headers: { Referer: 'https://www.kugou.com/' } })
+      if (opts.signal && opts.signal.aborted) return null
+      const j = await reqJson(url, { headers: { Referer: 'https://www.kugou.com/' }, ...opts })
       if (j && j.status === 1 && j.url) {
         const u = Array.isArray(j.url) ? j.url[0] : j.url
         if (u) {
@@ -520,13 +574,13 @@ const kg = {
     return null
   },
 
-  async getLyric(song) {
+  async getLyric(song, opts = {}) {
     const search = await reqJson(`https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=`
-      + `&duration=&hash=${encode(song.id)}`)
+      + `&duration=&hash=${encode(song.id)}`, opts)
     const cand = search && search.candidates && search.candidates[0]
     if (!cand) return null
     const dl = await reqJson(`https://lyrics.kugou.com/download?ver=1&client=pc&id=${encode(cand.id)}`
-      + `&accesskey=${encode(cand.accesskey)}&fmt=lrc&charset=utf8`)
+      + `&accesskey=${encode(cand.accesskey)}&fmt=lrc&charset=utf8`, opts)
     if (!dl || !dl.content) return null
     const txt = Buffer.from(dl.content, 'base64').toString('utf8')
     return /\[\d{1,3}:/.test(txt) ? txt : null
@@ -659,12 +713,17 @@ function urlCachePut(key, rec) {
  */
 function invalidateUrl(song, prefer) {
   if (!song) return false
-  const keys = prefer ? [cacheKey(song, prefer)] : Array.from(urlCache.keys())
+  const base = cacheKey(song, prefer || 'best')
+  // v3.3.18：无损结果写的是 'flac:' + cacheKey(...)，以前两个分支都匹配不到：
+  // 精确键只删不带前缀的，全清分支又用 startsWith('src:id:') 漏掉 'flac:src:id:'。
+  // 结果 file-error 后 20 分钟内仍反复命中同一条死链，换源永远不触发。
+  const prefix = song.source + ':' + song.id + ':'
+  const keys = prefer ? [base, 'flac:' + base] : Array.from(urlCache.keys())
   let hit = false
   for (const k of keys) {
     if (prefer) {
       if (urlCache.delete(k)) hit = true
-    } else if (k.startsWith(song.source + ':' + song.id + ':')) {
+    } else if (k.startsWith(prefix) || k.startsWith('flac:' + prefix)) {
       urlCache.delete(k)
       hit = true
     }
@@ -685,15 +744,17 @@ function cacheKey(song, prefer) {
  * ① 文件大小 ÷ 歌曲时长 < 40kbps → 试听；
  * ② 接口给的片段时长明显短于歌曲时长（<70%）→ 试听。
  */
-async function probeStream(info, realDuration, expectDuration = 0) {
+async function probeStream(info, realDuration, expectDuration = 0, opts = {}) {
+  const signal = opts.signal
   // v3.3.7：探测失败重试一次 —— 网络抖动一次就不给结果，
   // 会让试听片段被当成完整版进缓存
   for (let attempt = 0; attempt < 2; attempt++) {
+  if (signal && signal.aborted) return { ...info, unverified: true }
   try {
     const headers = { Range: 'bytes=0-1' }
     if (info.referer) headers.Referer = info.referer
     if (info.headers && typeof info.headers === 'object') Object.assign(headers, info.headers)
-    const res = await req(info.url, { headers, timeout: 8000 })
+    const res = await req(info.url, { headers, timeout: 8000, signal })
     // v3.3.13：本函数只看响应头，正文必须显式取消，否则每个探测留 8 秒 timer + 连接
     try { res.release && res.release() } catch (e) { /* 忽略 */ }
     // v3.3.8：先看状态码 —— 404/503 的直链以前只要 content-type 不是 html
@@ -712,10 +773,13 @@ async function probeStream(info, realDuration, expectDuration = 0) {
     return {
       ...info,
       size: total,
-      bitrate: info.bitrate >= 32 ? info.bitrate : kbps,
+      // v3.3.18：实测码率优先。接口标称值单位混乱（bps/kbps 混用）还会谎报，
+      // 采信它会让 partial 与 maybeUpgrade 的判据全部走偏；标称值只在实测缺失时兜底。
+      bitrate: kbps > 0 ? kbps : (Number(info.bitrate) || 0),
       partial: kbps < 40 || tooShort
     }
   } catch (err) {
+    if (signal && signal.aborted) return { ...info, unverified: true }
     if (attempt === 1) {
       // 再失败只能原样放行，但必须标记 unverified ——
       // 否则 30 秒试听片段会被当成完整版写进 20 分钟直链缓存
@@ -802,11 +866,13 @@ function qingHeaders(method, url, body, ticket) {
 }
 
 /** 领票；12 小时有效，提前 10 分钟换新的 */
-async function qingEnsureTicket() {
+async function qingEnsureTicket(opts = {}) {
   if (qingTicket && Date.now() < qingTicketExp) return qingTicket
   if (qingTicketPending) return qingTicketPending
+  const signal = opts.signal
   qingTicketPending = (async () => {
     for (const base of QING_BASES) {
+      if (signal && signal.aborted) return ''
       try {
         const url = base + '/gateway/ticket'
         const body = JSON.stringify({ deviceId: qingDevice, appVersion: QING_VER, platform: 'win32' })
@@ -814,7 +880,8 @@ async function qingEnsureTicket() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...qingHeaders('POST', url, body) },
           body,
-          timeout: 8000
+          timeout: 8000,
+          signal
         })
         const j = await r.json().catch(() => null)
         if (j && j.ticket) {
@@ -822,7 +889,11 @@ async function qingEnsureTicket() {
           // v3.3.8：expiresAt 单位防御 —— 若服务端返回秒（<1e12），按毫秒比会
           // 让票据永远「已过期」，每次解析都白跑一趟领票接口
           let exp = Number(j.expiresAt)
-          if (exp > 0 && exp < 1e12) exp *= 1000
+          // v3.3.18：expiresAt 可能是「绝对秒 / 绝对毫秒 / 相对 TTL 秒」三种。
+          // 相对 TTL（如 43200）乘 1000 后落在 1970 年，票据永远判已过期，
+          // 每首歌都白跑一次 8 秒领票接口，还会成为无损窗口的后台输家。
+          if (exp > 0 && exp < 1e9) exp = Date.now() + exp * 1000
+          else if (exp >= 1e9 && exp < 1e12) exp *= 1000
           qingTicketExp = exp > 0 ? exp - 600000 : Date.now() + 3600000
           return qingTicket
         }
@@ -834,11 +905,15 @@ async function qingEnsureTicket() {
 }
 
 /** 换一次直链；返回 { url } 或 null */
-async function qingResolveOnce(source, rid, level) {
-  let ticket = await qingEnsureTicket()
-  if (!ticket) return null
+async function qingResolveOnce(source, rid, level, opts = {}) {
+  const signal = opts.signal
+  let ticket = await qingEnsureTicket(opts)
+  if (!ticket || (signal && signal.aborted)) return null
   const body = JSON.stringify({ source, rid, level })
-  for (const base of QING_BASES) {
+  let ticketRetry = 0
+  for (let i = 0; i < QING_BASES.length; i++) {
+    if (signal && signal.aborted) return null
+    const base = QING_BASES[i]
     const url = base + '/music/resolve-url'
     try {
       const r = await req(url, {
@@ -850,7 +925,8 @@ async function qingResolveOnce(source, rid, level) {
           ...qingHeaders('POST', url, body, ticket)
         },
         body,
-        timeout: 8000
+        timeout: 8000,
+        signal
       })
       const j = await r.json().catch(() => null)
       if (!j) continue
@@ -861,7 +937,8 @@ async function qingResolveOnce(source, rid, level) {
         // 以前 return null 把整条青听链路直接掐死，备用 base 也不会试
         if (d.need_decrypt) continue
         if (d.url) return { url: d.url, headers: d.playbackHeaders || d.headers || null }
-        return null
+        // v3.3.18：主线路回了 code=0 但没 url，不能掐断备用线路
+        continue
       }
       // 票过期就作废并**当场重领**：继续用捕获的旧票跑剩下的线路必然全挂
       const qcode = String(j.code ?? '')
@@ -869,7 +946,9 @@ async function qingResolveOnce(source, rid, level) {
       // 只匹配字符串关键字会让过期票一直用到超时
       if (/TICKET|AUTH|TOKEN/i.test(qcode) || /^(401|403|419|10001|10002)$/.test(qcode)) {
         qingTicket = ''
-        ticket = await qingEnsureTicket()
+        ticket = await qingEnsureTicket(opts)
+        // 重领的票要拿去重试**当前**线路一次，而不是白等到下一个 base
+        if (ticket && ticketRetry++ < 1 && !(signal && signal.aborted)) i--
       }
     } catch (err) { /* 换下一条线路 */ }
   }
@@ -877,14 +956,16 @@ async function qingResolveOnce(source, rid, level) {
 }
 
 /** 按音质档从青听网关取 flac */
-async function qingLossless(song, prefer) {
+async function qingLossless(song, prefer, opts = {}) {
   if (!qingOn) return null
+  const signal = opts.signal
   const source = QING_SRC[song.source]
   if (!source || !song.id) return null
   const levels = (QING_LEVELS[prefer] || QING_LEVELS.lossless)[song.source] || []
   const duration = song.duration || 0
   for (const level of levels) {
-    const got = await qingResolveOnce(source, String(song.id), level)
+    if (signal && signal.aborted) return null
+    const got = await qingResolveOnce(source, String(song.id), level, opts)
     if (!got || !got.url) continue
     // v3.3.17：签名直链常常没有扩展名（/resolve/xxx?sign=...），以前一律 continue，
     // 真无损被当成「不是 flac」丢掉，整条青听链路白跑。现在只排除明确的有损后缀，
@@ -893,7 +974,8 @@ async function qingLossless(song, prefer) {
     const probed = await probeStream(
       { url: got.url, ext: 'flac', bitrate: 0, duration, referer: refererFor(song.source), headers: got.headers },
       duration,
-      duration
+      duration,
+      opts
     )
     if (probed.broken || probed.partial || probed.unverified) continue
     // 没有 .flac 后缀的地址必须用码率兜底确认：无损一般 >700k，
@@ -941,25 +1023,29 @@ function chkszEndpoint(song, key) {
 }
 
 /** 用 ChKSz 拿 flac；拿不到（没 key / 无权限 / 额度用完）返回 null */
-async function chkszLossless(song, key) {
+async function chkszLossless(song, key, opts = {}) {
   const url = chkszEndpoint(song, key)
-  if (!url) return null
-  const j = await reqJson(url, { timeout: 8000 })
+  if (!url || (opts.signal && opts.signal.aborted)) return null
+  const j = await reqJson(url, { timeout: 8000, signal: opts.signal })
   if (!j || j.code !== 200 || !j.url) {
     if (j && j.code === 401) logger('[chksz] apikey 无效')
     else if (j && (j.code === 402 || j.code === 429)) logger('[chksz] 额度不足或被限流 ' + j.code)
     return null
   }
   const fmt = String(j.format || j.bitrate || '').toLowerCase()
-  const isFlac = /\.flac(\?|$)/i.test(j.url) || fmt === 'flac' || Number(j.br) >= 700
+  const isFlac = /\.flac(\?|$)/i.test(j.url) || fmt === 'flac' || normBitrate(j.br) >= 700
   if (!isFlac) return null
   const duration = song.duration || 0
   const probed = await probeStream(
-    { url: j.url, ext: 'flac', bitrate: Number(j.br) || 900, duration, referer: refererFor(song.source) },
+    // bitrate 给 0：让 probeStream 用 Content-Range 实测值说话，别采信接口标称
+    { url: j.url, ext: 'flac', bitrate: 0, duration, referer: refererFor(song.source) },
     duration,
-    duration
+    duration,
+    opts
   )
   if (probed.broken || probed.partial || probed.unverified) return null
+  // v3.3.18：与青听链对齐，签名直链没有 .flac 后缀时用实测码率确认确实是无损档
+  if (!/\.flac(\?|$)/i.test(j.url) && (probed.bitrate || 0) < 700) return null
   return {
     ...probed,
     duration,
@@ -971,10 +1057,11 @@ async function chkszLossless(song, key) {
 }
 
 /** 这首歌在网易有没有对得上的条目（歌手必须一致，时长差太多不要） */
-async function neteaseTwin(song) {
+async function neteaseTwin(song, opts = {}) {
   if (song.source === 'wy' && song.id) return song
+  if (opts.signal && opts.signal.aborted) return null
   try {
-    const list = await SOURCES.wy.search(`${song.title} ${song.artist}`.trim(), 1, 20)
+    const list = await SOURCES.wy.search(`${song.title} ${song.artist}`.trim(), 1, 20, opts)
     return rankMatches(list, song)[0] || null
   } catch (err) {
     return null
@@ -1018,12 +1105,14 @@ async function qingSelfTest() {
  * 返回 null 表示「这首歌拿不到无损」，调用方直接降级即可。
  * 注意 GDStudio 的搜索接口极慢（实测 7~90 秒），所以只用它的 url 接口。
  */
-async function resolveLossless(song, prefer) {
+async function resolveLossless(song, prefer, opts = {}) {
   const key = extraKey
+  const signal = opts.signal
+  const stopped = () => !!(signal && signal.aborted)
 
   // ⓪ 青听网关：四家都支持、还快，先问它。失败就往下走，别处照旧
   try {
-    const qing = await qingLossless(song, prefer === 'master' ? 'master' : 'lossless')
+    const qing = await qingLossless(song, prefer === 'master' ? 'master' : 'lossless', opts)
     if (qing) return qing
   } catch (err) {
     logger('[qing] 解析异常 ' + err.message)
@@ -1033,38 +1122,50 @@ async function resolveLossless(song, prefer) {
   // v3.3.17：③ 的兜底会对同一首再调一次 ChKSz（twin 为 null 时参数完全一样），
   // 白耗一次每日 50 次的额度，且结果必然与这里相同 —— 记下已试过的 id 供 ③ 跳过。
   let chkszTried = ''
+  if (stopped()) return null
   if (key && (song.source === 'qq' || song.source === 'kg')) {
     chkszTried = song.source + ':' + song.id
-    const got = await chkszLossless(song, key)
+    const got = await chkszLossless(song, key, opts)
     if (got) return got
   }
 
   // ② 网易：免费的 GDStudio
-  const twin = await neteaseTwin(song)
+  if (stopped()) return null
+  const twin = await neteaseTwin(song, opts)
   if (twin) {
-    const askUrl = () => reqJson(`${GD_API}?types=url&source=netease&id=${encode(twin.id)}&br=999`, { timeout: 7000 })
+    const askUrl = () => reqJson(`${GD_API}?types=url&source=netease&id=${encode(twin.id)}&br=999`,
+      { timeout: 7000, signal })
     // 这个聚合 API 抖动挺厉害，同一首歌两次跑结果可能不同。
     // 拿不到响应（超时/502）就再问一次；但它明确回了一个非 flac 地址，说明这首确实没有，别浪费第二次。
     let j = await askUrl()
-    if (!j || !j.url) j = await askUrl()
+    if (!j || !j.url) {
+      if (stopped()) return null
+      j = await askUrl()
+    }
+    if (stopped()) return null
     if (j && j.url) {
       const br = Number(j.br) || 0
       // 有些歌只给 320k mp3，也走这个接口——那种情况不算无损，交给降级处理
       if (/\.flac(\?|$)/i.test(j.url) || br >= 700) {
         // 真取一下头几个字节，确认不是错误页
         const probed = await probeStream(
-          { url: j.url, ext: 'flac', bitrate: br, duration: twin.duration || song.duration || 0, size: Number(j.size) || 0, referer: 'https://music.163.com/' },
+          { url: j.url, ext: 'flac', bitrate: 0, duration: twin.duration || song.duration || 0, size: Number(j.size) || 0, referer: 'https://music.163.com/' },
           twin.duration || song.duration || 0,
-          song.duration || 0
+          song.duration || 0,
+          opts
         )
-        if (!probed.broken && !probed.partial && !probed.unverified) {
+        if (!probed.broken && !probed.partial && !probed.unverified &&
+            // v3.3.18：与青听链同一把尺子 —— 无 .flac 后缀时用实测码率确认没被塞有损档
+            (/\.flac(\?|$)/i.test(j.url) || (probed.bitrate || 0) >= 700)) {
           return {
             ...probed,
             // 播放时长以下载得到的这份为准，界面上的时长别被蹭偏
             duration: twin.duration || song.duration || 0,
             actual: twin,
             lossless: true,
-            ext: 'flac'
+            ext: 'flac',
+            level: '',
+            from: 'gd'
           }
         }
       }
@@ -1072,12 +1173,13 @@ async function resolveLossless(song, prefer) {
   }
 
   // ③ 兜底：有 key 的话，ChKSz 再试一次（腾讯/酷狗的号池有时比免费接口更硬）
+  if (stopped()) return null
   if (key) {
     const target = twin || song
     const tid = target.source + ':' + target.id
     // 同一首已经在上面的 ① 试过一次，这里再试必然同样失败，别白扣额度
     if (tid !== chkszTried) {
-      const got = await chkszLossless(target, key)
+      const got = await chkszLossless(target, key, opts)
       if (got) return { ...got, actual: target }
     }
   }
@@ -1101,13 +1203,20 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
     // 无损解析可能 1~7 秒，而「这首歌根本没有无损」要等它跑完才知道。
     // 所以让降级链路在旁边并行跑：1.5 秒还没拿到 flac 就把它拉起来，
     // 万一 flac 迟迟不来（6 秒），用户至少立刻有声音，不用干等十秒。
+    // v3.3.18：两条并行链各绑一个 controller。窗口超时后无损链必须被 abort，
+    // 否则它会在后台跑完青听/ChKSz/GDStudio，白扣每日 50 次额度；反过来无损
+    // 先赢时降级链的结果没人用，也要收掉。外部 signal（客户端断开/切歌）一并组合。
+    const losslessCtrl = new AbortController()
+    const fbCtrl = new AbortController()
+    const losslessSignal = anySignal(opts.signal, losslessCtrl.signal)
+    const fbSignal = anySignal(opts.signal, fbCtrl.signal)
     let fbPromise = null
     const startFallback = () => {
       if (fbPromise) return fbPromise
       fbPromise = (async () => {
-        const res = await resolvePlayable(song, 'best', opts)
+        const res = await resolvePlayable(song, 'best', { ...opts, signal: fbSignal })
         if (!res) return null
-        const up = await maybeUpgrade(res, song, 'best')
+        const up = await maybeUpgrade(res, song, 'best', { signal: fbSignal })
         // v3.3.17：缓存命中的结果不能重新盖时间戳 —— 否则反复点同一首 lossless 歌，
         // 1.5 秒定时器每次都给**已过期的签名直链**续期，TTL 被无限重置，
         // 正是上面 L1019「命中不重写时间戳」那条修复要防的事。
@@ -1120,14 +1229,17 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
 
     let got = null
     let losslessTimer = null
+    let losslessDone = false
     // v3.3.17：窗口按档位分。母带要多跳几级（jymaster → hires → lossless）且常走两条线路，
     // 9 秒对它太紧；普通无损 7 秒足够。注释里承诺的「6 秒」早就和实现对不上了。
     const losslessWait = prefer === 'master' ? 12000 : 7000
     const losslessTimeout = new Promise((r) => { losslessTimer = setTimeout(() => r(null), losslessWait) })
     try {
       got = await Promise.race([
-        // 9 秒超时后输家仍在后台跑；吞掉它的 rejection，避免 unhandledRejection
-        resolveLossless(song, prefer).catch(() => null),
+        // 吞掉输家的 rejection，避免 unhandledRejection；超时后由 finally 主动 abort
+        resolveLossless(song, prefer, { signal: losslessSignal })
+          .then((v) => { losslessDone = true; return v })
+          .catch(() => { losslessDone = true; return null }),
         // QQ 那边偶尔要 5 秒才给链，窗口给足；超过就先用降级结果出声
         losslessTimeout
       ])
@@ -1135,7 +1247,11 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
       logger('[flac] 解析异常 ' + err.message)
     } finally {
       clearTimeout(fbTimer)
-      clearTimeout(losslessTimer)   // v3.3.13：成功也要清，别留 9 秒空定时器
+      clearTimeout(losslessTimer)   // v3.3.13：成功也要清，别留空定时器
+      // 超时赢（或解析抛错）→ 中止无损链；正常返回后 abort 已无意义
+      if (!losslessDone) losslessCtrl.abort()
+      // 无损赢 → 降级链结果无人消费，收掉它
+      if (got) fbCtrl.abort()
     }
     if (got) {
       const rec = { ...got, at: Date.now() }
@@ -1152,7 +1268,7 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
   // v3.3.7：缓存命中不重写时间戳 —— 以前每次命中都续期，平台签名直链
   // 过期后反而拿不到新链，死链被无限续命
   if (res.fromCache) return res
-  const up = await maybeUpgrade(res, song, prefer)
+  const up = await maybeUpgrade(res, song, prefer, opts)
   urlCachePut(cacheKey(song, prefer), { ...up, at: Date.now() })
   return up
 }
@@ -1163,27 +1279,29 @@ async function getPlayable(song, prefer = 'best', opts = {}) {
  * 只在「已经拿到完整版、但码率低于 96k」时才跑，所以绝大多数歌没有额外耗时；
  * 上限 6 秒，超时就用手上这个——宁可音质差一点，也不能让用户干等。
  */
-async function maybeUpgrade(res, song, prefer) {
+async function maybeUpgrade(res, song, prefer, opts = {}) {
   if (res.partial) return res
   if ((res.bitrate || 0) >= 96) return res
+  if (opts.signal && opts.signal.aborted) return res
   const t0 = Date.now()
   // v3.3.17：预算改成「剩余时间」，并在每个 await 之间复查。
   // 以前只在 for 头部判一次，循环体内 search(15s) + 2×(getUrl 15s + probe 16s)
   // 单源最坏能跑到 77 秒 —— 注释承诺的「上限 6 秒」完全没兑现。
   const left = () => 6000 - (Date.now() - t0)
   for (const id of SOURCE_ORDER) {
+    if (opts.signal && opts.signal.aborted) break
     if (id === res.song.source || !SOURCES[id]) continue
     if (left() <= 0) break
     try {
-      const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10)
+      const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10, opts)
       if (left() <= 0) break
       const cands = rankMatches(list, song).slice(0, 2)
       for (const cand of cands) {
         if (left() <= 0) break
-        const got = await SOURCES[id].getUrl(cand, prefer)
+        const got = await SOURCES[id].getUrl(cand, prefer, opts)
         if (!got || !got.url) continue
         if (left() <= 0) break
-        const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0)
+        const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0, opts)
         if (probed.broken || probed.partial || probed.unverified) continue
         if ((probed.bitrate || 0) < 128) continue
         const rec = { ...probed, at: Date.now() }
@@ -1200,8 +1318,10 @@ async function maybeUpgrade(res, song, prefer) {
  * 解析播放直链，带缓存与换源兜底。
  * 顺序：本源完整版 → 本源其他候选 → 其他源完整版 → 退回试听片段（标注 partial）
  */
-async function resolvePlayable(song, prefer = 'best', { allowFallback = true } = {}) {
+async function resolvePlayable(song, prefer = 'best', { allowFallback = true, signal } = {}) {
+  const opts = { signal }
   const key = cacheKey(song, prefer)
+  if (signal && signal.aborted) return null
   const hit = urlCache.get(key)
   if (hit && Date.now() - hit.at < URL_TTL_MS) {
     // hit.song 是「实际发声的那首」（可能换过源），别用用户点的这首覆盖掉
@@ -1216,17 +1336,17 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
   // 最坏能跑五分钟 —— mpv 的 load 会一直挂着，界面永久「正在加载」。
   // getLyric 早就有同样的 deadline，这里补齐。
   const deadline = Date.now() + 12000
-  const expired = () => Date.now() > deadline
+  const expired = () => (signal && signal.aborted) || Date.now() > deadline
 
   const src = SOURCES[song.source]
   if (src) {
     try {
-      const got = await src.getUrl(song, prefer)
+      const got = await src.getUrl(song, prefer, opts)
       if (got && got.url) {
         // 三个参数缺一不可：realDuration 是「接口自报的这段音频有多长」，
         // expectDuration 是「这首歌本该多长」。只传前两个会让「片段时长明显偏短」
         // 这条判据永远为假 —— 45 秒剪辑版按 240 秒算出来的码率反而很健康。
-        const probed = await probeStream(got, got.duration || song.duration || 0, song.duration || 0)
+        const probed = await probeStream(got, got.duration || song.duration || 0, song.duration || 0, opts)
         // v3.3.17：unverified（探测两次都失败 / CDN 不回 content-range）以前在这里
         // 直接 return，等于「接受一条永不可信、永不缓存、也永不换源的地址」，
         // 而 tryList / maybeUpgrade / 青听对它是跳过 —— 同一个结果两种处置。
@@ -1258,9 +1378,9 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
       .slice(0, 3)
     for (const cand of cands) {
       if (expired()) break
-      const got = await SOURCES[id].getUrl(cand, prefer)
+      const got = await SOURCES[id].getUrl(cand, prefer, opts)
       if (!got || !got.url) continue
-      const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0)
+      const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0, opts)
       if (probed.broken || probed.unverified) continue
       if (probed.partial) {
         if (!partial || (probed.size || 0) > (partial.size || 0)) partial = { ...probed, at: Date.now(), song: cand }
@@ -1276,7 +1396,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
   // ① 本源内换候选
   if (src && !expired()) {
     try {
-      const list = await src.search(`${song.title} ${song.artist}`.trim(), 1, 10)
+      const list = await src.search(`${song.title} ${song.artist}`.trim(), 1, 10, opts)
       const got = await tryList(song.source, list)
       if (got) return got
     } catch (err) { /* 继续跨源 */ }
@@ -1288,7 +1408,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true } =
   for (const id of others) {
     if (expired()) break
     try {
-      const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10)
+      const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10, opts)
       const got = await tryList(id, list)
       if (got) return got
     } catch (err) { /* 下一个源 */ }
@@ -1366,16 +1486,19 @@ function pickBestMatch(list, song) {
 
 const lyricCache = new Map()   // key → { lrc, at }
 
-async function getLyric(song) {
+async function getLyric(song, opts = {}) {
   const key = `${song.source}:${song.id}`
+  const lyricCtrl = new AbortController()
+  const signal = anySignal(opts.signal, lyricCtrl.signal)
   // v3.3.17：deadline 必须在**第一个请求之前**建立。以前它在换源兜底前才创建，
   // 首个 src.getLyric 仍可跑满 15 秒 —— 加上后面的兜底循环，总耗时最坏 30 秒，
   // 与「整体限时 15 秒」的注释不符。
   const lyricDeadline = Date.now() + 15000
   const leftMs = () => Math.max(0, lyricDeadline - Date.now())
   const withDeadline = (p) => new Promise((resolve) => {
-    if (leftMs() <= 0) return resolve(null)
-    const t = setTimeout(() => resolve(null), leftMs())
+    if (leftMs() <= 0) { lyricCtrl.abort(); return resolve(null) }
+    // v3.3.18：超时只让外层拿到 null 是不够的，底层请求仍在后台跑满 15 秒
+    const t = setTimeout(() => { lyricCtrl.abort(); resolve(null) }, leftMs())
     Promise.resolve(p).then(
       (v) => { clearTimeout(t); resolve(v) },
       () => { clearTimeout(t); resolve(null) }
@@ -1395,7 +1518,7 @@ async function getLyric(song) {
   let lrc = null
   if (src) {
     try {
-      lrc = await withDeadline(src.getLyric(song))
+      lrc = await withDeadline(src.getLyric(song, { signal }))
     } catch (err) { lrc = null }
   }
   // 本源没词就换源找同一首（换了源的曲目也能出词）
@@ -1407,10 +1530,10 @@ async function getLyric(song) {
       if (leftMs() <= 0) break
       if (id === song.source || !SOURCES[id]) continue
       try {
-        const list = await withDeadline(SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 5))
+        const list = await withDeadline(SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 5, { signal }))
         const cand = list && pickBestMatch(list, song)
         if (!cand || leftMs() <= 0) continue
-        lrc = await withDeadline(SOURCES[id].getLyric(cand))
+        lrc = await withDeadline(SOURCES[id].getLyric(cand, { signal }))
         if (lrc) break
       } catch (err) { /* 下一个 */ }
     }
@@ -1427,7 +1550,7 @@ async function getLyric(song) {
 /* ---------------- 直链解析给协议/mpv 用 ---------------- */
 
 /** 从 lxstream://play/<source>/<id>?... 解析出可播放信息 */
-async function resolveStreamUrl(rawUrl) {
+async function resolveStreamUrl(rawUrl, opts = {}) {
   let u
   try {
     u = new URL(rawUrl)
@@ -1456,7 +1579,7 @@ async function resolveStreamUrl(rawUrl) {
     duration: Number(u.searchParams.get('d')) || 0
   }
   const prefer = u.searchParams.get('q') || 'best'
-  return getPlayable(song, prefer)
+  return getPlayable(song, prefer, opts)
 }
 
 module.exports = {

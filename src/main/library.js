@@ -656,6 +656,8 @@ class Library {
   clearAllFailures() {
     const n = this.failures.size
     this.failures.clear()
+    // v3.3.18：让正在进行的 persistFailures 放弃 rename，别用旧清单盖掉「已清空」
+    this._failuresGen = (this._failuresGen || 0) + 1
     return n
   }
 
@@ -665,12 +667,18 @@ class Library {
 
   async persistFailures() {
     let tmp = null
+    const gen = this._failuresGen || 0
     try {
       await fsp.mkdir(path.dirname(this.failuresFile), { recursive: true })
       // v3.3.13：毫秒级 tmp 名会在同毫秒并发写时撞名（扫描结束 / 清空失败记录），
       // 第二次 rename 会 ENOENT 被吞导致写丢一次；加随机后缀保证唯一
       tmp = this.failuresFile + '.tmp-' + process.pid + '-' + Date.now().toString(36) + '-' + crypto.randomBytes(4).toString('hex')
       await fsp.writeFile(tmp, JSON.stringify({ v: 1, failures: this.listFailures() }), 'utf8')
+      // 扫描结束的落盘与「清空失败记录」并发时，旧那份不能覆盖新状态
+      if ((this._failuresGen || 0) !== gen) {
+        await fsp.unlink(tmp).catch(() => {})
+        return
+      }
       await fsp.rename(tmp, this.failuresFile)
     } catch (err) {
       console.error('[library] 失败清单写入失败:', err.message)

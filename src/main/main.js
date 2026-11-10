@@ -241,7 +241,9 @@ function isAllowedMediaPath(p) {
   ]
     .filter((r) => r && String(r).trim() && isSafeMediaRoot(r))
     .map((r) => realpathCached(path.resolve(fixDriveRoot(r))))
-    .filter(Boolean)
+    // v3.3.18：原始串通过不代表解析后也安全 —— 'D:/Music/../../Windows'
+    // 会解析成系统目录，绕过上面的 DANGEROUS_ROOT 检查当上白名单根
+    .filter((r) => r && isSafeMediaRoot(r))
     .map((r) => {
       const rl = r.toLowerCase()
       return (rl.endsWith(path.sep) ? rl.slice(0, -path.sep.length) : rl) + path.sep
@@ -492,6 +494,10 @@ function cacheSaveSoon() {
  */
 function cacheClassOf(info) {
   const ext = String((info && info.ext) || '').toLowerCase()
+  const level = String((info && info.level) || '').toLowerCase()
+  // v3.3.18：母带与普通无损共用一个 'flac' 键会让母带缓存永远写不进
+  //（finishCache 见同名文件已存在就直接丢），选母带也会命中普通 flac
+  if ((info && info.lossless) && /master|hires/.test(level)) return 'master'
   if ((info && info.lossless) || ext === 'flac') return 'flac'
   return (Number(info && info.bitrate) || 0) > 128 ? 'best' : '128'
 }
@@ -505,9 +511,20 @@ function cacheKeyOf(song, cls) {
 
 /** 请求的音质 → 可以接受的缓存档位（从优到次） */
 function cacheKeysFor(prefer) {
-  if (prefer === 'lossless' || prefer === 'master') return ['flac']
+  if (prefer === 'master') return ['master', 'flac']
+  if (prefer === 'lossless') return ['flac', 'master']
   if (prefer === '128k') return ['128', 'best']   // 省流量不吃 flac（动辄上百 MB）
   return ['best', 'flac']                          // 音质优先时 flac 当然更好
+}
+
+/** 索引可能被篡改：只放行纯文件名且解析后仍在缓存目录内的路径 */
+function safeCacheFilePath(rf) {
+  const dirResolved = path.resolve(cacheDirPath())
+  const name = String(rf || '')
+  if (!name || /[\\/]/.test(name) || name.includes('..')) return null
+  const fp = path.resolve(dirResolved, name)
+  if (fp !== dirResolved && !fp.startsWith(dirResolved + path.sep)) return null
+  return fp
 }
 
 /** 命中返回 { path, rec, cls }；文件被手动删掉或大小对不上就当作没缓存 */
@@ -518,10 +535,8 @@ function cacheTry(song, cls) {
   if (!rec) return null
   // v3.3.13：索引可能被篡改，rec.file 必须是纯文件名且解析后仍在缓存目录内
   const rf = String(rec.file || '')
-  const dirResolved = path.resolve(cacheDirPath())
-  const fp = path.resolve(dirResolved, rf)
-  if (!rf || /[\\/]/.test(rf) || rf.includes('..') ||
-      (fp !== dirResolved && !fp.startsWith(dirResolved + path.sep))) {
+  const fp = safeCacheFilePath(rf)
+  if (!fp) {
     delete idx[key]
     cacheSaveSoon()
     return null
@@ -589,7 +604,9 @@ function cacheEvict() {
   for (const it of items) {
     if (total <= target) break
     try {
-      fs.unlinkSync(path.join(cacheDirPath(), it.v.file))
+      const fp = safeCacheFilePath(it.v.file)
+      if (!fp) { delete idx[it.k]; cacheSaveSoon(); continue }
+      fs.unlinkSync(fp)
     } catch (err) {
       // v3.3.7：删不掉（文件正被播放占用）就留给下次 ——
       // 以前无条件删索引条目，文件留在磁盘上成了永远没人回收的孤儿
@@ -622,7 +639,9 @@ function cacheClear() {
   const dir = cacheDirPath()
   let n = 0
   for (const k of Object.keys(idx)) {
-    try { fs.unlinkSync(path.join(dir, idx[k].file)); n++ } catch (err) { /* 忽略 */ }
+    const fp = safeCacheFilePath(idx[k].file)
+    if (!fp) continue
+    try { fs.unlinkSync(fp); n++ } catch (err) { /* 忽略 */ }
   }
   try {
     for (const f of fs.readdirSync(dir)) {
@@ -779,6 +798,16 @@ async function handleStreamRequest(req, res) {
   // 缓存残片的兜底清理：正常路径在 pumpUpstreamBody 的 finally 里做；
   // 这里提到外层声明，好在任何早期异常时也能清掉
   let dropPart = () => {}
+  // v3.3.18：客户端断开（切歌 / 拖进度）必须能收掉解析与上游握手。
+  // 以前只在 pumpUpstreamBody 里监听 close，早于正文阶段的断开永远收不到。
+  let clientGone = false
+  const reqCtrl = new AbortController()
+  const onClientClose = () => {
+    if (res.writableFinished) return
+    clientGone = true
+    try { reqCtrl.abort() } catch (e) { /* 忽略 */ }
+  }
+  res.on('close', onClientClose)
   try {
     const u = new URL(req.url, 'http://127.0.0.1')
     if (u.pathname !== '/stream') {
@@ -808,10 +837,11 @@ async function handleStreamRequest(req, res) {
       if (hit) { sendCachedStream(req, res, song, hit, null); return }
     }
 
-    const info = await online.getPlayable(song, prefer)
+    const info = await online.getPlayable(song, prefer, { signal: reqCtrl.signal })
+    if (clientGone) return
     if (!info || !info.url) {
       logLine('[online] 代理无地址', source, id)
-      res.writeHead(404).end('no source')
+      if (!res.writableEnded) res.writeHead(404).end('no source')
       return
     }
     // 解析出来的实际音质如果正好有缓存，就别再拉一遍流。
@@ -822,11 +852,17 @@ async function handleStreamRequest(req, res) {
     }
 
     const headers = buildUpstreamHeaders(info, req)
-    const opened = await openUpstream(info, headers)
+    const opened = await openUpstream(info, headers, reqCtrl.signal)
     const upstream = opened.upstream
+    if (clientGone) {
+      try { if (upstream.body) upstream.body.cancel() } catch (e) { /* 忽略 */ }
+      return
+    }
     if (!upstream.ok && upstream.status !== 206) {
       logLine('[online] 上游失败', upstream.status, info.url.slice(0, 70))
-      res.writeHead(502).end('upstream ' + upstream.status)
+      // v3.3.18：签名直链提前失效时不能让 20 分钟的直链缓存继续命中
+      try { online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
+      if (!res.writableEnded) res.writeHead(502).end('upstream ' + upstream.status)
       return
     }
     const out = buildProxyHeaders(upstream)
@@ -905,6 +941,7 @@ async function handleStreamRequest(req, res) {
       })
     }
 
+    if (clientGone) { dropPart(); return }
     res.writeHead(upstream.status === 206 ? 206 : 200, out)
     // 告诉界面「这首实际是什么音质」——界面拿到的是解析时那一刻的结论，
     // 而真正取流发生在这里，两边可能不一致（第一次解析失败、重试成功之类）。
@@ -949,7 +986,7 @@ function sendCachedStream(req, res, song, hit, fallback) {
   sendToRenderer('online:now-playing', {
     id: `${song.source}:${song.id}`,
     song: { title: hit.rec.title || song.title, artist: hit.rec.artist || song.artist },
-    lossless: hit.cls === 'flac',
+    lossless: hit.cls === 'flac' || hit.cls === 'master',
     bitrate: fallback ? (fallback.bitrate || 0) : 0,
     ext: hit.rec.ext || (fallback && fallback.ext) || path.extname(hit.path).slice(1),
     cached: true
@@ -984,9 +1021,15 @@ function buildUpstreamHeaders(info, req) {
  *
  * @returns {{upstream: Response, ctrl: AbortController}} ctrl 供正文阶段复用
  */
-async function openUpstream(info, headers) {
+async function openUpstream(info, headers, externalSignal) {
   const ctrl = new AbortController()
   const headTimer = setTimeout(() => { try { ctrl.abort() } catch (e) { /* 忽略 */ } }, 15000)
+  // v3.3.18：客户端断开时连握手阶段的 fetch 也要收掉；listener 留到正文阶段，
+  // 由 pumpUpstreamBody 的空闲看门狗共用同一个 ctrl
+  if (externalSignal) {
+    if (externalSignal.aborted) ctrl.abort()
+    else externalSignal.addEventListener('abort', () => { try { ctrl.abort() } catch (e) { /* 忽略 */ } }, { once: true })
+  }
   try {
     const upstream = await fetch(info.url, { headers, redirect: 'follow', signal: ctrl.signal })
     return { upstream, ctrl }
@@ -1043,6 +1086,7 @@ async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache
   const onClose = () => {
     if (res.writableFinished) return
     aborted = true
+    try { ctrl.abort() } catch (e) { /* 已结束 */ }
     try { reader.cancel() } catch (e) { /* 已结束 */ }
     dropPart()
   }
@@ -2094,14 +2138,14 @@ function invalidateCurrentStream() {
       // lxstream 的形态是 http://play/<src>/<id>?...，本地代理是 /stream?src=&id=
       const parts = u.pathname.split('/').filter(Boolean)
       if (parts[0] === 'play' && parts.length >= 3) {
-        online.invalidateUrl({ source: parts[1], id: decodeURIComponent(parts[2]) },
-          u.searchParams.get('q') || 'best')
+        // v3.3.18：传 null 清掉这首歌所有档位（含 flac: 前缀与降级 best 键）
+        online.invalidateUrl({ source: parts[1], id: decodeURIComponent(parts[2]) }, null)
       }
       return
     }
     const src = u.searchParams.get('src')
     const id = u.searchParams.get('id')
-    if (src && id) online.invalidateUrl({ source: src, id }, u.searchParams.get('q') || 'best')
+    if (src && id) online.invalidateUrl({ source: src, id }, null)
   } catch (e) { /* 不是流地址（本地文件），忽略 */ }
 }
 
@@ -2546,10 +2590,15 @@ async function dlRun(task) {
   dlBroadcast(true)
 
   let ws = null
+  let reader = null     // v3.3.18：提到 try 外，异常路径也能 cancel 上游读者
   let endTimer = null   // 写盘收尾的 10 秒超时句柄，finally 里兜底清理
   try {
     let info = null
-    try { info = await online.getPlayable(task.song, qualityPref()) } catch (err) { info = null }
+    try { info = await online.getPlayable(task.song, qualityPref(), { signal: ctrl.signal }) } catch (err) { info = null }
+    // 暂停/删除可能发生在解析期间（最长十几秒），解析回来必须立刻收手
+    if (ctrl.signal.aborted || task.deleted) {
+      throw Object.assign(new Error('download aborted'), { name: 'AbortError' })
+    }
     if (!info || !info.url) throw new Error('没有可用地址（可能版权限制）')
 
     if (!task.path) {
@@ -2602,7 +2651,7 @@ async function dlRun(task) {
         else ctrl.signal.addEventListener('abort', () => resolve({ aborted: true }), { once: true })
       }
     })
-    const reader = res.body.getReader()
+    reader = res.body.getReader()
     // 只建一个 drain 等待器：以前每次写阻塞都新建一个 once('drain')，
     // 而被 wsError / abort 赢下的 race 不会移除那个监听，长下载会累积到
     // MaxListenersExceededWarning，且监听闭包一直攥着 buffer 引用
@@ -2705,6 +2754,8 @@ async function dlRun(task) {
     }
   } finally {
     if (endTimer) { clearTimeout(endTimer); endTimer = null }
+    // v3.3.18：异常/断开时上游连接不能挂到 undici 自己超时
+    if (reader) { try { const r = reader.cancel(); if (r && r.catch) r.catch(() => {}) } catch (e) { /* 忽略 */ } }
     // v3.3.13：异常路径也要释放写流句柄
     if (ws) { try { ws.destroy() } catch (e) { /* 忽略 */ } }
     // v3.3.9：只清掉自己这轮的 abort 控制器，别抹掉新一轮任务的
@@ -3144,24 +3195,34 @@ function registerOnlineIpc() {
   ipcMain.handle('online:search', async (e, { keyword, page, limit, sources } = {}) => {
     const kw = String(keyword || '').trim()
     if (!kw) return { list: [], keyword: '' }
-    const useSources = Array.isArray(sources) && sources.length
+    const rawSources = Array.isArray(sources) && sources.length
       ? sources
       : (store.get().settings.onlineSources || ['kw', 'qq', 'kg', 'wy'])
+    // v3.3.18：limit=1e9 / page=-1 / 畸形源 id 会原样灌进四家的接口与合并逻辑
+    const useSources = rawSources.filter((s) => !!online.SOURCES[s])
+    const pg = Math.min(1000, Math.max(1, Number(page) || 1))
+    const lim = Math.min(50, Math.max(1, Number(limit) || 30))
     const t0 = Date.now()
-    const list = await online.search(kw, Number(page) || 1, Number(limit) || 30, useSources)
-    logLine(`[online] 搜索「${kw}」p${page || 1} → ${list.length} 条 ${Date.now() - t0}ms`)
-    return { list, keyword: kw, page: Number(page) || 1 }
+    const list = await online.search(kw, pg, lim, useSources)
+    logLine(`[online] 搜索「${kw}」p${pg} → ${list.length} 条 ${Date.now() - t0}ms`)
+    return { list, keyword: kw, page: pg }
   })
 
   /**
    * 播放前先解析：这样「无版权/只有试听」能在界面上说清楚，
    * 而不是让 <audio> 或 mpv 直接报一个用户看不懂的错误。
    */
+  const playableCtrls = new WeakMap()
   ipcMain.handle('online:playable', async (e, song) => {
     if (!song || !song.source || !song.id) return { ok: false, error: '参数不完整' }
+    // v3.3.18：连点几首时旧解析链不该继续跑完（含 ChKSz 请求与 urlCache 写入）
+    const prev = playableCtrls.get(e.sender)
+    if (prev) { try { prev.abort() } catch (err) { /* 忽略 */ } }
+    const ctrl = new AbortController()
+    playableCtrls.set(e.sender, ctrl)
     const prefer = qualityPref()
     try {
-      const info = await online.getPlayable(song, prefer)
+      const info = await online.getPlayable(song, prefer, { signal: ctrl.signal })
       if (!info) return { ok: false, error: '各音源都没有这首歌的可用地址（多半是版权限制）' }
       const actual = info.song || song
       // v3.3.13：streamUrl 是无人读取的死字段（渲染层走 online:proxyBase 自己拼 /stream），移除
@@ -3179,6 +3240,8 @@ function registerOnlineIpc() {
       }
     } catch (err) {
       return { ok: false, error: err.message || '解析失败' }
+    } finally {
+      if (playableCtrls.get(e.sender) === ctrl) playableCtrls.delete(e.sender)
     }
   })
 
@@ -3198,17 +3261,24 @@ function registerOnlineIpc() {
     const hit = probeCache.get(ck)
     if (hit && Date.now() - hit.at < PROBE_TTL) return hit.data
     const run = async () => {
-      const probeRun = online.getPlayable(song, prefer)
+      const probeCtrl = new AbortController()
+      const probeRun = online.getPlayable(song, prefer, { signal: probeCtrl.signal })
       probeRun.catch(() => {})   // v3.3.9：超时后丢弃的那份别变成 unhandledRejection
       let probeTimer = null
       const timerP = new Promise((r) => { probeTimer = setTimeout(() => r(null), 8000) })
-      let info
+      let info = null
       try {
         info = await Promise.race([probeRun, timerP])
       } finally {
         clearTimeout(probeTimer)   // v3.3.13：成功也要清，别留 8 秒空定时器
+        // v3.3.18：超时后必须收掉输家，否则无损链仍后台跑完并扣每日额度
+        if (!info) probeCtrl.abort()
       }
-      if (!info) throw new Error('no info')
+      if (!info) {
+        // 失败也短缓存 30 秒：滚动列表反复重发同一首的探测同样会烧额度
+        probeCache.set(ck, { at: Date.now() - (PROBE_TTL - 30000), data: { ok: false } })
+        throw new Error('no info')
+      }
       const data = {
         ok: true,
         lossless: !!info.lossless,

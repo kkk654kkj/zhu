@@ -261,6 +261,8 @@ class MpvEngine {
       let n = 0
       const tryOnce = () => {
         this._retryTimer = null
+        // v3.3.18：kill 之后旧代次的重试不能再连管道，也不能覆盖新引擎的 _retryTimer
+        if (guarded && !(gen === this._gen && this.proc === proc)) { resolve(false); return }
         n++
         const sock = net.connect(this.pipeName)
         let settled = false
@@ -286,6 +288,7 @@ class MpvEngine {
         sock.once('error', () => {
           if (settled) return
           try { sock.destroy() } catch {}
+          if (guarded && !(gen === this._gen && this.proc === proc)) { resolve(false); return }
           if (n >= times) resolve(false)
           else this._retryTimer = setTimeout(tryOnce, delayMs)
         })
@@ -581,6 +584,13 @@ class MpvEngine {
     })
   }
 
+  /** 作废所有等 file-loaded 的等待者（reset / kill / 进程退出都要调） */
+  _clearLoadedWaiters() {
+    const waiters = this._loadedWaiters
+    this._loadedWaiters = []
+    for (const w of waiters) w.finish(false)
+  }
+
   _rejectPending(reason) {
     for (const [, p] of this._pending) {
       clearTimeout(p.timer)
@@ -603,6 +613,7 @@ class MpvEngine {
     this._gen++
     this.ready = false
     this._rejectPending('mpv 已关闭')
+    this._clearLoadedWaiters()   // v3.3.18：kill 时别留 2.5 秒的等待者/定时器
     if (this.sock) { try { this.sock.destroy() } catch {} }
     this.sock = null
     const p = this.proc
@@ -611,9 +622,13 @@ class MpvEngine {
     try { p.kill() } catch (err) { /* 忽略 */ }
     // Windows 上 TerminateProcess 一般立刻生效；万一卡在 WASAPI 里，800ms 后再补一刀，
     // 免得留下一个还在出声的孤儿进程（独占时它会把设备一直占着）
-    setTimeout(() => {
+    // v3.3.18：句柄存下来并 unref —— 未追踪的 800ms 定时器会在快速 kill→start
+    // 序列里留到下一轮，退出时还会白挂住进程
+    this._killTimer = setTimeout(() => {
+      this._killTimer = null
       try { if (p.exitCode === null && !p.killed) p.kill('SIGKILL') } catch (err) { /* 忽略 */ }
     }, 800)
+    if (this._killTimer.unref) this._killTimer.unref()
   }
 
   /**
@@ -646,9 +661,7 @@ class MpvEngine {
     this._eofAt = 0
     this._idle = true
     this._loadSeq++
-    const waiters = this._loadedWaiters
-    this._loadedWaiters = []
-    for (const w of waiters) w.finish(false)
+    this._clearLoadedWaiters()
   }
 
   /** 内部：停掉进程并等它真的退出（不改变「已释放」状态，restart 用） */
@@ -683,6 +696,7 @@ class MpvEngine {
     this.ready = false
     this._clearTimers()
     this._rejectPending('mpv 进程退出')
+    this._clearLoadedWaiters()
     this.sock = null
     this.proc = null
   }
