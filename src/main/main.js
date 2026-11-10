@@ -234,7 +234,9 @@ function isAllowedMediaPath(p) {
   ]
     .filter((r) => r && String(r).trim() && isSafeMediaRoot(r))
     .map((r) => realpathCached(path.resolve(fixDriveRoot(r))))
-    .filter(Boolean)
+    // v3.3.18：原始串通过不代表解析后也安全 —— 'D:/Music/../../Windows'
+    // 会解析成系统目录，绕过上面的 DANGEROUS_ROOT 检查当上白名单根
+    .filter((r) => r && isSafeMediaRoot(r))
     .map((r) => {
       const rl = r.toLowerCase()
       return (rl.endsWith(path.sep) ? rl.slice(0, -path.sep.length) : rl) + path.sep

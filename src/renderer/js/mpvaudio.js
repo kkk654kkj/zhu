@@ -159,6 +159,9 @@ class MpvAudio {
 
   removeAttribute(name) {
     if (name === 'src') {
+      // v3.3.18：清 src 也要推进代次，否则在途 mpv:load 回调仍会把刚停止的
+      // 界面改回暂停 / emit('error') 触发自动跳曲
+      this._loadEpoch++
       this._srcPath = null
       this._paused = true
       this._wantPlaying = false

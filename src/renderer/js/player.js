@@ -199,7 +199,12 @@ class Player extends Emitter {
     }
     const p = this.audio.play()
     if (p && p.catch) p.catch((err) => {
-      if (err && err.name !== 'AbortError') console.warn('[player] play 失败:', err.message)
+      // 自动播放策略拒绝（NotAllowedError）不是文件坏了，别触发自动跳曲
+      if (!err || err.name === 'AbortError' || err.name === 'NotAllowedError') return
+      console.warn('[player] play 失败:', err.message)
+      // v3.3.18：直链失效 / 格式不支持时以前只打一行 warn，app.js 的 error
+      // 处理完全收不到 —— 界面停在「播放中」却没声音，也不会自动跳曲
+      this.emit('error', err)
     })
     this._fadeIn()
   }

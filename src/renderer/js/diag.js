@@ -95,20 +95,23 @@ const Diag = {
   async open() {
     const modal = this.el('diagModal')
     if (!modal || !modal.hidden) return
+    // v3.3.18：关闭→再打开时旧 open() 链会复活并重复起轮询，用 token 作废
+    const my = (this._openToken = (this._openToken || 0) + 1)
     modal.hidden = false
     // 每次打开都重新拉一次快照：用户多半是「刚出问题」才点进来的
     this.info = await window.api.diagInfo().catch(() => null)
     // v3.3.16：await 期间用户可能已经点了关闭。以前不校验，接着往下走会把
     // 面板重新填满、并把 mpv 实时轮询启动起来 —— 于是「已关闭的面板」在后台
     // 每秒拉一次日志，直到下次打开又关闭才会停。
-    if (!this.isOpen()) return
+    if (my !== this._openToken || !this.isOpen()) return
     this.renderEnv()
     await this.loadFailures()
-    if (!this.isOpen()) return
+    if (my !== this._openToken || !this.isOpen()) return
     if (this.tab === 'mpv') this.enterMpvTab()
   },
 
   close() {
+    this._openToken = (this._openToken || 0) + 1
     const modal = this.el('diagModal')
     if (!modal) return
     modal.hidden = true
