@@ -350,6 +350,7 @@ const UI = {
       const i = Number(el.dataset.i)
       const v = Number(bands[i]) || 0
       if (Number(el.value) !== v) el.value = String(v)
+      el.disabled = this.eqDisabled
       const db = this.els['eqDb' + i] || document.getElementById('eqDb' + i)
       if (db) {
         db.textContent = (v > 0 ? '+' : '') + (Number.isInteger(v) ? v : v.toFixed(1))
@@ -380,7 +381,11 @@ const UI = {
 
   eqDisabled: false,
 
-  /** 独占输出下禁用 EQ / 音量均衡按钮 */
+  /** 独占输出下禁用 EQ / 音量均衡按钮
+   *  v3.3.18（第四轮 P1 #8）：除了加 .disabled class，还要真的把 10 个滑块设成
+   *  el.disabled = true —— css/app.css 的「禁用态」仍然可点，以前拖滑块会走到
+   *  applyEq（因 !ctx 早退）但 renderEq + saveSettings 照常执行，白污染 settings.json。
+   */
   setEqDisabled(disabled) {
     this.eqDisabled = !!disabled
     for (const id of ['btnEq', 'btnNorm']) {
@@ -388,6 +393,10 @@ const UI = {
       if (!el) continue
       el.classList.toggle('disabled', this.eqDisabled)
     }
+    // 滑块与预设 chip 一并真正禁用
+    $$('#eqBands input[type="range"]').forEach((el) => { el.disabled = this.eqDisabled })
+    $$('#eqPresets .eq-chip').forEach((el) => { el.disabled = this.eqDisabled })
+    if (this.els.btnEqPower) this.els.btnEqPower.disabled = this.eqDisabled
     if (this.eqDisabled) {
       this.els.btnEq.title = '独占输出下不可用（会破坏位完美）'
       this.els.btnNorm.title = '独占输出下不可用（会破坏位完美）'

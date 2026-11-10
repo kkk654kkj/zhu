@@ -26,6 +26,8 @@ const state = {
   counted: false,
   mini: false,           // 迷你模式（窗口尺寸由主进程管，这里管布局）
   exclusive: false,      // 独占输出（mpv 后端）是否生效
+  exclusiveFellBack: false, // mpv 已自行回退到 WASAPI 共享（后端仍是 mpv，不再是位完美）
+  audioGraphReady: false,   // WebAudio 链是否真的建起来了（EQ / 音量均衡 / 频谱的唯一生效前提）
   resumePos: {},         // 长音轨断点位置 {trackId: 秒}（v1.6）
   restoringSession: false,// 正在恢复上次会话（此时不要叠加断点续播）
   selected: new Set(),   // 列表多选（v1.7）
@@ -404,9 +406,22 @@ function applySettings() {
  */
 function setupAudioGraph() {
   const ok = AudioFx.init(audio)
+  state.audioGraphReady = !!ok
   if (!ok) toast('音频特效不可用，将以原声播放')
   return ok
 }
+
+/**
+ * EQ / 音量均衡 / 手动增益 / 频谱是否被禁用。
+ * v3.3.18（第四轮 P1 #8）：判据从「state.exclusive」改成「WebAudio 链没建起来」——
+ * 独占回退共享后 audio 仍是 MpvAudio、AudioFx.ctx 始终为 null，以前靠 state.exclusive
+ * 判定会在回退后误放行，用户拖滑块毫无效果却照样落盘。
+ */
+function eqBlocked() {
+  return state.exclusive || !state.audioGraphReady
+}
+
+const EQ_BLOCKED_MSG = '独占输出下均衡器/音量均衡不可用（软件处理会破坏位完美）'
 
 /** 当前曲目应施加的增益（dB）：手动优先，其次按开关取分析值 */
 function trackGainDb(id) {
@@ -1063,8 +1078,15 @@ function bindPlayer() {
     if (cur && state.lastErrKey === cur.id && Date.now() - state.lastErrAt < 2000) return
     if (cur) { state.lastErrKey = cur.id; state.lastErrAt = Date.now() }
 
+    // v3.3.18（第四轮 P1 #7）：在线曲放不出来 = 这条直链多半已经失效。
+    // 以前只有 mpv **独占**下的 file-error 会让主进程作废直链缓存；默认共享输出时
+    // <audio> 的 error 到不了主进程，死链在 20 分钟缓存里被反复命中，换源永不触发。
+    if (cur && cur.online && cur.source && cur.id) {
+      window.api.onlineInvalidate({ source: cur.source, id: cur.id }).catch(() => {})
+    }
+
     // 独占模式下多半是声卡/引擎问题，不是文件坏了：绝不自动跳曲。
-    // （fallback 时 onMpvEvent / audio 'fallback' 已把 state.exclusive 同步为 false）
+    // （v3.3.18 起回退共享只置 state.exclusiveFellBack，后端仍是 mpv，判据不变）
     if (state.exclusive) {
       toast('音频输出失败：' + ((audio && audio.lastError) || '设备不可用，已暂停'))
       player.pause()
@@ -1149,12 +1171,20 @@ function isBitPerfect() {
   return !src || Number(f.samplerate) === Number(src)
 }
 
-/** 独占失败自动回退共享：把运行时状态与所有派生 UI 一次性同步到 false */
+/** 独占失败自动回退共享：把运行时状态与所有派生 UI 一次性同步
+ *
+ * v3.3.18（第四轮 P1 #8）：**不能**把 state.exclusive 置 false。回退的是 mpv 的
+ * WASAPI 共享模式，audio 仍是 MpvAudio，WebAudio 链从来没建过。以前在这里置 false，
+ * 导致下游 7 处「独占下禁用」判据全部误放行：
+ *   · EQ / 音量均衡 / 响度分析 / 手动增益可操作但无效，还照旧落盘污染 settings.json；
+ *   · DSD 被误拦（提示「需要独占输出」，实际 mpv 仍能放）；
+ *   · keepAliveMediaSession 走错分支 → SMTC / 媒体键失效；
+ *   · player.on('error') 进入共享的失败连跳（设备类错误连跳 3 首）。
+ * 现在只立 exclusiveFellBack 供徽标显示，后端语义保持不变。
+ */
 function applyExclusiveFallback() {
-  state.exclusive = false
-  // v3.3.17：回退后**不能**恢复 EQ/音量均衡。回退的是 mpv 的 WASAPI 共享模式，
-  // audio 仍是 MpvAudio，setupAudioGraph() 从来没跑过（独占分支不走 WebAudio）——
-  // 按钮恢复可用只会让用户拖半天滑块毫无效果，还照样落盘。
+  state.exclusiveFellBack = true
+  // 回退后**不能**恢复 EQ：见上，WebAudio 链仍不存在，按钮可点只会让用户白折腾
   UI.setEqDisabled(true)
   UI.setSpectrumVisible(false)
   UI.setNorm(false)
@@ -1855,7 +1885,7 @@ function bindTransportUi() {
 
   // 音量均衡开关 + 右键菜单（分析 / 目标响度 / 清除）
   document.getElementById('btnNorm').addEventListener('click', () => {
-    if (state.exclusive) { toast('独占输出下音量均衡不可用（会破坏位完美）'); return }
+    if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
     const on = !(state.settings.normalizeVolume === true)
     state.settings.normalizeVolume = on
     saveSettings({ normalizeVolume: on })
@@ -1866,7 +1896,7 @@ function bindTransportUi() {
   })
   document.getElementById('btnNorm').addEventListener('contextmenu', (e) => {
     e.preventDefault()
-    if (state.exclusive) { toast('独占输出下响度分析不可用（会破坏位完美）'); return }
+    if (eqBlocked()) { toast('响度分析需要 WebAudio 链：当前输出下不可用'); return }
     const target = state.settings.targetLufs || LUFS_DEFAULT_TARGET
     const lufsItems = [-14, -16, -18, -20].map((v) => ({
       label: `${v} LUFS${v === target ? ' ✓' : ''}`,
@@ -1924,7 +1954,7 @@ function bindEqUi() {
   // 均衡器面板（独占输出下禁用：任何软件处理都会破坏位完美）
   document.getElementById('btnEq').addEventListener('click', (e) => {
     e.stopPropagation()
-    if (state.exclusive) { toast('独占输出下均衡器不可用（会破坏位完美）'); return }
+    if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
     UI.toggleEq()
   })
 
@@ -1944,22 +1974,28 @@ function bindEqUi() {
   })
   document.getElementById('btnEqClose').addEventListener('click', () => UI.toggleEq(false))
   document.getElementById('btnEqPower').addEventListener('click', () => {
+    // v3.3.18（P1 #8）：滑块虽已 el.disabled，按钮仍是可点的，这里补齐早退
+    if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
     const cfg = eqSettings()
     cfg.enabled = !cfg.enabled
     applyEq(cfg)
     toast(cfg.enabled ? '均衡器已开启' : '均衡器已关闭')
   })
   document.getElementById('btnEqFlat').addEventListener('click', () => {
+    if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
     applyEq({ enabled: eqSettings().enabled, preset: 'flat', bands: EQ_PRESETS.flat.bands.slice() })
   })
   document.getElementById('eqPresets').addEventListener('click', (e) => {
     const chip = e.target.closest('.eq-chip')
-    if (chip) applyEqPreset(chip.dataset.preset)
+    if (!chip) return
+    if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
+    applyEqPreset(chip.dataset.preset)
   })
   // 滑块：input 拖动实时生效（applyEq 内部 300ms 去抖落盘）
   const onEqSlider = (e) => {
     const el = e.target
     if (!el.matches || !el.matches('#eqBands input[type="range"]')) return
+    if (eqBlocked()) return
     setEqBand(Number(el.dataset.i), el.value)
   }
   document.getElementById('eqBands').addEventListener('input', debounce(onEqSlider, 30))
@@ -2281,7 +2317,7 @@ async function handleCtxAction(act, arg) {
       break
     }
     case 'set-gain': {
-      if (state.exclusive) { toast('独占输出下手动增益不可用（会破坏位完美）'); return }
+      if (eqBlocked()) { toast(EQ_BLOCKED_MSG); return }
       const db = parseFloat(arg)
       if (Number.isNaN(db)) return
       const manualGains = Object.assign({}, state.settings.manualGains || {})

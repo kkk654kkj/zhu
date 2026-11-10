@@ -2126,23 +2126,28 @@ function mpvExePath() {
 
 /**
  * 从「当前正在加载的流地址」反推回 song，作废它的直链缓存。
- * 只处理主进程自己拼的两种地址：lxstream:// 与本地代理的 /stream。
+ * 只处理主进程自己拼的两种地址：lxstream://play/<source>/<id> 与本地代理的 /stream?src=&id=
  */
 function invalidateCurrentStream() {
   const file = String((mpvEngine && mpvEngine._lastFile) || '')
   if (!file) return
   try {
-    const u = new URL(file.startsWith('lxstream://') ? file.replace('lxstream://', 'http://') : file)
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return
-    if (u.pathname !== '/stream' && !u.hostname.startsWith('127.0.0.1')) {
-      // lxstream 的形态是 http://play/<src>/<id>?...，本地代理是 /stream?src=&id=
-      const parts = u.pathname.split('/').filter(Boolean)
-      if (parts[0] === 'play' && parts.length >= 3) {
+    // 第四轮 §3.3 #3：旧的 legacy 分支是死代码 —— lxstream://play/<src>/<id> 里 "play" 是 host，
+    // 换成 http:// 后 hostname='play'、pathname='/<src>/<id>'，`parts[0] === 'play'` 恒假，
+    // 于是这条分支从来没作废过任何东西。这里按真实形态分别解析。
+    if (file.startsWith('lxstream://')) {
+      const u = new URL(file)
+      if (u.hostname !== 'play' && !u.hostname) return
+      const parts = u.pathname.replace(/^\/+/, '').split('/').filter(Boolean)
+      if (parts.length >= 2) {
         // v3.3.18：传 null 清掉这首歌所有档位（含 flac: 前缀与降级 best 键）
-        online.invalidateUrl({ source: parts[1], id: decodeURIComponent(parts[2]) }, null)
+        online.invalidateUrl({ source: decodeURIComponent(parts[0]), id: decodeURIComponent(parts[1]) }, null)
       }
       return
     }
+    const u = new URL(file)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return
+    if (u.pathname !== '/stream') return
     const src = u.searchParams.get('src')
     const id = u.searchParams.get('id')
     if (src && id) online.invalidateUrl({ source: src, id }, null)
@@ -3242,6 +3247,23 @@ function registerOnlineIpc() {
       return { ok: false, error: err.message || '解析失败' }
     } finally {
       if (playableCtrls.get(e.sender) === ctrl) playableCtrls.delete(e.sender)
+    }
+  })
+
+  /**
+   * v3.3.18（第四轮 P1 #7）：作废某首歌的直链缓存。
+   *
+   * 以前只有 mpv **独占**输出下的 file-error 会走 invalidateCurrentStream()，
+   * 而默认共享输出时 mpvEngine 为空，那条链第一行就 return —— 死链在 20 分钟缓存里
+   * 被反复命中，换源不触发，用户只能重启。渲染层 <audio> 报错时改走这个 IPC 对称作废。
+   */
+  ipcMain.handle('online:invalidate', (e, song) => {
+    if (!song || !song.source || !song.id) return { ok: false }
+    try {
+      const hit = online.invalidateUrl({ source: String(song.source), id: String(song.id) }, song.prefer || null)
+      return { ok: true, hit: !!hit }
+    } catch (err) {
+      return { ok: false }
     }
   })
 

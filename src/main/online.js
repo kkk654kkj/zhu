@@ -174,6 +174,39 @@ async function reqJson(url, opts) {
   }
 }
 
+/* ---------------- 预算下推（第四轮审查 P1 #5） ---------------- */
+
+/**
+ * 把「剩余预算」下推成下游请求的 timeout + 超时 signal。
+ *
+ * 历史问题：maybeUpgrade / resolvePlayable 的预算只在 await **之间**复查，
+ * 单次 search / getUrl 仍按默认 15s 跑（429/5xx 退避重试可到约 30s），
+ * probeStream 还要 2×8s=16s —— 单候选最坏约 76s，注释承诺的「6 秒 / 12 秒」完全没兑现，
+ * 用户点歌后 1~2 分钟无声无进度，等同卡死。
+ * 现在每个下游调用都带剩余预算的 timeout 与能主动 abort 的 signal，await 之后立刻复检。
+ */
+const MIN_BUDGET_MS = 500
+
+function timeoutSignal(ms) {
+  const v = Math.max(1, Math.floor(ms))
+  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(v)
+  const c = new AbortController()
+  const t = setTimeout(() => { try { c.abort() } catch (e) { /* 已 abort */ } }, v)
+  if (t.unref) t.unref()
+  return c.signal
+}
+
+/** 给下游阶段分预算：ratio 是本次调用可用的比例（search 小、probe 大） */
+function shareBudget(leftMs, ratio) {
+  return Math.max(MIN_BUDGET_MS, Math.floor((Number(leftMs) || 0) * ratio))
+}
+
+/** 生成带 timeout + 超时 signal 的 opts；调用方读完要复检 expired()/left() */
+function withBudget(opts, leftMs) {
+  const budget = Math.max(MIN_BUDGET_MS, Math.floor(Number(leftMs) || 0))
+  return { ...(opts || {}), timeout: budget, signal: anySignal(opts && opts.signal, timeoutSignal(budget)) }
+}
+
 function encode(s) {
   return encodeURIComponent(s)
 }
@@ -713,21 +746,21 @@ function urlCachePut(key, rec) {
  */
 function invalidateUrl(song, prefer) {
   if (!song) return false
-  const base = cacheKey(song, prefer || 'best')
-  // v3.3.18：无损结果写的是 'flac:' + cacheKey(...)，以前两个分支都匹配不到：
-  // 精确键只删不带前缀的，全清分支又用 startsWith('src:id:') 漏掉 'flac:src:id:'。
-  // 结果 file-error 后 20 分钟内仍反复命中同一条死链，换源永远不触发。
+  // 第四轮 §4.5.1 #5 + §4.5.5 #1：原实现有两个缺口
+  //  ① 只删「请求档」的键（prefer='lossless' 只删 lossless + flac:lossless），
+  //    而 /stream 上游失败传的是原始 q=lossless，降级链实际命中的却是 best 键 → 死链留在缓存；
+  //  ② 「全清」分支靠 `|| 'best'` 兜底，调用方又都传了 prefer，实际走不到。
+  // 直链死了就是死了（风控/换签名不看音质档），统一按 `src:id:` 前缀清掉该曲的全部档位。
   const prefix = song.source + ':' + song.id + ':'
-  const keys = prefer ? [base, 'flac:' + base] : Array.from(urlCache.keys())
   let hit = false
-  for (const k of keys) {
-    if (prefer) {
-      if (urlCache.delete(k)) hit = true
-    } else if (k.startsWith(prefix) || k.startsWith('flac:' + prefix)) {
+  for (const k of Array.from(urlCache.keys())) {
+    const bare = k.startsWith('flac:') ? k.slice(5) : k
+    if (bare.startsWith(prefix)) {
       urlCache.delete(k)
       hit = true
     }
   }
+  if (hit) logger('[online] 作废直链缓存 ' + prefix + (prefer ? ' (prefer=' + prefer + ')' : ''))
   return hit
 }
 
@@ -746,15 +779,24 @@ function cacheKey(song, prefer) {
  */
 async function probeStream(info, realDuration, expectDuration = 0, opts = {}) {
   const signal = opts.signal
+  // 第四轮 P1 #5：probeStream 以前固定 2×8s=16s，与上层预算完全脱钩。
+  // 现在按传入的剩余预算分摊到每次尝试，预算不够就只试一次、再不够就直接 unverified。
+  const totalBudget = Number(opts.timeout) > 0 ? Number(opts.timeout) : 0
+  const probeT0 = Date.now()
+  const leftProbe = () => (totalBudget ? totalBudget - (Date.now() - probeT0) : 8000)
+  const maxAttempts = totalBudget && totalBudget < 6000 ? 1 : 2
   // v3.3.7：探测失败重试一次 —— 网络抖动一次就不给结果，
   // 会让试听片段被当成完整版进缓存
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
   if (signal && signal.aborted) return { ...info, unverified: true }
+  const perTry = totalBudget
+    ? Math.max(MIN_BUDGET_MS, Math.floor(leftProbe() / (maxAttempts - attempt)))
+    : 8000
   try {
     const headers = { Range: 'bytes=0-1' }
     if (info.referer) headers.Referer = info.referer
     if (info.headers && typeof info.headers === 'object') Object.assign(headers, info.headers)
-    const res = await req(info.url, { headers, timeout: 8000, signal })
+    const res = await req(info.url, { headers, timeout: perTry, signal })
     // v3.3.13：本函数只看响应头，正文必须显式取消，否则每个探测留 8 秒 timer + 连接
     try { res.release && res.release() } catch (e) { /* 忽略 */ }
     // v3.3.8：先看状态码 —— 404/503 的直链以前只要 content-type 不是 html
@@ -780,7 +822,7 @@ async function probeStream(info, realDuration, expectDuration = 0, opts = {}) {
     }
   } catch (err) {
     if (signal && signal.aborted) return { ...info, unverified: true }
-    if (attempt === 1) {
+    if (attempt >= maxAttempts - 1) {
       // 再失败只能原样放行，但必须标记 unverified ——
       // 否则 30 秒试听片段会被当成完整版写进 20 分钟直链缓存
       return { ...info, unverified: true }
@@ -886,15 +928,28 @@ async function qingEnsureTicket(opts = {}) {
         const j = await r.json().catch(() => null)
         if (j && j.ticket) {
           qingTicket = j.ticket
-          // v3.3.8：expiresAt 单位防御 —— 若服务端返回秒（<1e12），按毫秒比会
-          // 让票据永远「已过期」，每次解析都白跑一趟领票接口
-          let exp = Number(j.expiresAt)
-          // v3.3.18：expiresAt 可能是「绝对秒 / 绝对毫秒 / 相对 TTL 秒」三种。
-          // 相对 TTL（如 43200）乘 1000 后落在 1970 年，票据永远判已过期，
-          // 每首歌都白跑一次 8 秒领票接口，还会成为无损窗口的后台输家。
-          if (exp > 0 && exp < 1e9) exp = Date.now() + exp * 1000
-          else if (exp >= 1e9 && exp < 1e12) exp *= 1000
-          qingTicketExp = exp > 0 ? exp - 600000 : Date.now() + 3600000
+          // v3.3.18（第四轮审查 P1 #6）：expiresAt 可能给「绝对毫秒 / 绝对秒 / 相对 TTL 秒」三种口径，
+          // 也可能给 Infinity / 0 / 非法值。原先用 `<1e9 一律当相对秒` 的启发式：
+          //   TTL=300（5 分钟）→ 算出「5 分钟前就过期」→ 每首重领票，而无损窗口只有 7/12s；
+          //   TTL 用毫秒给（43200000）→ 被当秒，算出约 500 天后过期；
+          //   Infinity → 永不过期。三者都让无损链路系统性失效。
+          // 现改为显式单位分支 + 提前量夹取，并保证 qingTicketExp 一定大于 now。
+          const now = Date.now()
+          const raw = Number(j.expiresAt)
+          let absExp
+          if (!Number.isFinite(raw) || raw <= 0) {
+            absExp = now + 3600 * 1000                                   // 没给 / 非法：保守按 1 小时
+          } else if (raw < 1e9) {
+            absExp = now + Math.min(raw * 1000, 12 * 3600 * 1000)         // 相对 TTL 秒（上限 12h）
+          } else if (raw < 1e12) {
+            absExp = raw * 1000                                          // 绝对秒
+          } else {
+            absExp = Math.min(raw, now + 12 * 3600 * 1000)                // 绝对毫秒（异常大值也夹到 12h）
+          }
+          const life = Math.max(0, absExp - now)
+          const lead = Math.min(600000, life * 0.1)                       // 提前量 min(10 分钟, 寿命 10%)
+          qingTicketExp = absExp - lead
+          if (!(qingTicketExp > now)) qingTicketExp = now + Math.max(1000, life * 0.5)
           return qingTicket
         }
       } catch (err) { /* 换下一条线路 */ }
@@ -1293,15 +1348,17 @@ async function maybeUpgrade(res, song, prefer, opts = {}) {
     if (id === res.song.source || !SOURCES[id]) continue
     if (left() <= 0) break
     try {
-      const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10, opts)
+      // 第四轮 P1 #5：预算下推 —— search 只占 40%，剩下的留给 getUrl + probe
+      const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10, withBudget(opts, shareBudget(left(), 0.4)))
       if (left() <= 0) break
       const cands = rankMatches(list, song).slice(0, 2)
       for (const cand of cands) {
         if (left() <= 0) break
-        const got = await SOURCES[id].getUrl(cand, prefer, opts)
+        const got = await SOURCES[id].getUrl(cand, prefer, withBudget(opts, shareBudget(left(), 0.4)))
         if (!got || !got.url) continue
         if (left() <= 0) break
-        const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0, opts)
+        const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0, withBudget(opts, left()))
+        if (left() <= 0) break
         if (probed.broken || probed.partial || probed.unverified) continue
         if ((probed.bitrate || 0) < 128) continue
         const rec = { ...probed, at: Date.now() }
@@ -1341,12 +1398,14 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true, si
   const src = SOURCES[song.source]
   if (src) {
     try {
-      const got = await src.getUrl(song, prefer, opts)
-      if (got && got.url) {
+      // 第四轮 P1 #5：主链路的两个 await 以前完全不看预算（首轮最长约 46s 才第一次判预算），
+      // 现在 getUrl 拿剩余预算的一半、probe 拿剩下的，两个都带超时 signal。
+      const got = await src.getUrl(song, prefer, withBudget(opts, shareBudget(deadline - Date.now(), 0.5)))
+      if (got && got.url && !(signal && signal.aborted)) {
         // 三个参数缺一不可：realDuration 是「接口自报的这段音频有多长」，
         // expectDuration 是「这首歌本该多长」。只传前两个会让「片段时长明显偏短」
         // 这条判据永远为假 —— 45 秒剪辑版按 240 秒算出来的码率反而很健康。
-        const probed = await probeStream(got, got.duration || song.duration || 0, song.duration || 0, opts)
+        const probed = await probeStream(got, got.duration || song.duration || 0, song.duration || 0, withBudget(opts, deadline - Date.now()))
         // v3.3.17：unverified（探测两次都失败 / CDN 不回 content-range）以前在这里
         // 直接 return，等于「接受一条永不可信、永不缓存、也永不换源的地址」，
         // 而 tryList / maybeUpgrade / 青听对它是跳过 —— 同一个结果两种处置。
@@ -1355,7 +1414,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true, si
           if (!unverified) unverified = { ...probed, song, fallback: false }
         } else if (!probed.partial && !probed.broken) {
           const rec = { ...probed, at: Date.now() }
-          urlCachePut(key, rec)
+          if (!expired()) urlCachePut(key, rec)
           return { ...rec, song, fallback: false }
         } else if (probed.partial) {
           partial = { ...probed, at: Date.now(), song }
@@ -1378,9 +1437,12 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true, si
       .slice(0, 3)
     for (const cand of cands) {
       if (expired()) break
-      const got = await SOURCES[id].getUrl(cand, prefer, opts)
+      const got = await SOURCES[id].getUrl(cand, prefer, withBudget(opts, shareBudget(deadline - Date.now(), 0.5)))
       if (!got || !got.url) continue
-      const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0, opts)
+      if (expired()) break
+      const probed = await probeStream(got, cand.duration || got.duration, song.duration || 0, withBudget(opts, deadline - Date.now()))
+      // 第四轮 §4.5.1 #1：await 之后必须复检预算，已超时的轮次不能再写缓存/当结果返回
+      if (expired()) break
       if (probed.broken || probed.unverified) continue
       if (probed.partial) {
         if (!partial || (probed.size || 0) > (partial.size || 0)) partial = { ...probed, at: Date.now(), song: cand }
@@ -1396,9 +1458,11 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true, si
   // ① 本源内换候选
   if (src && !expired()) {
     try {
-      const list = await src.search(`${song.title} ${song.artist}`.trim(), 1, 10, opts)
-      const got = await tryList(song.source, list)
-      if (got) return got
+      const list = await src.search(`${song.title} ${song.artist}`.trim(), 1, 10, withBudget(opts, shareBudget(deadline - Date.now(), 0.4)))
+      if (!expired()) {
+        const got = await tryList(song.source, list)
+        if (got) return got
+      }
     } catch (err) { /* 继续跨源 */ }
   }
 
@@ -1408,7 +1472,8 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true, si
   for (const id of others) {
     if (expired()) break
     try {
-      const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10, opts)
+      const list = await SOURCES[id].search(`${song.title} ${song.artist}`.trim(), 1, 10, withBudget(opts, shareBudget(deadline - Date.now(), 0.4)))
+      if (expired()) break
       const got = await tryList(id, list)
       if (got) return got
     } catch (err) { /* 下一个源 */ }

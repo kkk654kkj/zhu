@@ -70,8 +70,10 @@ contextBridge.exposeInMainWorld('api', {
   onlineSources: () => invoke('online:sources'),
   onlineProxyBase: () => invoke('online:proxyBase'),
   onlineSearch: (opts) => invoke('online:search', opts),
-  /** 解析播放地址：{ ok, streamUrl, song, fallback, partial, bitrate, error } */
+  /** 解析播放地址：{ ok, song, fallback, partial, lossless, level, bitrate, ext, error } */
   onlinePlayable: (song) => invoke('online:playable', song),
+  /** v3.3.18（第四轮 P1 #7）：<audio> 报错时作废该曲直链缓存，返回 { ok, hit } */
+  onlineInvalidate: (song) => invoke('online:invalidate', song),
   onlineProbe: (song) => invoke('online:probe', song),
   onlineLyric: (song) => invoke('online:lyric', song),
   onlineDownload: (song) => invoke('online:download', song),

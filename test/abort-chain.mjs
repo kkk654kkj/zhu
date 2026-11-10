@@ -29,6 +29,9 @@ function loadOnline() {
 }
 
 const origFetch = globalThis.fetch
+// 时间压缩用例会替换 globalThis.setTimeout，断言用的「看门狗」必须走原始那份，
+// 否则 withDeadline(1500) 自己也会被压成 100ms
+const rawSetTimeout = globalThis.setTimeout
 let passed = 0
 function ok(name) { passed++; console.log('  PASS ' + name) }
 
@@ -68,7 +71,7 @@ async function withDeadline(p, ms, label) {
   try {
     return await Promise.race([
       p,
-      new Promise((_, rej) => { t = setTimeout(() => rej(new Error('timeout: ' + label)), ms) })
+      new Promise((_, rej) => { t = rawSetTimeout(() => rej(new Error('timeout: ' + label)), ms) })
     ])
   } finally {
     if (t) clearTimeout(t)
@@ -177,9 +180,11 @@ try {
       if (!firstAbortAt) firstAbortAt = Date.now()
       return origAbort.apply(this, args)
     }
-    // 7 秒窗口压到 60ms；各请求的 8/15 秒超时压到 100ms 让桩快速收敛
+    // 7 秒窗口压到 60ms；各请求 / 探测 / 阶段预算的超时一律压到 100ms 让桩快速收敛。
+    // v3.3.18 起请求超时不再固定 8s/15s —— P1 #5 把「剩余预算」下推成了下游 timeout
+    // （常见 1~6s），所以这里从 `>= 8000` 放宽到 `>= 1000`，否则下推后的短超时不会被压缩。
     globalThis.setTimeout = (fn, ms, ...a) =>
-      origSetTimeout(fn, ms === 7000 ? 60 : (ms >= 8000 ? 100 : ms), ...a)
+      origSetTimeout(fn, ms === 7000 ? 60 : (ms >= 1000 ? 100 : ms), ...a)
     const t0 = Date.now()
     try {
       const got = await withDeadline(A.getPlayable(song, 'lossless'), 1500, '无损窗口超时应立刻降级收敛')
