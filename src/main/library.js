@@ -338,20 +338,26 @@ function safeUtf8Cut(buf, n) {
   return n
 }
 
+/** 文件是否存在（异步，扫描热路径用） */
+async function fileExists(p) {
+  if (!p) return false
+  try { await fsp.access(p); return true } catch (e) { return false }
+}
+
 /** 读 LRC 头部标签（ti/ar/al），只读前 8KB；失败返回 null */
-function readLrcMeta(lyricPath) {
+async function readLrcMeta(lyricPath) {
   if (!lyricPath) return null
   try {
-    const fd = fs.openSync(lyricPath, 'r')
-    // v3.3.9：readSync 抛错时原来不会 close —— 句柄滞留到 GC
-    // v3.3.10：buf 必须声明在 try 外 —— 上一版把 const buf 写进了内层 try，
-    // 出块后引用必然 ReferenceError 被 catch 吞掉，函数 100% 失效
+    // 第四轮 §4.2 #8：全库扫描热路径改异步 —— 同步 openSync/readSync/closeSync
+    // 会在 mapLimit(...,4) 的 async worker 里直接阻塞事件循环（几千首时界面明显卡）
+    const fh = await fsp.open(lyricPath, 'r')
     let n = 0
     const buf = Buffer.alloc(8192)
     try {
-      n = fs.readSync(fd, buf, 0, buf.length, 0)
+      const r = await fh.read(buf, 0, buf.length, 0)
+      n = r.bytesRead
     } finally {
-      try { fs.closeSync(fd) } catch (e) { /* 已关 */ }
+      try { await fh.close() } catch (e) { /* 已关 */ }
     }
     const head = decodeLrcBuffer(buf.subarray(0, safeUtf8Cut(buf, n)))
     const pick = (tag) => {
@@ -545,7 +551,7 @@ async function parseTrack(filePath, mm, coverDir, lyricDir) {
   if (!lyric && embeddedLyric && lyricDir) {
     lyric = await writeEmbeddedLyric(embeddedLyric, lyricDir, id)
   }
-  const lrcMeta = readLrcMeta(lyric)
+  const lrcMeta = await readLrcMeta(lyric)
 
   const names = resolveTitleArtist(meta, nameBase, lrcMeta)
   const album = (meta && meta.album) || ''
@@ -899,13 +905,13 @@ class Library {
           // 复用元数据，但修正可能新增/删除的封面与歌词
           // 歌词：外置 .lrc 优先；没有就沿用缓存里的（可能是内嵌歌词生成的那份），
           // 但文件已不存在时要清掉，否则点开歌词会读到空
-          const lyric = findLyric(filePath) || (cached.lyric && fs.existsSync(cached.lyric) ? cached.lyric : null)
+          const lyric = findLyric(filePath) || (cached.lyric && await fileExists(cached.lyric) ? cached.lyric : null)
           let cover = cached.cover
           // 内嵌封面是个标记，没有实体文件可 stat —— 别拿它去 existsSync，
           // 否则每次扫描都会把标记覆盖成 findCover() 的结果（内嵌封面就此丢失）
           if (cover && cover !== COVER_EMBEDDED) {
             const absCover = resolveCoverPath(cover, this.coverDir)
-            if (!absCover || !fs.existsSync(absCover)) cover = await findCover(filePath, cached)
+            if (!absCover || !(await fileExists(absCover))) cover = await findCover(filePath, cached)
           } else if (!cover) {
             // v2.8.7：首扫时目录里还没有封面文件（cover=null）的，事后往目录里
             // 放了 cover.jpg 也要能拾到 —— 以前整个分支被跳过，永远拿不到新封面
@@ -977,7 +983,7 @@ class Library {
         }
         // 失败记录同样要清理：文件已被删掉的条目留着就是脏数据（目录不可达时一并跳过）
         for (const [id, f] of Array.from(this.failures)) {
-          if (!seen.has(id) && !fs.existsSync(f.path)) this.failures.delete(id)
+          if (!seen.has(id) && !(await fileExists(f.path))) this.failures.delete(id)
         }
       }
 

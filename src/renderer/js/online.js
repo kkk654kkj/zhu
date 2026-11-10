@@ -331,7 +331,10 @@ const Online = {
       // v3.3.7：失败要回滚 page —— 以前 page 已经 +1，下次「加载更多」
       // 直接请求下下页，中间一页结果永久丢失
       if (!reset) this.page = Math.max(1, this.page - 1)
-      this.setStatus('搜索失败：' + esc(err.message || '网络异常'), this.hasMore)
+      // 第四轮 §4.5.3 #15：界面留着旧结果却写「搜索失败」，用户会以为那是这次的结果。
+      // 明确标出「下面是上一次的结果」。
+      const keep = reset ? '' : '（下面仍是上一次的结果）'
+      this.setStatus('搜索失败：' + esc(err.message || '网络异常') + keep, this.hasMore)
     } finally {
       this.loading = false
       if (btn) btn.disabled = false
@@ -368,6 +371,13 @@ const Online = {
     if (!r || !r.ok) {
       if (!stale) this.setStatus('❌ ' + esc((r && r.error) || '解析失败'), this.hasMore)
       toast((r && r.error) || '解析失败', 3000)
+      return
+    }
+    // 第四轮 §4.5.3 #15：本地代理没起来时以前会拼出相对 /stream，
+    // <audio> 只会报 code 4，用户完全看不出是代理端口绑定失败
+    if (!this.proxyBase) {
+      if (!stale) this.setStatus('❌ 本地代理未就绪（端口绑定失败），请稍后重试', this.hasMore)
+      toast('本地代理未就绪，在线播放暂不可用。稍后重试或重启应用', 4000)
       return
     }
     const actual = r.song || song
@@ -478,9 +488,22 @@ const Online = {
     }
   },
 
-  applyDl(list) {
+  applyDl(payload) {
+    // 第四轮 §4.5.3 #13：主进程改成增量推送，载荷是 { full, items }。
+    // 旧格式（纯数组）仍兼容，按全量处理。
+    const full = !payload || Array.isArray(payload) || payload.full !== false
+    const items = Array.isArray(payload) ? payload : ((payload && payload.items) || [])
     const prev = new Map(this.dl.map((t) => [t.id, t]))
-    this.dl = Array.isArray(list) ? list : []
+    if (full) {
+      this.dl = items.slice()
+    } else {
+      const idx = new Map(this.dl.map((t, i) => [t.id, i]))
+      for (const t of items) {
+        const i = idx.get(t.id)
+        if (i === undefined) { this.dl.push(t); idx.set(t.id, this.dl.length - 1) }
+        else this.dl[i] = t
+      }
+    }
     for (const t of this.dl) {
       const old = prev.get(t.id)
       if (old && old.status !== t.status) {

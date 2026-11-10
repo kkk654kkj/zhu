@@ -77,7 +77,7 @@ contextBridge.exposeInMainWorld('api', {
   onlineProbe: (song) => invoke('online:probe', song),
   onlineLyric: (song) => invoke('online:lyric', song),
   onlineDownload: (song) => invoke('online:download', song),
-  onlineCancelDownload: (id) => invoke('online:dlDelete', id),
+  // 第四轮 §4.5.3 #16：onlineCancelDownload 是死接口（映射到 online:dlDelete，全项目无消费方），已移除
   onlineDlList: () => invoke('online:dlList'),
   onlineDlPause: (id) => invoke('online:dlPause', id),
   onlineDlResume: (id) => invoke('online:dlResume', id),
@@ -98,8 +98,7 @@ contextBridge.exposeInMainWorld('api', {
   onlineQingTest: () => invoke('online:qingTest'),
   onNowPlaying: (cb) => on('online:now-playing', cb),
   onDlUpdate: (cb) => on('online:dl-update', cb),
-  onDownloadProgress: (cb) => on('online:download-progress', cb),
-  onDownloadDone: (cb) => on('online:download-done', cb),
+  // 第四轮 §6.4：onDownloadProgress / onDownloadDone 是死接线（主进程从不发这两个频道），已移除
 
   // 系统
   pickDirs: () => invoke('dialog:pickDirs'),
@@ -189,7 +188,7 @@ contextBridge.exposeInMainWorld('api', {
   powerCancel: () => invoke('power:cancel'),
   /** 播放结束后动作被触发/取消（界面用它显示倒计时与取消按钮） */
   onPowerAction: (cb) => on('power-action', cb),
-  onPowerAfterQueue: (cb) => on('power-after-queue', cb),
+  // 第四轮 §6.4：onPowerAfterQueue 是死接线（主进程从不发 power-after-queue），已移除
   /** 独占输出设备被拔掉 / 插回来 */
   onDeviceLost: (cb) => on('device-lost', cb),
   /** 第二实例带来的关联文件路径 */

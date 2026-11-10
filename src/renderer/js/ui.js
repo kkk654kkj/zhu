@@ -164,7 +164,10 @@ const UI = {
     this.els.tableBody.hidden = false
   },
 
-  showScan(title = '正在扫描…') {
+  showScan(title = '正在扫描…', owner = '') {
+    // 第四轮 §4.4：遮罩要带 owner 标记 —— 扫描与分析共用一块遮罩，
+    // 谁先收尾谁就把它关掉，另一边的进度就看不见了（分析中途扫描 → 进度被盖掉）
+    this.scanOwner = owner
     this.els.scanOverlay.hidden = false
     this.els.scanTitle.textContent = title
     this.els.scanBar.style.width = '0%'
@@ -183,7 +186,10 @@ const UI = {
     this.els.scanSub.textContent = name || ''
   },
 
-  hideScan() {
+  hideScan(owner = '') {
+    // 传了 owner 就只在「自己还持有遮罩」时才关，避免互踩
+    if (owner && this.scanOwner && this.scanOwner !== owner) return
+    this.scanOwner = ''
     this.els.scanOverlay.hidden = true
   },
 
@@ -482,12 +488,14 @@ const UI = {
     if (st.plain || !st.lines.length) return
     const idx = findLineIndex(st.lines, curSec)
     if (idx === st.index) return
+    const prevIdx = st.index
     st.index = idx
     const box = this.els.lpLyrics
     const nodes = box.children
-    for (let i = 0; i < nodes.length; i++) {
-      nodes[i].classList.toggle('active', i === idx)
-    }
+    // 第四轮 §4.4：以前每次高亮切换都全量遍历歌词行做 classList.toggle（长歌词 5Hz × N 次），
+    // 这里只改「上一行 + 当前行」两处
+    if (prevIdx >= 0 && nodes[prevIdx]) nodes[prevIdx].classList.remove('active')
+    if (idx >= 0 && nodes[idx]) nodes[idx].classList.add('active')
     // 迷你卡片只显示当前一句（没到第一句时留空，CSS 会隐藏这一行）
     const cur = idx >= 0 && st.lines[idx] ? st.lines[idx].text : ''
     if (this.els.mvLyric.textContent !== cur) this.els.mvLyric.textContent = cur
@@ -525,7 +533,10 @@ const UI = {
     // 两次、队列面板滚动位置丢失。用「结构签名」判断列表是否真变了：
     //  - 结构相同（只是 index / currentId 变化）→ 只 toggle active 与 ♪，不重建 DOM
     //  - 结构不同（增删/重排/换队列）→ 才重建 innerHTML
-    const structSig = tracks.length + ':' + tracks.map((t) => t.id).join(',')
+    // 第四轮 §4.4：签名只含 id 时，扫描补齐元数据（标题/歌手）后签名不变，
+    // 队列面板就再也不刷新，显示的还是旧标题
+    const structSig = tracks.length + ':'
+      + tracks.map((t) => t.id + '~' + (t.title || '') + '~' + (t.artist || '')).join(',')
     const fullSig = structSig + '|' + index + '|' + (playingId || '')
     if (fullSig === this._queueSig) return
     if (structSig === this._queueStructSig) {

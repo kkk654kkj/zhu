@@ -6,7 +6,7 @@ const { app, BrowserWindow, ipcMain, protocol, net, dialog, shell, globalShortcu
 const path = require('path')
 const fs = require('fs')
 const fsp = require('fs/promises')
-const { execFile, execFileSync } = require('child_process')
+const { execFile } = require('child_process')
 const { pathToFileURL } = require('url')
 const { Readable } = require('stream')
 const crypto = require('crypto')
@@ -71,18 +71,20 @@ const CACHE_DIRS = [
   'DawnWebGPUCache', 'GraphiteDawnCache', 'GrShaderCache', 'ShaderCache',
   'Shared Dictionary', 'component_crx_cache'
 ]
-function cleanChromiumCache() {
+async function cleanChromiumCache() {
+  // 第四轮 §4.2 #3：启动路径上的同步递归删除会阻塞首帧（11 个目录 × 上千文件），
+  // 改成异步并限流，删不掉（上一实例还占着）就跳过，不影响启动
   let removed = 0
-  for (const name of CACHE_DIRS) {
+  await Promise.all(CACHE_DIRS.map(async (name) => {
     const dir = path.join(DATA_DIR, name)
     try {
-      if (!fs.existsSync(dir)) continue
-      fs.rmSync(dir, { recursive: true, force: true })
+      if (!fs.existsSync(dir)) return
+      await fsp.rm(dir, { recursive: true, force: true })
       removed++
     } catch (err) {
-      // 文件被占用（例如上一实例还在跑）就跳过，不影响启动
+      // 文件被占用 → 跳过
     }
-  }
+  }))
   if (removed) logLine('stage: cache-cleaned=' + removed + ' dirs')
 }
 
@@ -122,12 +124,14 @@ function killOrphanMpv() {
     (err, stdout) => {
       if (err || !stdout) return
       const pids = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter((s) => /^\d+$/.test(s))
-      for (const pid of pids) {
-        try {
-          execFileSync('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 })
-          logLine('stage: killed-orphan-mpv=' + pid)
-        } catch {}
-      }
+      // 第四轮 §4.2 #3：同步 taskkill 每个最长 5 秒，N 个孤儿就是 N×5s 的主进程卡死。
+      // 改并发异步，全部结束再记一条日志。
+      Promise.all(pids.map((pid) => new Promise((resolve) => {
+        execFile('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: 5000 }, (e) => {
+          if (!e) logLine('stage: killed-orphan-mpv=' + pid)
+          resolve()
+        })
+      }))).catch(() => {})
     })
 }
 logLine('=== boot ===', process.argv.join(' '), 'electron', process.versions.electron)
@@ -422,7 +426,19 @@ let streamReady = null
 /* 端口是异步绑定的，播放请求可能比它就绪更早，统一在这里等一等 */
 function ensureStreamBase() {
   if (streamBase) return Promise.resolve(streamBase)
-  return streamReady || Promise.resolve('')
+  if (!streamReady) startStreamServer()
+  if (!streamReady) return Promise.resolve('')
+  // 第四轮 §4.5.3 #14：绑定失败时 streamReady 会永久 resolve('')，渲染层把它拼成相对
+  // /stream，整个会话在线播放全废、而且没有任何重试入口 —— 而「端口被安全软件临时拦住」
+  // 属于可恢复故障。拿到空串就作废这一轮的 promise 并关掉失败的 server，下次请求重新绑定。
+  return streamReady.then((base) => {
+    if (base) return base
+    streamReady = null
+    streamBase = ''
+    try { if (streamServer) { streamServer.close(); streamServer = null } } catch (e) { /* 忽略 */ }
+    logLine('[stream] 本地代理未就绪，下次请求会重新绑定端口')
+    return ''
+  }).catch(() => { streamReady = null; return '' })
 }
 
 /* ---------------- 联网版：在线音乐缓存 ---------------- */
@@ -532,7 +548,10 @@ function cacheKeysFor(prefer) {
 function safeCacheFilePath(rf) {
   const dirResolved = path.resolve(cacheDirPath())
   const name = String(rf || '')
+  // 第四轮 §4.5.3 #12：只堵了 \ / 与 .. —— NTFS 的 `file:stream`（ADS）与 %00 仍能穿过，
+  // 落到 cachePut 登记的表项会指向一个「文件流」而不是文件
   if (!name || /[\\/]/.test(name) || name.includes('..')) return null
+  if (name.includes(':') || name.includes('\u0000') || name.includes('%00')) return null
   const fp = path.resolve(dirResolved, name)
   if (fp !== dirResolved && !fp.startsWith(dirResolved + path.sep)) return null
   return fp
@@ -1477,7 +1496,8 @@ function createWindow() {
       // v2.4：默认每次点 × 都问一次（最小化到托盘 / 直接退出），勾了「不再提示」后按记住的选择执行
       if (st.closeAsk) {
         e.preventDefault()
-        handleCloseAsk()
+        // 第四轮 §4.2 #7：既不 await 也不 catch，抛错就是 unhandledRejection
+        handleCloseAsk().catch((err) => logLine('[win] 关闭询问失败 ' + ((err && err.message) || err)))
         return
       }
       if (st.closeToTray) {
@@ -1647,7 +1667,8 @@ function cancelPowerAction() {
   if (powerPending) { clearTimeout(powerPending); powerPending = null }
   if (systemShutdownTimer) { clearTimeout(systemShutdownTimer); systemShutdownTimer = null }
   systemShutdownPending = false
-  try { execFile('shutdown', ['/a'], onShutdownDone) } catch (err) { logLine('[power] 取消执行失败 ' + err.message) }
+  // 第四轮 §4.2 #5：直接传 onShutdownDone 会把 (err, stdout, stderr) 里的 stdout 当 kind
+  try { execFile('shutdown', ['/a'], (err) => onShutdownDone(err, 'shutdown')) } catch (err) { logLine('[power] 取消执行失败 ' + err.message) }
   logLine('[power] 已取消')
   refreshTrayMenu()   // v3.3.9：不然「⚠ 取消关机」菜单项一直残留
   sendToRenderer('power-action', { kind: null })
@@ -2006,7 +2027,18 @@ function watchLyricFile(files, trackId) {
           }, 800).unref?.()
         }
       })
-      w.on('error', () => { /* 文件被删/改名，下次读的时候重建 */ })
+      // 第四轮 §4.2 #6：error 分支以前只吞错，watcher 永久失效 —— 用户在外面改 .lrc
+      // 就再也不刷新。与 rename 分支一致地 close + 摘链 + 重建。
+      w.on('error', () => {
+        if (closed) return
+        closed = true
+        try { w.close() } catch (e) { /* 已关 */ }
+        const i = lyricWatch.indexOf(w)
+        if (i >= 0) lyricWatch.splice(i, 1)
+        setTimeout(() => {
+          if (currentLyricFiles.includes(f)) watchLyricFile(currentLyricFiles, trackId)
+        }, 800).unref?.()
+      })
       lyricWatch.push(w)
     } catch (err) { /* 监视不了就算了，mtime 兜底 */ }
   }
@@ -2019,7 +2051,13 @@ const embLyricCache = new Map()
 async function readEmbeddedCached(trackId, audioPath, audioMtime) {
   if (!audioPath || !audioMtime) return null
   const hit = embLyricCache.get(trackId)
-  if (hit && hit.audioMtime === audioMtime) return hit.text
+  if (hit && hit.audioMtime === audioMtime) {
+    // 第四轮 §4.2 #6：命中不刷新顺序 → 500 条上限实际是 FIFO，
+    // 热门曲目被反复淘汰后每次都要重新解析整首音频的标签
+    embLyricCache.delete(trackId)
+    embLyricCache.set(trackId, hit)
+    return hit.text
+  }
   const text = await readEmbeddedLyric(audioPath)
   embLyricCache.delete(trackId)   // v3.3.9：先删再插，淘汰才真的是「最久未用」
   embLyricCache.set(trackId, { audioMtime, text })
@@ -2224,11 +2262,15 @@ function onMpvEvent(evt) {
     mpvEngine.fellBack = true
     logLine('[mpv] 独占输出失败，回退共享：' + (evt.message || ''))
     pushMpvLog('warn', '独占输出失败，回退共享：' + (evt.message || ''))
+    // 第四轮 §4.2 #2：没有 catch 就是一次 unhandledRejection，界面还会停在「独占中」
     mpvEngine.restart({ exclusive: false }).then((r) => {
       pushMpvLog(r.ok ? 'warn' : 'error', r.ok ? '已重启引擎为共享输出' : '回退共享也失败：' + (r.error || ''))
       sendToRenderer('mpv:event', r.ok
         ? { type: 'fallback', message: (evt.message || ''), exclusive: false }
         : { type: 'error', message: r.error || '独占失败且回退共享也失败' })
+    }).catch((err) => {
+      pushMpvLog('error', '回退共享异常：' + ((err && err.message) || err))
+      sendToRenderer('mpv:event', { type: 'error', message: '独占失败且回退共享也失败' })
     })
     return
   }
@@ -2435,6 +2477,12 @@ function probeDeviceFree() {
       const out = (stdout || '') + (stderr || '')
       const blocked = /AUDCLNT_E_DEVICE_IN_USE|0x8889000a|EXCLUSIVE_MODE/i.test(out)
       const first = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || ''
+      // 第四轮 §4.2 #5：以前完全忽略 err —— 探测超时被杀、或根本没输出时
+      // blocked=false 会被当成「声卡已释放」，把用户引向一个必然失败的切换
+      if (!blocked && (err || !out)) {
+        resolve({ blocked: null, uncertain: true, detail: '探测未取得结论（超时或无输出）' })
+        return
+      }
       resolve({ blocked, detail: blocked ? first : '' })
     })
   })
@@ -2582,10 +2630,25 @@ function dlDto(t) {
 }
 
 /** 推给界面；save=false 用于高频进度（别每 250ms 写一次盘） */
+const dlSentSig = new Map()   // id → 上次推送的签名（增量推送用）
 function dlBroadcast(save) {
-  const data = Array.from(dlTasks.values()).map(dlDto)
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('online:dl-update', data)
+  // 第四轮 §4.5.3 #13：以前每 250ms 把**全表**推一遍（几十个任务 × 每秒 4 次）。
+  // 改成只推有变化的条目，并用 full 标记告诉渲染层「这次是全量快照」。
+  const all = Array.from(dlTasks.values())
+  const full = save !== false      // 结构性变化（新增/暂停/删除/完成）→ 发全量；进度 tick → 发增量
+  const changed = []
+  for (const t of all) {
+    const sig = [t.status, t.received, t.total, t.speed, t.error, t.path].join('|')
+    if (full || dlSentSig.get(t.id) !== sig) { dlSentSig.set(t.id, sig); changed.push(dlDto(t)) }
+  }
+  for (const id of Array.from(dlSentSig.keys())) {
+    if (!dlTasks.has(id)) dlSentSig.delete(id)
+  }
+  if (changed.length || full) {
+    const payload = { full, items: full ? all.map(dlDto) : changed }
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('online:dl-update', payload)
+    }
   }
   if (save !== false) dlSaveSoon()
 }
@@ -2604,9 +2667,13 @@ function dlSaveNow() {
   if (dlSaveTimer) { clearTimeout(dlSaveTimer); dlSaveTimer = null }
   try {
     const keep = Array.from(dlTasks.values())
-      .filter((t) => t.status !== 'done' && t.status !== 'error')
+      .filter((t) => t.status !== 'done')
       .map((t) => ({
-        id: t.id, key: t.key, song: t.song, status: 'paused',
+        id: t.id, key: t.key, song: t.song,
+        // 第四轮 §4.5.3 #9：error 任务也要落盘 —— 以前重启后任务消失，
+        // 磁盘上的 .part 孤儿文件再没有任何清理入口
+        status: t.status === 'error' ? 'error' : 'paused',
+        error: t.error || '',
         received: t.received || 0, total: t.total || 0,
         path: t.path || '', ext: t.ext || '', at: t.at || 0
       }))
@@ -4110,7 +4177,7 @@ if (!gotLock) {
 }
 
 // 只在确认是唯一实例时清缓存：多实例情况下删的是正在运行实例的文件（多半删不掉）
-if (gotLock) cleanChromiumCache()
+if (gotLock) cleanChromiumCache().catch(() => {})
 {
   app.on('second-instance', async (event, argv) => {
     if (win && !win.isDestroyed()) {

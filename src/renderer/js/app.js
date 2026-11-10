@@ -534,7 +534,7 @@ async function analyzeLibraryLoudness() {
 
   state.analyzing = true
   state.abortAnalysis = false
-  UI.showScan('正在分析响度…')
+  UI.showScan('正在分析响度…', 'analyze')
   const target = state.settings.targetLufs || LUFS_DEFAULT_TARGET
   const gains = Object.assign({}, state.settings.trackGains || {})
   let done = 0
@@ -566,7 +566,6 @@ async function analyzeLibraryLoudness() {
     // v3.3.17：中途点了「清除分析数据」就不要再写回 —— 以前分析收尾无条件把
     // 开头快照的 gains 落盘，用户刚清除的数据会整批复活。
     if (state.gainsCleared) {
-      state.gainsCleared = false
       state.settings.trackGains = {}
       applyTrackGain(state.currentId)
       toast('响度分析已中止，数据已清除')
@@ -586,7 +585,8 @@ async function analyzeLibraryLoudness() {
     toast('响度分析失败：' + (err && err.message))
   } finally {
     state.analyzing = false
-    UI.hideScan()
+    state.gainsCleared = false   // 第四轮 §4.4 #1：异常路径也必须复位，否则下一轮正常分析会被整批丢弃
+    UI.hideScan('analyze')
   }
 }
 
@@ -812,6 +812,9 @@ function renderView() {
   document.getElementById('viewHeader').hidden = isOnline
   document.getElementById('onlinePane').hidden = !isOnline
   if (isOnline) {
+    // 第四轮 §4.4 #5：以前在线视图提前 return 不清 state.visible，btnPlay 的兜底
+    // 会把上一份本地视图的残留列表整队播放
+    state.visible = []
     UI.renderTableHeadVisible(false)
     UI.renderTable([])
     UI.hideEmpty()
@@ -1405,23 +1408,32 @@ async function refreshCachePanel() {
 
 function bindCachePanel() {
   document.getElementById('btnCacheClose').addEventListener('click', () => toggleCachePanel(false))
+  // 第四轮 §4.4 #6：三处都是「乐观赋值 + 吞掉写盘失败仍 toast 成功」——
+  // 设置没落盘，界面却告诉用户改好了。改成先 await 判成败，失败则回滚输入控件。
   document.getElementById('cacheOn').addEventListener('change', async (e) => {
     const on = e.target.checked
+    const prev = state.settings.onlineCacheOn
+    const ok = await window.api.patchSettings({ onlineCacheOn: on }).then(() => true, () => false)
+    if (!ok) { e.target.checked = prev !== false; toast('设置保存失败，缓存开关未生效'); return }
     state.settings.onlineCacheOn = on
-    await window.api.patchSettings({ onlineCacheOn: on }).catch(() => {})
     toast(on ? '已开启在线缓存' : '已关闭在线缓存')
   })
   document.getElementById('cacheLimit').addEventListener('change', async (e) => {
     const mb = Number(e.target.value) || 0
+    const prev = state.settings.onlineCacheLimitMB
+    const ok = await window.api.patchSettings({ onlineCacheLimitMB: mb }).then(() => true, () => false)
+    if (!ok) { e.target.value = prev || ''; toast('设置保存失败，缓存上限未生效'); refreshCachePanel(); return }
     state.settings.onlineCacheLimitMB = mb
-    await window.api.patchSettings({ onlineCacheLimitMB: mb }).catch(() => {})
-    toast(mb ? '缓存上限：' + (mb >= 1024 ? mb / 1024 + ' GB' : mb + ' MB') : '缓存不设上限')
+    toast(mb ? '缓存上限：' + (mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb + ' MB') : '缓存不设上限')
     refreshCachePanel()
   })
   document.getElementById('cachePickDir').addEventListener('click', async () => {
     const info = await window.api.onlinePickCacheDir().catch(() => null)
-    if (!info) return
-    state.settings.onlineCacheDir = info.dir
+    if (!info || !info.dir) return
+    const prev = state.settings.onlineCacheDir
+    const ok = await window.api.patchSettings({ onlineCacheDir: info.dir }).then(() => true, () => false)
+    if (!ok) { toast('缓存目录保存失败（保持原目录）'); return }
+    state.settings.onlineCacheDir = info.dir || prev
     toast('缓存目录：' + info.dir, 3000)
     refreshCachePanel()
   })
@@ -1429,6 +1441,8 @@ function bindCachePanel() {
   document.getElementById('cacheClear').addEventListener('click', async () => {
     const info = await refreshCachePanel()
     if (info && !info.count) { toast('缓存已经是空的'); return }
+    // 第四轮 §4.4 #6：清缓存不可撤销，必须二次确认（以前点一下就直接全删）
+    if (!window.confirm('确定清空在线缓存？此操作不可撤销。')) return
     const r = await window.api.onlineCacheClear().catch(() => null)
     toast(r ? `已清理 ${r.removed} 首缓存` : '清理失败')
     refreshCachePanel()
@@ -2161,15 +2175,17 @@ function bindBar(el, onCommit, onPreview, onReset) {
     if (!dragging) return
     onPreview(ratioOf(e))
   })
-  const end = (e) => {
+  // 第四轮 §4.4 #4：pointercancel（滚动/手势打断）以前与 pointerup 共用 end()，
+  // 会把「取消」当成一次真实提交 → 非预期 seek / 音量突变
+  const end = (e, commit) => {
     if (!dragging) return
     dragging = false
     try { el.releasePointerCapture(e.pointerId) } catch {}
-    onCommit(ratioOf(e))
+    if (commit) onCommit(ratioOf(e))
     onReset()
   }
-  el.addEventListener('pointerup', end)
-  el.addEventListener('pointercancel', end)
+  el.addEventListener('pointerup', (e) => end(e, true))
+  el.addEventListener('pointercancel', (e) => end(e, false))
 }
 
 /* ================= 右键菜单 ================= */
@@ -2469,12 +2485,12 @@ async function doScan() {
   // 与响度分析互斥（共用扫描遮罩，同时跑会互相覆盖进度并提前关遮罩）
   if (state.analyzing) { toast('正在分析响度，稍后再扫描'); return }
   scanning = true
-  UI.showScan('正在扫描音乐文件夹…')
+  UI.showScan('正在扫描音乐文件夹…', 'scan')
   try {
     const dirs = state.settings.musicDirs && state.settings.musicDirs.length
       ? state.settings.musicDirs
       : await window.api.pickDirs()
-    if (!dirs.length) { UI.hideScan(); scanning = false; return }
+    if (!dirs.length) { UI.hideScan('scan'); scanning = false; return }
     if (dirs !== state.settings.musicDirs) {
       state.settings.musicDirs = dirs
       await window.api.patchSettings({ musicDirs: dirs })
@@ -2484,14 +2500,14 @@ async function doScan() {
     // 以前照样提示「扫描完成」并收起遮罩，用户看到的是半成品数据。
     if (res && res.skipped) {
       toast('已有扫描在进行，完成后自动刷新', 2500)
-      UI.hideScan()
+      UI.hideScan('scan')
       return
     }
     const tracks = await window.api.listTracks()
     setTracks(tracks)
     updateNavCounts()
     renderView()
-    UI.hideScan()
+    UI.hideScan('scan')
     const bits = []
     if (res.added) bits.push('新增 ' + res.added)
     if (res.updated) bits.push('更新 ' + res.updated)
@@ -2504,11 +2520,11 @@ async function doScan() {
     toast(`扫描完成：${res.total} 首` + (bits.length ? `（${bits.join('，')}）` : ''), bits.length > 1 ? 4000 : 1800)
   } catch (err) {
     console.error('[scan]', err)
-    UI.hideScan()
+    UI.hideScan('scan')
     toast('扫描失败：' + err.message)
   } finally {
     scanning = false
-    UI.hideScan()
+    UI.hideScan('scan')
     // 诊断面板开着时同步刷新失败清单（扫描往往就是用户打开面板的原因）
     if (typeof Diag !== 'undefined' && Diag.isOpen()) Diag.loadFailures()
   }
@@ -2530,6 +2546,8 @@ function onScanProgress(p) {
  */
 async function onScanDone(res) {
   if (scanning) return
+  // 第四轮 §4.4 #3：分析进行中不能重建表格/覆盖遮罩进度（两者共用一块遮罩）
+  if (state.analyzing) return
   // 目录不可访问时主进程会跳过清理，这种 scan-done 不能动队列
   if (res && res.skipped) return
   try {
@@ -2553,10 +2571,13 @@ async function onScanDone(res) {
           // 当前曲还在：直接换 tracks，不打断播放。
           // v3.3.17：洗牌池里存的是**下标**，裁剪后所有下标都平移了 ——
           // 不重建的话随机模式会指向错的歌（同一首连播、有的整轮不出现）。
-          player.tracks = kept
-          player.index = idx
-          // 重建为顺序下标：本轮随机顺序会重置（下一轮重新洗），但绝不会越界或指错
-          player._shufflePool = kept.map((_, i) => i)
+          // 第四轮 §4.4 #2：以前这里给的是「顺序下标」，随机模式整轮变顺序播放。
+          // 用 _buildShufflePool() 真正重洗，并保持 index 指向同一首歌。
+          // 同时用 byId 里的新对象替换旧引用，否则队列/播放条元数据与表格不一致。
+          const newIdx = kept.indexOf(curTrack)
+          player.tracks = kept.map((t) => state.byId.get(t.id) || t)
+          player.index = newIdx >= 0 ? newIdx : idx
+          player._buildShufflePool()
           player.emit('queue-change', player.tracks, player.index)
         }
       }
@@ -2657,6 +2678,7 @@ function enforceAbLoop(cur) {
  * （体积 0 的 8bit WAV，音量 0.001 —— 不能设 0，Chromium 认为"静音"就不算 audible）。
  */
 let mediaKeepAlive = null
+let silentWavCached = ''   // 静音 WAV 的 Blob URL 只建一次，避免每轮重建泄漏
 let mediaPosAt = 0
 
 function silentWavUrl(seconds = 0.2, rate = 8000) {
@@ -2729,10 +2751,16 @@ function keepAliveMediaSession(playing) {
   }
   try {
     if (!mediaKeepAlive) {
-      mediaKeepAlive = new Audio(silentWavUrl())
+      // 第四轮 §4.6：每次重建都新建一个 Blob URL，旧的不 revoke 也不 pause ——
+      // 长会话里 error 一次就漏一份。这里复用同一个 URL，旧元素先 pause + 清 src。
+      if (!silentWavCached) silentWavCached = silentWavUrl()
+      mediaKeepAlive = new Audio(silentWavCached)
       mediaKeepAlive.loop = true
       mediaKeepAlive.volume = 0.001
-      mediaKeepAlive.addEventListener('error', () => { mediaKeepAlive = null })
+      mediaKeepAlive.addEventListener('error', () => {
+        try { mediaKeepAlive.pause() } catch (e) { /* 忽略 */ }
+        mediaKeepAlive = null
+      })
     }
     if (playing) {
       if (mediaKeepAlive.paused) mediaKeepAlive.play().catch(() => {})
