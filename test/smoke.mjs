@@ -115,7 +115,9 @@ const CASES = [
 
   ['淡出定时器可被取消（连点播放不自停）',
     // 注意：音量被置 0 时 _fadeOut 会直接早退（from <= 0.01），所以先临时抬到 0.5
-    `(() => { const keep = player.audio.volume
+    // 第四轮 §4.6：独占模式下 fadeMs 恒为 0（不做淡入淡出），本用例无从观察 —— 标记 skip
+    `(() => { if (state.exclusive) return { skip: true }
+       const keep = player.audio.volume
        player.audio.volume = 0.5
        player._fadeOut(() => {})
        const scheduled = !!player._fadeTimeout
@@ -124,7 +126,7 @@ const CASES = [
        player._clearFade()
        player.audio.volume = keep
        return { scheduled, afterPlay } })()`,
-    (v) => v && v.scheduled === true && v.afterPlay === null],
+    (v) => v && (v.skip === true || (v.scheduled === true && v.afterPlay === null))],
 
   ['拖拽已绑定 / 断点续播已加载',
     `typeof bindDragAndDrop === 'function' && typeof rememberResume === 'function' && typeof restoreResumePos === 'function'`,
