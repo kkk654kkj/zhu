@@ -126,6 +126,7 @@ def strip_noise(src):
             continue
         if c in '\'"':
             q = c
+            out.append(' ')          # v3.3.24：开引号位也要占位（等长性——行号/掩码对齐依赖它）
             i += 1
             start = i
             while i < n:
@@ -136,6 +137,8 @@ def strip_noise(src):
                     break
                 i += 1
             out.append(blank(src[start:min(i, n)]))
+            if i < n:
+                out.append(' ')      # 结束引号位
             i += 1
             prev = q
             word = ''
@@ -148,6 +151,7 @@ def strip_noise(src):
             i += 1
             continue
         if c == '/' and (prev in REGEX_PREV_OK or prev == '' or word in REGEX_KEYWORD_PREV):
+            out.append(' ')          # v3.3.24：开斜杠占位（等长性）
             i += 1
             start = i
             in_class = False
@@ -166,6 +170,8 @@ def strip_noise(src):
                     break
                 i += 1
             out.append(' ' * (i - start))
+            if i < n:
+                out.append(' ')      # 结束斜杠占位
             i += 1
             while i < n and (src[i].isalnum() or src[i] == '_'):
                 out.append(' ')
@@ -268,6 +274,17 @@ def decls(src):
         d |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*(?=[,=)]|$)', m.group(1)))
     d |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*=>', s))
     d |= set(re.findall(r'\bcatch\s*\(\s*([A-Za-z_$][\w$]*)', s))
+    # v3.3.24：for-of / for-in 的循环变量（含解构形式）也是声明。
+    # 以前 `for (const f of ...)` 的 f 会被当成「引用了未声明的外部名」——
+    # 单标识符场景误报一遍，重构脚本按依赖注入时还会把正则字面量外的 f 全改坏。
+    for m in re.finditer(r'\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+(?:of|in)\b', s):
+        d.add(m.group(1))
+    for m in re.finditer(r'\bfor\s*\(\s*(?:const|let|var)\s*(\{[^}]*\}|\[[^\]]*\])\s+(?:of|in)\b', s):
+        inner = m.group(1)[1:-1]
+        for sub in inner.split(','):
+            nm = sub.split(':')[-1].split('=')[0].strip()
+            if re.match(r'^[A-Za-z_$][\w$]*$', nm):
+                d.add(nm)
     return s, d
 
 

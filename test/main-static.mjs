@@ -22,6 +22,7 @@ import path from 'node:path'
 import vm from 'node:vm'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
@@ -67,6 +68,27 @@ function sliceConst(src, name) {
 
 function main() {
   const mainSrc = read('src/main/main.js')
+  // v3.3.24 模块拆分后：设置清洗在 settings-schema.js、路径白名单在 protocols.js。
+  // 直接 require 真模块（比切片+vm 更接近运行时），G 注入只喂测试用到的最小集。
+  let SCHEMA = null
+  let PROTO = null
+  let modErr = ''
+  try {
+    const req = createRequire(import.meta.url)
+    // electron 在纯 node 下 require 不到 —— 测试只调纯函数，桩掉即可
+    const Module = req('module')
+    const origLoad = Module._load
+    Module._load = function (request, parent, isMain) {
+      if (request === 'electron') {
+        return { app: {}, protocol: {}, shell: {}, BrowserWindow: class {}, ipcMain: {}, net: {}, dialog: {}, screen: {} }
+      }
+      return origLoad.apply(this, arguments)
+    }
+    PROTO = req(path.join(ROOT, 'src/main/protocols.js'))
+    SCHEMA = req(path.join(ROOT, 'src/main/settings-schema.js'))
+    const G = { PROTO, cacheDirPath: () => '', downloadDir: () => '', logLine: () => {}, store: null, library: null, DATA_DIR: '' }
+    PROTO.init(G); SCHEMA.init(G)
+  } catch (err) { modErr = err.message }
 
   console.log('=== 1) 全量语法检查 ===')
   const targets = []
@@ -95,33 +117,16 @@ function main() {
   }
   ok('node --check 全量通过', bad === 0, targets.length + ' 个文件')
 
-  console.log('\n=== 2) 关键函数装载（打桩执行，不启动 Electron）===')
-  // 只取这几个函数真正依赖的部分，其余用桩喂进去
-  const pieces = [
-    'FORBIDDEN_SETTING_KEYS', 'SETTING_RANGES', 'SETTING_MAP_MAX', 'SETTING_ARRAY_MAX',
-    'EXTRA_FORBIDDEN_ROOT', 'DANGEROUS_ROOT'
-  ].map((n) => sliceConst(mainSrc, n)).filter(Boolean)
-  const fnPieces = ['sanitizePlainValue', 'clampSetting', 'sanitizeSettingsPatch', 'isSafeMediaRoot']
-    .map((n) => sliceFn(mainSrc, n)).filter(Boolean)
+  console.log('\n=== 2) 关键函数装载（真模块 require，不启动 Electron）===')
+  // v3.3.24：设置清洗与白名单已拆到独立模块，直接 require 真模块验证
+  const schemaSrc = read('src/main/settings-schema.js')
+  const protoSrc = read('src/main/protocols.js')
+  ok('模块 require 成功（settings-schema / protocols）', !!SCHEMA && !!PROTO, modErr)
 
-  ok('关键常量/函数都能从 main.js 切出', pieces.length >= 4 && fnPieces.length === 4,
-    `常量 ${pieces.length} / 函数 ${fnPieces.length}`)
-
-  const sandbox = { console, Number, String, Boolean, Object, Array, Math, JSON, RegExp, Set, Map }
-  let ctx = null
-  try {
-    vm.createContext(sandbox)
-    vm.runInContext(pieces.join('\n') + '\n' + fnPieces.join('\n'), sandbox, { filename: 'main-static-slice.js' })
-    ctx = sandbox
-    ok('装载时不抛 ReferenceError', true)
-  } catch (err) {
-    ok('装载时不抛 ReferenceError', false, err.message)
-  }
-
-  if (ctx) {
+  if (SCHEMA) {
     // 数值夹取：volume:5 必须变 1（以前只过滤键名，值原样落盘 → IndexSizeError）
     try {
-      const out = ctx.sanitizeSettingsPatch({ volume: 5, fadeMs: -1000 }, ctx.DEFAULT_SETTINGS_SHAPE || {
+      const out = SCHEMA.sanitizeSettingsPatch({ volume: 5, fadeMs: -1000 }, {
         volume: 0, fadeMs: 0, musicDirs: [], onlineCacheLimitMB: 0, desktopLyric: null
       })
       ok('sanitizeSettingsPatch 把 volume 夹到 1', out && out.volume === 1, JSON.stringify(out))
@@ -133,24 +138,26 @@ function main() {
       // 数组上限：这条会真的执行到 `v.length > SETTING_ARRAY_MAX`，
       // 常量没声明就会抛 ReferenceError —— 比字符串哨兵更硬
       const big = new Array(500).fill('D:/Music')
-      const out2 = ctx.sanitizeSettingsPatch({ musicDirs: big }, { musicDirs: [] })
+      const out2 = SCHEMA.sanitizeSettingsPatch({ musicDirs: big }, { musicDirs: [] })
       ok('musicDirs 超长数组被拒（SETTING_ARRAY_MAX 有声明）', !('musicDirs' in out2))
     } catch (err) {
       ok('musicDirs 超长数组被拒（SETTING_ARRAY_MAX 有声明）', false, err.message)
     }
     try {
-      ok('未知键被拒', !('evilKey' in ctx.sanitizeSettingsPatch({ evilKey: 1 }, { volume: 0 })))
+      ok('未知键被拒', !('evilKey' in SCHEMA.sanitizeSettingsPatch({ evilKey: 1 }, { volume: 0 })))
       // 注意不能用 `'__proto__' in out` 判断 —— 原型链上永远为真
-      const polluted = ctx.sanitizeSettingsPatch(JSON.parse('{"__proto__":{"x":1}}'), { volume: 0 })
+      const polluted = SCHEMA.sanitizeSettingsPatch(JSON.parse('{"__proto__":{"x":1}}'), { volume: 0 })
       ok('原型污染键被拒',
         !Object.prototype.hasOwnProperty.call(polluted, '__proto__') && !('x' in Object.prototype))
     } catch (err) {
       ok('键白名单可调用', false, err.message)
     }
+  }
+  if (PROTO) {
     try {
-      ok('isSafeMediaRoot 接受普通目录', ctx.isSafeMediaRoot('D:/Music') === true)
-      ok('isSafeMediaRoot 拒绝 UNC', ctx.isSafeMediaRoot('\\\\server\\share') === false)
-      ok('isSafeMediaRoot 拒绝盘符根', ctx.isSafeMediaRoot('D:\\') === false)
+      ok('isSafeMediaRoot 接受普通目录', PROTO.isSafeMediaRoot('D:/Music') === true)
+      ok('isSafeMediaRoot 拒绝 UNC', PROTO.isSafeMediaRoot('\\\\server\\share') === false)
+      ok('isSafeMediaRoot 拒绝盘符根', PROTO.isSafeMediaRoot('D:\\') === false)
     } catch (err) {
       ok('isSafeMediaRoot 可调用', false, err.message)
     }
@@ -159,11 +166,15 @@ function main() {
   console.log('\n=== 3) 「曾漏声明」标识符哨兵 ===')
   // 这 5 个在 v2.8.16 的 master 上只有引用没有声明，4 条 P1 的根因
   // v2.8.18：SETTING_ARRAY_MAX 就是「引用搬过来了、声明没搬」的复发 —— 加进哨兵
+  // v3.3.24：哨兵覆盖全部主进程模块（拆分后声明散在多文件）
+  const allMainSrc = ['main.js', 'protocols.js', 'settings-schema.js', 'mpv-manager.js',
+    'dlyric-window.js', 'downloader.js', 'dircache.js', 'streamproxy.js']
+    .map((f) => { try { return read('src/main/' + f) } catch { return '' } }).join('\n')
   const mustDeclare = ['cleanupStarted', 'systemShutdownPending', 'systemShutdownTimer',
     'FORBIDDEN_SETTING_KEYS', 'lastOpenFiles', 'SETTING_ARRAY_MAX', 'SETTING_MAP_MAX']
   for (const n of mustDeclare) {
     const re = new RegExp('^\\s*(?:let|var|const)\\s+' + n + '\\b', 'm')
-    ok('有声明：' + n, re.test(mainSrc))
+    ok('有声明：' + n, re.test(allMainSrc))
   }
 
   console.log('\n=== 4) 链路接线哨兵 ===')
@@ -175,7 +186,6 @@ function main() {
     /powerPending \|\| systemShutdownPending/.test(mainSrc))
   ok('dlyric 配置入口用同一把清洗尺子',
     /dlyric:cfg[\s\S]{0,800}?sanitizeSettingsPatch\(/.test(mainSrc))
-
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
 }

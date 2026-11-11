@@ -16,6 +16,15 @@ const { Library, fileId, MIME_BY_EXT, resolveCoverPath, COVER_EMBEDDED, readEmbe
 const { MpvEngine } = require('./mpv')
 const online = require('./online')
 
+// ---------- v3.3.24 模块拆分：子模块引入与共享状态注入 ----------
+const PROTO = require('./protocols')
+const SCHEMA = require('./settings-schema')
+const DLYW = require('./dlyric-window')
+const MPVM = require('./mpv-manager')
+const DL = require('./downloader')
+const DC = require('./dircache')
+const SP = require('./streamproxy')
+
 const isDev = process.argv.includes('--dev')
 const DEFAULT_MUSIC_DIR = 'D:\\音乐'
 // 应用显示名（窗口标题 / 托盘提示）
@@ -166,1098 +175,79 @@ let activeScan = null
 /** 第二实例在窗口页面就绪前发来的 open-files，缓存到渲染层 did-finish-load 时补发 */
 let lastOpenFiles = null
 
-const AUDIO_MIME = {
-  '.flac': 'audio/flac',
-  '.mp3': 'audio/mpeg',
-  '.m4a': 'audio/mp4',
-  '.aac': 'audio/aac',
-  '.wav': 'audio/wav',
-  '.ogg': 'audio/ogg',
-  '.opus': 'audio/ogg',
-  '.ape': 'audio/x-ape',
-  '.wma': 'audio/x-ms-wma',
-  '.aiff': 'audio/aiff',
-  '.aif': 'audio/aiff',
-  '.dsf': 'audio/x-dsf',
-  '.dff': 'audio/x-dff',
-  '.mka': 'audio/x-matroska'
+// 共享状态访问器：全部走 getter（各子模块 init 注入后即时求值，无视声明顺序）
+const G = {
+  get logLine() { return logLine },
+  get sendToRenderer() { return sendToRenderer },
+  get toClientTrack() { return toClientTrack },
+  get win() { return win },
+  get tray() { return tray },
+  get store() { return store },
+  get library() { return library },
+  get userData() { return userData },
+  get quitting() { return quitting },
+  get activeScan() { return activeScan },
+  get lastOpenFiles() { return lastOpenFiles },
+  get APP_NAME() { return APP_NAME },
+  get DATA_DIR() { return DATA_DIR },
+  get DEFAULT_SETTINGS() { return DEFAULT_SETTINGS },
+  get invalidateCurrentStream() { return invalidateCurrentStream },
+  get miniActive() { return miniActive },
+  get isDev() { return isDev },
+  get online() { return online },
+  get fsp() { return fsp },
+  get Readable() { return Readable },
+  get execFile() { return execFile },
+  get MpvEngine() { return MpvEngine },
+  get MIME_BY_EXT() { return MIME_BY_EXT },
+  get cacheDirPath() { return DC.cacheDirPath },
+  get downloadDir() { return DL.downloadDir },
 }
 
-function mimeFor(p) {
-  const ext = path.extname(p).toLowerCase()
-  return AUDIO_MIME[ext] || MIME_BY_EXT[ext] || 'application/octet-stream'
-}
-
-/**
- * v3.3.13：媒体路径白名单（模块作用域，协议层与 IPC 共用）。
- * 只允许曲库目录 / 下载目录 / 数据目录 / 在线缓存目录之内的文件，防止渲染层被注入后
- * 通过 lxfile:// 或 mpv:load 读任意本地文件。
- */
-// realpath 结果缓存：lxfile 每次请求都会走这里，不能反复 stat。
-// 带 TTL + 上限，曲库目录里的 junction/符号链接被重新指向后最多 5 秒即重新解析。
-const REALPATH_TTL = 5000
-const REALPATH_MAX = 512
-const realpathCache = new Map()
-function realpathCached(p) {
-  const now = Date.now()
-  const hit = realpathCache.get(p)
-  if (hit && now - hit.at < REALPATH_TTL) return hit.val
-  let val = null
-  try { val = fs.realpathSync.native(p) } catch (e) { val = null }
-  // v3.3.17：满了就逐条淘汰最早的，而不是整表 clear()。
-  // 曲库上千首时随便拖几次进度条就会触发一次 clear，之后每个 Range 请求
-  // 都要把所有 root 重新 realpathSync 一遍（主进程同步 IO）。
-  // clear 还会把「稳定的 root 结果」和「文件结果」一起丢掉，代价尤其不划算。
-  while (realpathCache.size >= REALPATH_MAX) realpathCache.delete(realpathCache.keys().next().value)
-  realpathCache.set(p, { val, at: now })
-  return val
-}
-// Windows 驱动器相对根「D:」（无斜杠）path.resolve 会落到 cwd，补上分隔符
-function fixDriveRoot(s) {
-  const t = String(s == null ? '' : s).trim()
-  return /^[A-Za-z]:$/.test(t) ? t + path.sep : t
-}
-/**
- * 明显不该当媒体根的位置：盘符根、Windows / Program Files / ProgramData。
- * settings.musicDirs、onlineDownloadDir、onlineCacheDir 都能由渲染层 patch 写入，
- * 一旦渲染层被注入（恶意标签/歌词），把这些键改成 'C:////' 就能让 lxfile:// 读到任意文件。
- * 这里只挡「整盘 / 系统目录」，用户把音乐放在 C://Users//me//Music 这类正常路径不受影响。
- */
-const DANGEROUS_ROOT = /^[a-z]:[\\/]?$|^[a-z]:[\\/](windows|program files|program files \(x86\)|programdata)([\\/]|$)/i
-
-const EXTRA_FORBIDDEN_ROOT = /^[a-z]:[\\/](users[\\/](public|default|all users|default user)|program files( \(x86\))?|windows|programdata|system volume information|\$recycle\.bin)([\\/]|$)/i
-function isSafeMediaRoot(r) {
-  const p = String(r == null ? '' : r).trim()
-  if (!p) return false
-  // 第四轮 §4.1 #4：DANGEROUS_ROOT 是黑名单，只挡盘符根与 4 个系统目录，
-  // `\\server\share`（UNC）、`\\?\C://...`（设备路径）、`ftp://` 这类都会漏过，
-  // 变成白名单根之后整个共享/设备树都能当媒体目录读。这里显式拒绝。
-  if (!/[a-zA-Z]:[\\/]|^[\\/]{1,2}[^\\/]/.test(p)) return false
-  if (/^[\\/]{2}(\?|\\.)[\\/]/.test(p)) return false   // \\?\ 与 \\.\ 设备路径
-  if (/^[\\/]{2}/.test(p)) return false                     // UNC：\\server\share
-  if (/^[a-zA-Z]+:\/\//.test(p)) return false               // 带协议的 URL
-  // C://Users//Public 这类「所有用户可写」的共享目录同样是符号链接攻击面，
-  // DANGEROUS_ROOT 只挡了盘符根与四个系统目录，这里补一层
-  if (EXTRA_FORBIDDEN_ROOT.test(p)) return false
-  return !DANGEROUS_ROOT.test(p)
-}
-
-function isAllowedMediaPath(p) {
-  // abs 与每个 root 都取 realpath：曲库里的 junction/符号链接指向系统目录时，
-  // real 之后的绝对路径前缀对不上白名单，从而被拒绝
-  const abs = realpathCached(path.resolve(fixDriveRoot(p)))
-  if (!abs) return false   // realpath 失败（路径不存在/非法）→ 拒绝
-  const real = abs.toLowerCase()
-  const roots = [
-    ...(store.get().settings.musicDirs || []),
-    downloadDir(),
-    DATA_DIR,
-    cacheDirPath()
-  ]
-    .filter((r) => r && String(r).trim() && isSafeMediaRoot(r))
-    .map((r) => realpathCached(path.resolve(fixDriveRoot(r))))
-    // v3.3.18：原始串通过不代表解析后也安全 —— 'D:/Music/../../Windows'
-    // 会解析成系统目录，绕过上面的 DANGEROUS_ROOT 检查当上白名单根
-    .filter((r) => r && isSafeMediaRoot(r))
-    .map((r) => {
-      const rl = r.toLowerCase()
-      return (rl.endsWith(path.sep) ? rl.slice(0, -path.sep.length) : rl) + path.sep
-    })
-  return roots.some((r) => real.startsWith(r) || (real + path.sep).startsWith(r))
-}
-
-/* ---------------- 自定义协议：支持 Range 的本地文件读取 ---------------- */
-
-function registerFileProtocol() {
-  protocol.handle('lxfile', async (request) => {
-    try {
-      const url = new URL(request.url)
-      // lxfile://local/D:/music/a.flac  →  D:/music/a.flac
-      let raw = decodeURIComponent(url.pathname)
-      // 兜底：兼容旧式 lxfile:///D:/…（此时盘符会被当 host，需要拼回来）
-      if (!/^\/?[A-Za-z]:\//.test(raw) && /^[A-Za-z]$/.test(url.hostname)) {
-        raw = '/' + url.hostname + ':' + raw
-      }
-      let filePath = raw
-      if (/^\/[A-Za-z]:\//.test(filePath)) filePath = filePath.slice(1)
-      if (process.platform !== 'win32' && !filePath.startsWith('/')) filePath = '/' + filePath
-      filePath = path.normalize(filePath)
-      // v3.3.13：协议层也要收口（以前只有 mpv:load / shell:showItem 有）
-      if (!isAllowedMediaPath(filePath)) return new Response('forbidden', { status: 403 })
-
-      // v3.3.17：后续 stat 与 createReadStream 一律用 realpath 结果。
-      // 以前校验走 realpath、打开用原始路径 —— 曲库目录里若有 junction 在校验与打开之间
-      // 被改指，校验就失效了（TOCTOU）。
-      filePath = realpathCached(filePath) || filePath
-
-      const stat = await fsp.stat(filePath)
-      if (!stat.isFile()) return new Response('not a file', { status: 404 })
-
-      const type = mimeFor(filePath)
-      const range = request.headers.get('range')
-      const total = stat.size
-
-      if (range) {
-        // v3.3.13：Range 语法全文锚定，非法/多段都不按部分内容处理
-        const raw = String(range).trim()
-        if (!/^bytes=\d*-\d*(,\d*-\d*)*$/.test(raw)) {
-          return new Response('bad range', { status: 416, headers: { 'Content-Range': `bytes */${total}` } })
-        }
-        if (raw.includes(',')) {
-          // 多段 Range 不支持：按 200 全量返回（不能假装满足任一单段）
-          const stream = fs.createReadStream(filePath)
-          return new Response(Readable.toWeb(stream), {
-            status: 200,
-            headers: {
-              'Content-Type': type,
-              'Content-Length': String(total),
-              'Accept-Ranges': 'bytes',
-              'Cache-Control': 'no-store'
-            }
-          })
-        }
-        const m = /^bytes=(\d*)-(\d*)$/.exec(raw)
-        let start = 0
-        let end = total - 1
-        if (m) {
-          if (m[1]) {
-            start = parseInt(m[1], 10)
-            end = m[2] ? parseInt(m[2], 10) : total - 1
-          } else if (m[2]) {
-            // v3.3.9：后缀区间 bytes=-N = 最后 N 字节（以前解析成开头 N 字节，
-            // 拖尾元数据/某些下载器会拿到错数据）
-            start = Math.max(0, total - parseInt(m[2], 10))
-            end = total - 1
-          }
-        }
-        if (Number.isNaN(start)) start = 0
-        if (Number.isNaN(end) || end >= total) end = total - 1
-        if (start > end || start >= total) {
-          return new Response('bad range', { status: 416, headers: { 'Content-Range': `bytes */${total}` } })
-        }
-        const stream = fs.createReadStream(filePath, { start, end })
-        return new Response(Readable.toWeb(stream), {
-          status: 206,
-          headers: {
-            'Content-Type': type,
-            'Content-Length': String(end - start + 1),
-            'Content-Range': `bytes ${start}-${end}/${total}`,
-            'Accept-Ranges': 'bytes',
-            'Cache-Control': 'no-store'
-          }
-        })
-      }
-
-      // HEAD 只要头不要体（媒体元数据探测会用）
-      if (request.method === 'HEAD') {
-        return new Response(null, {
-          status: 200,
-          headers: {
-            'Content-Type': type,
-            'Content-Length': String(total),
-            'Accept-Ranges': 'bytes',
-            'Cache-Control': 'no-store'
-          }
-        })
-      }
-
-      const stream = fs.createReadStream(filePath)
-      return new Response(Readable.toWeb(stream), {
-        status: 200,
-        headers: {
-          'Content-Type': type,
-          'Content-Length': String(total),
-          'Accept-Ranges': 'bytes',
-          'Cache-Control': 'no-store'
-        }
-      })
-    } catch (err) {
-      logLine('[lxfile] 读取失败', err.message)
-      return new Response('not found', { status: 404 })   // 不回显绝对路径/系统错误
-    }
-  })
-}
-
-/**
- * v2.0：内嵌封面协议。`lxcover://local/<trackId>` → 从音频文件里取封面。
- * 为什么不用 data: URL —— 每张封面几十到几百 KB，塞进 library.json 会让 5k 首的缓存
- * 涨到几十 MB；也不用磁盘文件，那正是"5k 首 = 5k 个小文件"的来源。
- * 内存 LRU 在扫描时就预热好了，正常情况这里不碰磁盘。
- */
-function registerCoverProtocol() {
-  protocol.handle('lxcover', async (request) => {
-    try {
-      const url = new URL(request.url)
-      const id = decodeURIComponent(url.pathname).replace(/^\/+/, '') || url.hostname
-      const cov = library ? await library.getCover(id) : null
-      if (!cov) return new Response('no cover', { status: 404 })
-      return new Response(cov.buf, {
-        status: 200,
-        headers: {
-          'Content-Type': cov.mime,
-          'Content-Length': String(cov.buf.length),
-          'Cache-Control': 'no-store'
-        }
-      })
-    } catch (err) {
-      return new Response('cover error', { status: 500 })
-    }
-  })
-}
-
-/**
- * v3.0（联网版）：在线音频本地代理。
- *
- * 一开始试的是自定义协议 lxstream://，但 Electron 里 <audio> 加载自定义 scheme
- * 不可靠（请求根本到不了 protocol.handle，只在 media error 里看到 code 4，
- * 排查成本极高）。改用最朴素的本地 HTTP 服务：
- *  · <audio> / fetch / mpv 全都天然支持 http；
- *  · 自己发 CORS 头，WebAudio（均衡器/频谱）拿得到同源数据；
- *  · 直链过期时这层能透明重取，页面无感；
- *  · 需要 Referer 的 CDN 也在这里补。
- *
- * 地址：http://127.0.0.1:<随机端口>/stream?src=kw&id=xxx&q=best&t=&a=&d=
- * 只监听回环，外部访问不到。
- */
-let streamServer = null
-let streamBase = ''
-let streamReady = null
-
-/* 端口是异步绑定的，播放请求可能比它就绪更早，统一在这里等一等 */
-function ensureStreamBase() {
-  if (streamBase) return Promise.resolve(streamBase)
-  if (!streamReady) startStreamServer()
-  if (!streamReady) return Promise.resolve('')
-  // 第四轮 §4.5.3 #14：绑定失败时 streamReady 会永久 resolve('')，渲染层把它拼成相对
-  // /stream，整个会话在线播放全废、而且没有任何重试入口 —— 而「端口被安全软件临时拦住」
-  // 属于可恢复故障。拿到空串就作废这一轮的 promise 并关掉失败的 server，下次请求重新绑定。
-  return streamReady.then((base) => {
-    if (base) return base
-    streamReady = null
-    streamBase = ''
-    try {
-      if (streamServer) {
-        // v3.3.20：close() 只停止接受新连接，keep-alive 的旧连接会一直挂到 socket 超时 ——
-        // 退出时 electron 还得等它们，用户看到的是「关了窗口进程不退」。
-        if (typeof streamServer.closeAllConnections === 'function') streamServer.closeAllConnections()
-        streamServer.close()
-        streamServer = null
-      }
-    } catch (e) { /* 忽略 */ }
-    logLine('[stream] 本地代理未就绪，下次请求会重新绑定端口')
-    return ''
-  }).catch(() => { streamReady = null; return '' })
-}
-
-/* ---------------- 联网版：在线音乐缓存 ---------------- */
-
-/**
- * 缓存「放过的在线音频」，下次再放同一首直接从磁盘出，不再走网络。
- * 对无损尤其关键：一首 flac 几十上百 MB，重放不该再等一遍。
- *
- * 索引单独存一份 json：界面要显示「几首 / 占多大」，
- * 每次遍历目录累加太慢（用久了这里会有几百个文件）。
- */
-const CACHE_INDEX = 'index.json'
-let cacheIdx = null // { <key>: { file, title, artist, ext, size, at } }
-
-/** 原子写 JSON：先写唯一临时文件并 fsync，再 rename，崩溃时不会截断索引 */
-function atomicWriteJson(file, obj) {
-  const tmp = file + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8)
-  let fd = null
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    fd = fs.openSync(tmp, 'w')
-    fs.writeFileSync(fd, JSON.stringify(obj, null, 1), 'utf8')
-    fs.fsyncSync(fd)
-    fs.closeSync(fd)
-    fd = null
-    fs.renameSync(tmp, file)
-  } catch (err) {
-    if (fd) { try { fs.closeSync(fd) } catch (e) { /* 忽略 */ } }
-    try { fs.unlinkSync(tmp) } catch (e) { /* 忽略 */ }
-    throw err
-  }
-}
-
-function cacheDirPath() {
-  const custom = String(store.get().settings.onlineCacheDir || '').trim()
-  return custom || path.join(DATA_DIR, 'music-cache')
-}
-
-function cacheLoad() {
-  if (cacheIdx) return cacheIdx
-  cacheIdx = {}
-  const idxFile = path.join(cacheDirPath(), CACHE_INDEX)
-  try {
-    const j = JSON.parse(fs.readFileSync(idxFile, 'utf8'))
-    if (j && typeof j === 'object' && !Array.isArray(j)) cacheIdx = j
-    else throw new Error('索引结构损坏')
-  } catch (err) {
-    // v3.3.13：损坏的索引先备份，别让一次崩溃把全部缓存记录弄丢
-    try {
-      if (fs.existsSync(idxFile)) {
-        fs.renameSync(idxFile, idxFile + '.corrupt-' + Date.now())
-        logLine('[cache] 索引损坏已备份', err.message)
-      }
-    } catch (e) { /* 忽略 */ }
-    cacheIdx = {}
-  }
-  return cacheIdx
-}
-
-function cacheSave() {
-  try {
-    atomicWriteJson(path.join(cacheDirPath(), CACHE_INDEX), cacheIdx || {})
-  } catch (err) {
-    logLine('[cache] 索引写入失败', err.message)
-  }
-}
-
-/** LRU 刷新/失效清理用去抖落盘：命中本身很频繁，不能每次都同步写盘 */
-let cacheSaveTimer = null
-function cacheSaveSoon() {
-  if (cacheSaveTimer) return
-  cacheSaveTimer = setTimeout(() => { cacheSaveTimer = null; cacheSave() }, 1000)
-  if (cacheSaveTimer.unref) cacheSaveTimer.unref()
-}
-
-/**
- * 缓存按「实际拿到的音质」分类，不能按「请求的音质」。
- * 否则无损没取到时降级下来的 128k mp3 会被存成 flac，
- * 用户下次以为在听无损，其实是一首糊的。
- */
-function cacheClassOf(info) {
-  const ext = String((info && info.ext) || '').toLowerCase()
-  const level = String((info && info.level) || '').toLowerCase()
-  // v3.3.18：母带与普通无损共用一个 'flac' 键会让母带缓存永远写不进
-  //（finishCache 见同名文件已存在就直接丢），选母带也会命中普通 flac
-  if ((info && info.lossless) && /master|hires/.test(level)) return 'master'
-  if ((info && info.lossless) || ext === 'flac') return 'flac'
-  return (Number(info && info.bitrate) || 0) > 128 ? 'best' : '128'
-}
-
-function cacheKeyOf(song, cls) {
-  // v3.3.13：URL 里的 src/id 可能含 ../ 等，直接拼进文件名会路径穿越；
-  // 用 sha256 摘要做纯十六进制文件名
-  const rawKey = `${song.source}_${song.id}_${cls}`
-  return crypto.createHash('sha256').update(rawKey).digest('hex')
-}
-
-/** 请求的音质 → 可以接受的缓存档位（从优到次） */
-function cacheKeysFor(prefer) {
-  if (prefer === 'master') return ['master', 'flac']
-  if (prefer === 'lossless') return ['flac', 'master']
-  if (prefer === '128k') return ['128', 'best']   // 省流量不吃 flac（动辄上百 MB）
-  return ['best', 'flac']                          // 音质优先时 flac 当然更好
-}
-
-/** 索引可能被篡改：只放行纯文件名且解析后仍在缓存目录内的路径 */
-function safeCacheFilePath(rf) {
-  const dirResolved = path.resolve(cacheDirPath())
-  const name = String(rf || '')
-  // 第四轮 §4.5.3 #12：只堵了 \ / 与 .. —— NTFS 的 `file:stream`（ADS）与 %00 仍能穿过，
-  // 落到 cachePut 登记的表项会指向一个「文件流」而不是文件
-  if (!name || /[\\/]/.test(name) || name.includes('..')) return null
-  if (name.includes(':') || name.includes('\u0000') || name.includes('%00')) return null
-  const fp = path.resolve(dirResolved, name)
-  if (fp !== dirResolved && !fp.startsWith(dirResolved + path.sep)) return null
-  return fp
-}
-
-/** 命中返回 { path, rec, cls }；文件被手动删掉或大小对不上就当作没缓存 */
-function cacheTry(song, cls) {
-  const idx = cacheLoad()
-  const key = cacheKeyOf(song, cls)
-  const rec = idx[key]
-  if (!rec) return null
-  // v3.3.13：索引可能被篡改，rec.file 必须是纯文件名且解析后仍在缓存目录内
-  const rf = String(rec.file || '')
-  const fp = safeCacheFilePath(rf)
-  if (!fp) {
-    delete idx[key]
-    cacheSaveSoon()
-    return null
-  }
-  try {
-    const st = fs.statSync(fp)
-    if (!st.isFile() || st.size !== rec.size) {
-      delete idx[key]
-      cacheSaveSoon()
-      return null
-    }
-    // 命中即续期做 LRU，但不必每次都写盘：连点试听会让 index.json
-    // 在几秒内被重写十几次。5 分钟的续期精度对缓存淘汰完全够用。
-    if (!rec.at || Date.now() - rec.at > 5 * 60 * 1000) {
-      rec.at = Date.now()
-      cacheSaveSoon()
-    }
-    return { path: fp, rec, cls }
-  } catch (err) {
-    delete idx[key]
-    cacheSaveSoon()   // v3.3.13：脏索引清理也要落盘，否则重启后重现
-    return null
-  }
-}
-
-function cacheHit(song, prefer) {
-  for (const cls of cacheKeysFor(prefer)) {
-    const hit = cacheTry(song, cls)
-    if (hit) return hit
-  }
-  return null
-}
-
-function cacheTotalBytes() {
-  const idx = cacheLoad()
-  return Object.values(idx).reduce((s, x) => s + (Number(x.size) || 0), 0)
-}
-
-function cachePut(key, file, meta, size) {
-  const idx = cacheLoad()
-  idx[key] = {
-    file,
-    title: meta.title || '',
-    artist: meta.artist || '',
-    ext: meta.ext || '',
-    size,
-    at: Date.now()
-  }
-  cacheSave()
-  cacheEvict()
-}
-
-/** 超过上限就按最久没放过的删，删到上限的 80%，别每次都贴着边删 */
-function cacheEvict() {
-  const limitMB = Number(store.get().settings.onlineCacheLimitMB) || 0
-  if (limitMB <= 0) return
-  const idx = cacheLoad()
-  const items = Object.keys(idx).map((k) => ({ k, v: idx[k] }))
-  let total = items.reduce((s, x) => s + (Number(x.v.size) || 0), 0)
-  const limit = limitMB * 1048576
-  if (total <= limit) return
-  items.sort((a, b) => (Number(a.v.at) || 0) - (Number(b.v.at) || 0))
-  const target = limit * 0.8
-  let removed = 0
-  for (const it of items) {
-    if (total <= target) break
-    try {
-      const fp = safeCacheFilePath(it.v.file)
-      if (!fp) { delete idx[it.k]; cacheSaveSoon(); continue }
-      fs.unlinkSync(fp)
-    } catch (err) {
-      // v3.3.7：删不掉（文件正被播放占用）就留给下次 ——
-      // 以前无条件删索引条目，文件留在磁盘上成了永远没人回收的孤儿
-      continue
-    }
-    delete idx[it.k]
-    total -= Number(it.v.size) || 0
-    removed++
-  }
-  if (removed) {
-    cacheSave()
-    logLine('[cache] 超出上限，清理了', removed, '首，现', (total / 1048576).toFixed(0) + 'MB')
-  }
-}
-
-/**
- * 启动时清掉上次异常退出留下的 .part（进程被杀时来不及自己收）。
- *
- * v3.3.20：只删**我们自己命名的**残片（`<sha256>.<uniq>.part`）。
- * 缓存目录是用户可改的（「选缓存目录」允许普通文件夹），以前无差别删掉目录里
- * 所有 `*.part` —— 用户把缓存目录指到 D:\音乐 时，其他下载器的未完成文件会被一起删掉。
- */
-const CACHE_PART_RE = /^[0-9a-f]{64}\.[0-9a-z]+\.part$/i
-function cacheCleanupParts() {
-  try {
-    const dir = cacheDirPath()
-    for (const f of fs.readdirSync(dir)) {
-      if (!CACHE_PART_RE.test(f)) continue
-      try { fs.unlinkSync(path.join(dir, f)) } catch (err) { /* 忽略 */ }
-    }
-  } catch (err) { /* 目录还不存在 */ }
-}
-
-/** 只删索引里登记过的文件和 .part 残留，绝不碰目录里别的东西 */
-function cacheClear() {
-  const idx = cacheLoad()
-  const dir = cacheDirPath()
-  let n = 0
-  for (const k of Object.keys(idx)) {
-    const fp = safeCacheFilePath(idx[k].file)
-    if (!fp) continue
-    try { fs.unlinkSync(fp); n++ } catch (err) { /* 忽略 */ }
-  }
-  try {
-    for (const f of fs.readdirSync(dir)) {
-      // v3.3.20：同样只清我们自己的残片命名（见 CACHE_PART_RE）
-      if (CACHE_PART_RE.test(f)) { try { fs.unlinkSync(path.join(dir, f)) } catch (err) { /* 忽略 */ } }
-    }
-  } catch (err) { /* 目录不存在 */ }
-  cacheIdx = {}
-  cacheSave()
-  return { removed: n }
-}
-
-function cacheStats() {
-  const idx = cacheLoad()
-  const items = Object.values(idx)
-  return {
-    dir: cacheDirPath(),
-    count: items.length,
-    size: items.reduce((s, x) => s + (Number(x.size) || 0), 0),
-    limitMB: Number(store.get().settings.onlineCacheLimitMB) || 0,
-    enabled: store.get().settings.onlineCacheOn !== false
-  }
-}
-
-/**
- * v3.3.13：这是白名单外的第二条本地读通道，必须断言文件仍落在
- * 缓存目录 / 数据目录之内（realpath 后比较，防被篡改索引 + junction 绕过）。
- * @returns {boolean} 可读
- */
-function isReadableFromCacheOrData(filePath) {
-  let realFile = null
-  try { realFile = fs.realpathSync.native(filePath) } catch (e) { realFile = null }
-  if (!realFile) return false
-  return [cacheDirPath(), DATA_DIR].some((d) => {
-    let rd = realpathCached(d)
-    if (!rd) return false
-    rd = rd.toLowerCase()
-    const rf = realFile.toLowerCase()
-    const prefix = (rd.endsWith(path.sep) ? rd.slice(0, -path.sep.length) : rd) + path.sep
-    return rf === rd || rf.startsWith(prefix)
-  })
-}
-
-/**
- * 解析 Range 头。三种结果由调用方决定怎么回：
- *  - 'full'    没有 Range 头 / 多段区间 → 按 200 全量发
- *  - 'invalid' 语法非法或区间越界       → 416
- *  - 'range'   单段有效                 → 206
- *
- * v3.3.13：语法全文锚定（以前松匹配会把畸形头当合法）；
- * v3.3.7：后缀区间 `bytes=-N` 的语义是「最后 N 字节」，不是开头 N 字节。
- */
-function parseRangeHeader(rawHeader, total) {
-  const raw = String(rawHeader || '').trim()
-  if (!raw) return { kind: 'full' }
-  if (!/^bytes=\d*-\d*(,\d*-\d*)*$/.test(raw)) return { kind: 'invalid' }
-  if (raw.includes(',')) return { kind: 'full' }
-  const m = /^bytes=(\d*)-(\d*)$/.exec(raw)
-  let start = 0
-  let end = total - 1
-  if (m) {
-    if (m[1]) {
-      start = parseInt(m[1], 10)
-      end = m[2] ? parseInt(m[2], 10) : total - 1
-    } else if (m[2]) {
-      start = Math.max(0, total - parseInt(m[2], 10))
-      end = total - 1
-    }
-  }
-  if (!Number.isFinite(start) || start < 0) start = 0
-  if (!Number.isFinite(end) || end >= total) end = total - 1
-  if (start > end || start >= total) return { kind: 'invalid' }
-  return { kind: 'range', start, end }
-}
-
-/** 从磁盘出流，支持 Range（拖动进度条要靠它） */
-function serveLocalFile(filePath, req, res) {
-  if (!isReadableFromCacheOrData(filePath)) {
-    try { res.writeHead(403); res.end('forbidden') } catch (e) { /* 已断开 */ }
-    return
-  }
-  let stat
-  try {
-    stat = fs.statSync(filePath)
-  } catch (err) {
-    // v3.3.13：缓存命中到 open 之间文件被淘汰/删除 → 404，不要冒 500
-    try { res.writeHead(404); res.end('file gone') } catch (e) { /* 已断开 */ }
-    return
-  }
-  const total = stat.size
-  const base = {
-    'Content-Type': mimeFor(filePath),
-    'Accept-Ranges': 'bytes',
-    'Access-Control-Allow-Origin': '*',
-    'Cache-Control': 'no-store'
-  }
-  // v3.3.7：客户端断开（切歌/拖进度条）时把读流一起销毁 ——
-  // 以前 .pipe(res) 之后读流会继续把文件读到 EOF 才释放句柄，
-  // 白读几十 MB IO，而且这段时间句柄被占，缓存淘汰的 unlink 会失败
-  const pipe = (rs) => {
-    res.on('close', () => { try { rs.destroy() } catch (e) { /* 已结束 */ } })
-    rs.on('error', () => {
-      try { res.destroy() } catch (e) { /* 已断开 */ }
-      try { rs.destroy() } catch (e) { /* 已结束 */ }
-    })
-    rs.pipe(res)
-  }
-  const sendFull = () => {
-    res.writeHead(200, { ...base, 'Content-Length': String(total) })
-    pipe(fs.createReadStream(filePath))
-  }
-  const sendRangeNotSatisfiable = () => {
-    res.writeHead(416, { 'Content-Range': `bytes */${total}`, 'Access-Control-Allow-Origin': '*' })
-    res.end()
-  }
-
-  const range = parseRangeHeader(req.headers.range, total)
-  if (range.kind === 'invalid') { sendRangeNotSatisfiable(); return }
-  if (range.kind === 'full') { sendFull(); return }
-  res.writeHead(206, {
-    ...base,
-    'Content-Length': String(range.end - range.start + 1),
-    'Content-Range': `bytes ${range.start}-${range.end}/${total}`
-  })
-  pipe(fs.createReadStream(filePath, { start: range.start, end: range.end }))
-}
-
-function startStreamServer() {
-  const http = require('http')
-  let readyResolve = () => {}
-  streamReady = new Promise((resolve) => { readyResolve = resolve })
-  streamServer = http.createServer((req, res) => { handleStreamRequest(req, res) })
-  streamServer.on('error', (err) => {
-    logLine('[online] 代理服务错误', err.message)
-    // v3.3.7：监听失败（端口被占/被安全软件拦）时必须把等待方放出来，
-    // 否则 ensureStreamBase() 永久 pending，所有在线播放无声无息挂死且无提示
-    if (!streamBase) { try { readyResolve('') } catch (e) { /* 已 resolve */ } }
-  })
-  streamServer.listen(0, '127.0.0.1', () => {
-    const port = streamServer.address().port
-    streamBase = `http://127.0.0.1:${port}`
-    logLine('[online] 代理就绪', streamBase)
-    readyResolve(streamBase)
-  })
-  return streamBase
-}
-
-/**
- * 处理一个 /stream 请求：缓存命中 → 解析直链 → 上游取流 → 边转边缓存。
- *
- * 这是在线音频唯一的取流入口（<audio> 与 mpv 都走这里），所以也是全项目
- * 最容易出「卡住/截断/脏缓存」的地方，改动前请先读函数尾部的收尾约定。
- */
-async function handleStreamRequest(req, res) {
-  // 缓存残片的兜底清理：正常路径在 pumpUpstreamBody 的 finally 里做；
-  // 这里提到外层声明，好在任何早期异常时也能清掉
-  let dropPart = () => {}
-  // v3.3.18：客户端断开（切歌 / 拖进度）必须能收掉解析与上游握手。
-  // 以前只在 pumpUpstreamBody 里监听 close，早于正文阶段的断开永远收不到。
-  let clientGone = false
-  const reqCtrl = new AbortController()
-  const onClientClose = () => {
-    if (res.writableFinished) return
-    clientGone = true
-    try { reqCtrl.abort() } catch (e) { /* 忽略 */ }
-  }
-  res.on('close', onClientClose)
-  try {
-    const u = new URL(req.url, 'http://127.0.0.1')
-    if (u.pathname !== '/stream') {
-      res.writeHead(404).end('not found')
-      return
-    }
-    const source = u.searchParams.get('src') || ''
-    const id = u.searchParams.get('id') || ''
-    const prefer = u.searchParams.get('q') || 'best'
-    if (!source || !id) {
-      res.writeHead(400).end('bad params')
-      return
-    }
-    const song = {
-      source,
-      id,
-      title: u.searchParams.get('t') || '',
-      artist: u.searchParams.get('a') || '',
-      album: '',
-      duration: Number(u.searchParams.get('d')) || 0
-    }
-    const cacheOn = store.get().settings.onlineCacheOn !== false
-
-    // 先看缓存：命中就连解析都省了（无损解析要 1~7 秒，重放不该再等）
-    if (cacheOn) {
-      const hit = cacheHit(song, prefer)
-      if (hit) { sendCachedStream(req, res, song, hit, null); return }
-    }
-
-    const info = await online.getPlayable(song, prefer, { signal: reqCtrl.signal })
-    if (clientGone) return
-    if (!info || !info.url) {
-      logLine('[online] 代理无地址', source, id)
-      if (!res.writableEnded) res.writeHead(404).end('no source')
-      return
-    }
-    // 解析出来的实际音质如果正好有缓存，就别再拉一遍流。
-    // （无损请求在「网易没这首/只有 mp3」时会降级，降级档位同样值得复用缓存）
-    if (cacheOn) {
-      const hit2 = cacheTry(song, cacheClassOf(info))
-      if (hit2) { sendCachedStream(req, res, song, hit2, info); return }
-    }
-
-    const headers = buildUpstreamHeaders(info, req)
-    let opened
-    try {
-      opened = await openUpstream(info, headers, reqCtrl.signal)
-    } catch (err) {
-      // 第四轮 §4.5.2 #1：openUpstream 抛错（握手超时 / DNS / TLS）以前直接冒到外层，
-      // 既不回 502 也不作废直链缓存 —— 死链会继续在 20 分钟缓存里被反复命中。
-      logLine('[online] 上游打开失败', (err && err.message) || err)
-      try { online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
-      if (!res.writableEnded) res.writeHead(502).end('upstream error')
-      return
-    }
-    const upstream = opened.upstream
-    if (clientGone) {
-      try { if (upstream.body) upstream.body.cancel() } catch (e) { /* 忽略 */ }
-      return
-    }
-    if (!upstream.ok && upstream.status !== 206) {
-      // v3.3.20：只留 origin+路径，丢掉 query —— 直链的鉴权参数（?vkey= / ?sign= / token）
-      // 就在 query 前段，日志会被用户「复制诊断」带出去。前 70 字符恰好切进 key 本体。
-      let safeUrl = ''
-      try { const u = new URL(info.url); safeUrl = u.origin + u.pathname.slice(0, 40) } catch (e) { safeUrl = '(非法 URL)' }
-      logLine('[online] 上游失败', upstream.status, safeUrl)
-      // v3.3.18：签名直链提前失效时不能让 20 分钟的直链缓存继续命中
-      try { online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
-      // 第四轮 §4.5.2 #1：非 2xx 的响应体不取消会一直占着连接
-      try { if (upstream.body) upstream.body.cancel() } catch (e) { /* 忽略 */ }
-      if (!res.writableEnded) res.writeHead(502).end('upstream ' + upstream.status)
-      return
-    }
-    const out = buildProxyHeaders(upstream)
-
-    // 只有「从头整段请求」才顺手存缓存；用户拖进度条发来的 Range 请求
-    // 存下来的是一段残片，反而会把缓存搞脏。
-    const rangeHdr = String(req.headers.range || '').trim()
-    const canCache = cacheOn && (!rangeHdr || /^bytes=0-$/.test(rangeHdr))
-    const cKey = cacheKeyOf(song, cacheClassOf(info))
-    // part：本次请求的缓存残片。stream=null 表示「不缓存」或「已收尾」
-    const part = { path: null, stream: null, bytes: 0 }
-
-    if (canCache) {
-      try {
-        fs.mkdirSync(cacheDirPath(), { recursive: true })
-        // 每个请求用自己的临时文件名：同一首歌可能被连点两次，
-        // 共用一个 .part 的话，先结束的那个会把后一个正在写的文件删掉。
-        const uniq = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-        part.path = path.join(cacheDirPath(), `${cKey}.${uniq}.part`)
-        part.stream = fs.createWriteStream(part.path)
-        // v3.3.13：error 回调捕获「这个具体 .part」——finishCache 清空 part.path
-        // 后写流才报错时，仍能定位并删掉半截残片
-        const errP = part.path
-        const errS = part.stream
-        // v3.3.20：写流出错（盘满/目录被删）时，除了删残片还要把 part.stream 摘掉。
-        // 以前只删文件、不清状态 —— 后续 chunk 还往这个已销毁的流 write()，
-        // 每个字节都要等 3 秒的 drain 兜底，在线播放直接卡成「不动了」。
-        part.stream.on('error', () => {
-          if (part.stream === errS) part.stream = null
-          if (part.path === errP) part.path = null
-          removePartFile(errP, errS)
-        })
-      } catch (err) {
-        part.path = null
-        part.stream = null
-      }
-    }
-    dropPart = () => {
-      const ps = part.stream
-      const p = part.path
-      part.stream = null
-      part.path = null
-      removePartFile(p, ps)
-    }
-    // 上游是否给了「整段」的凭据：第四轮 §4.5.5 #2 指出只比 Content-Length 会被残片骗过 ——
-    // 上游对 bytes=0- 回一段 206 时，bytes === Content-Length 成立，于是残片被 rename 成完整缓存，
-    // 重播只听到开头。这里解析 Content-Range 的分母，只认「真的覆盖到 total-1」。
-    const crHdr = String((upstream.headers && upstream.headers.get && upstream.headers.get('content-range')) || '')
-    const crTotal = Number(crHdr.split('/')[1]) || 0
-    const crEnd = Number((crHdr.match(/bytes\s+\d+-(\d+)/) || [])[1])
-    const crCoversAll = !crTotal || (!Number.isNaN(crEnd) && crEnd === crTotal - 1)
-    // 收尾：字节数、Range 覆盖范围都一致才算缓存成功，半截的直接丢
-    const finishCache = () => {
-      if (!part.stream || !part.path) return
-      const expect = Number(out['Content-Length']) || 0
-      const target = part.path
-      const key = cKey
-      const meta = {
-        title: info.song ? info.song.title : song.title,
-        artist: info.song ? info.song.artist : song.artist,
-        ext: info.ext
-      }
-      const stream = part.stream
-      const bytes = part.bytes
-      part.stream = null
-      part.path = null
-      stream.end(() => {
-        if (!expect) {
-          // 第四轮 §4.5.2 #2：上游 chunked（无 Content-Length）时永远落不了盘，
-          // 以前是静默丢弃、也没有任何日志，排查时完全看不出「为什么缓存没生效」
-          logLine('[cache] 上游无 Content-Length（chunked），跳过缓存', key)
-          try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
-          return
-        }
-        if (bytes !== expect || !crCoversAll) {
-          try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
-          return
-        }
-        // v3.3.13：ext 来自网络字段，只放行白名单扩展名，否则退回 mp3
-        const CACHE_EXTS = ['mp3', 'm4a', 'flac', 'ogg', 'aac']
-        const ext = String(meta.ext || '').toLowerCase()
-        const safeExt = CACHE_EXTS.includes(ext) ? ext : 'mp3'
-        const file = `${key}.${safeExt}`
-        try {
-          const target2 = path.join(cacheDirPath(), file)
-          // 另一个并发请求可能已经先写完了，那就用它的
-          if (fs.existsSync(target2)) {
-            try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
-            return
-          }
-          fs.renameSync(target, target2)
-          cachePut(key, file, meta, bytes)
-          logLine('[cache] 缓存完成', file, (bytes / 1048576).toFixed(1) + 'MB')
-        } catch (e) {
-          try { fs.unlinkSync(target) } catch (e2) { /* 忽略 */ }
-        }
-      })
-    }
-
-    if (clientGone) { dropPart(); return }
-    res.writeHead(upstream.status === 206 ? 206 : 200, out)
-    // 告诉界面「这首实际是什么音质」——界面拿到的是解析时那一刻的结论，
-    // 而真正取流发生在这里，两边可能不一致（第一次解析失败、重试成功之类）。
-    sendToRenderer('online:now-playing', {
-      id: `${source}:${id}`,
-      song: info.song ? { title: info.song.title, artist: info.song.artist } : null,
-      lossless: !!info.lossless,
-      bitrate: info.bitrate || 0,
-      ext: info.ext || 'mp3',
-      cached: false
-    })
-    if (!upstream.body) {
-      dropPart()
-      try { res.end() } catch (e) { /* 已断开 */ }
-      return
-    }
-    await pumpUpstreamBody({
-      reader: upstream.body.getReader(),
-      res,
-      ctrl: opened.ctrl,
-      part,
-      dropPart,
-      finishCache
-    })
-  } catch (err) {
-    try { dropPart() } catch (e) { /* 忽略 */ }
-    logLine('[online] 代理异常', err.message)
-    try {
-      if (res.headersSent) res.destroy()      // 头已发出，不能再次 writeHead
-      else res.writeHead(500).end('proxy error')
-    } catch (e) { try { res.destroy() } catch (e2) { /* 已断开 */ } }
-  }
-}
-
-/**
- * 两条缓存命中路径的统一响应：推「实际音质」给界面，再从磁盘按 Range 出流。
- * @param {object} hit cacheHit / cacheTry 的结果
- * @param {object|null} fallback 降级档命中时的解析信息（首选档命中传 null）
- */
-function sendCachedStream(req, res, song, hit, fallback) {
-  logLine(fallback ? '[cache] 命中(降级档)' : '[cache] 命中', path.basename(hit.path))
-  sendToRenderer('online:now-playing', {
-    id: `${song.source}:${song.id}`,
-    song: { title: hit.rec.title || song.title, artist: hit.rec.artist || song.artist },
-    lossless: hit.cls === 'flac' || hit.cls === 'master',
-    bitrate: fallback ? (fallback.bitrate || 0) : 0,
-    ext: hit.rec.ext || (fallback && fallback.ext) || path.extname(hit.path).slice(1),
-    cached: true
-  })
-  serveLocalFile(hit.path, req, res)
-}
-
-/**
- * 组装上游请求头：UA + 平台要求的 Referer/Cookie 等。
- * 逐跳头（host/content-length/connection/range）不透传 —— Range 由本端按需补。
- */
-function buildUpstreamHeaders(info, req) {
-  const headers = { 'User-Agent': 'Mozilla/5.0' }
-  if (info.referer) headers.Referer = info.referer
-  // 有些平台的直链要带它自己指定的头（比如 QQ 的 Cookie/Referer），网关会一起给
-  if (info.headers && typeof info.headers === 'object') {
-    for (const [k, v] of Object.entries(info.headers)) {
-      if (typeof v === 'string' && !/^(host|content-length|connection|range)$/i.test(k)) headers[k] = v
-    }
-  }
-  if (req.headers.range) headers.Range = req.headers.range
-  return headers
-}
-
-/**
- * 向上游发起取流请求。
- *
- * v3.3.13：超时分两段。这里只管握手（建连/首字节）15 秒；正文的空闲超时由
- * pumpUpstreamBody 每收到一个 chunk 刷新的 20 秒看门狗负责。
- * 之前用 AbortSignal.timeout(15000) 一把罩住整个响应体，>15 秒的在线音频必被截断、
- * 缓存永远写不成 —— 所以 signal 保留但不再设总体超时。
- *
- * @returns {{upstream: Response, ctrl: AbortController}} ctrl 供正文阶段复用
- */
-async function openUpstream(info, headers, externalSignal) {
-  const ctrl = new AbortController()
-  const headTimer = setTimeout(() => { try { ctrl.abort() } catch (e) { /* 忽略 */ } }, 15000)
-  // v3.3.18：客户端断开时连握手阶段的 fetch 也要收掉；listener 留到正文阶段，
-  // 由 pumpUpstreamBody 的空闲看门狗共用同一个 ctrl
-  if (externalSignal) {
-    if (externalSignal.aborted) ctrl.abort()
-    else externalSignal.addEventListener('abort', () => { try { ctrl.abort() } catch (e) { /* 忽略 */ } }, { once: true })
-  }
-  try {
-    const upstream = await fetch(info.url, { headers, redirect: 'follow', signal: ctrl.signal })
-    return { upstream, ctrl }
-  } finally {
-    clearTimeout(headTimer)
-  }
-}
-
-/** 回给浏览器的响应头：透传长度/区间，其余按本端策略固定 */
-function buildProxyHeaders(upstream) {
-  const out = {
-    'Content-Type': upstream.headers.get('content-type') || 'audio/mpeg',
-    'Accept-Ranges': 'bytes',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Expose-Headers': 'content-length, content-range, accept-ranges',
-    'Cache-Control': 'no-store'
-  }
-  for (const k of ['content-length', 'content-range']) {
-    const v = upstream.headers.get(k)
-    if (v) out[k.replace(/(^|-)([a-z])/g, (m, a, b) => a + b.toUpperCase())] = v
-  }
-  return out
-}
-
-/**
- * 把上游响应体边转发给浏览器边写缓存。
- *
- * 约定（改之前务必读）：
- *  - 客户端断开（切歌/拖进度条）要同时收掉上游读者与写盘，否则请求会永远悬着；
- *  - 只有「正常读完」才落缓存，中途断开一律丢弃残片；
- *  - 无论成功/异常/断开，响应连接都必须收掉。
- *
- * @param {object} p
- * @param {ReadableStreamDefaultReader} p.reader 上游 body reader
- * @param {import('http').ServerResponse} p.res
- * @param {AbortController} p.ctrl 正文空闲看门狗用
- * @param {{path:string|null, stream:fs.WriteStream|null, bytes:number}} p.part 缓存残片状态
- * @param {() => void} p.dropPart
- * @param {() => void} p.finishCache
- */
-async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache }) {
-  // 正文阶段：可刷新的空闲看门狗 —— 每读到一个 chunk 就刷新 20 秒，
-  // 慢速但持续的大文件不会被误杀，真正卡死的连接才会被 abort
-  let idleTimer = null
-  const touch = () => {
-    if (idleTimer) clearTimeout(idleTimer)
-    idleTimer = setTimeout(() => { try { ctrl.abort() } catch (e) { /* 忽略 */ } }, 20000)
-  }
-  touch()   // 启动正文空闲看门狗（首字节也要限时）
-
-  // 客户端一断开（切歌、拖进度条）就把上游和写盘一起收掉。
-  // 只等 'drain' 是不够的：连接没了就没有 drain，这个请求会永远悬着。
-  let aborted = false
-  const onClose = () => {
-    if (res.writableFinished) return
-    aborted = true
-    try { ctrl.abort() } catch (e) { /* 已结束 */ }
-    try { reader.cancel() } catch (e) { /* 已结束 */ }
-    dropPart()
-  }
-  res.on('close', onClose)
-
-  let complete = false
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      if (aborted) break
-      touch()   // 每读到一个 chunk 就刷新空闲看门狗
-      const buf = Buffer.from(value)
-      const ps = part.stream
-      if (ps) {
-        part.bytes += buf.length
-        // 磁盘跟不上就先等写盘，否则 100MB 的 flac 会在内存里堆起来
-        if (!ps.write(buf)) await waitDrain(ps)
-      }
-      if (!res.write(buf)) await waitDrain(res)
-    }
-    complete = !aborted
-  } catch (err) {
-    complete = false
-  } finally {
-    clearTimeout(idleTimer)
-    res.off('close', onClose)
-    // 正常读完才落缓存；中途断开就把残片丢掉
-    if (complete) finishCache()
-    else dropPart()
-    // v3.3.13：无论成功/异常/断开，连接都必须收掉
-    try { if (!res.writableEnded) res.end() } catch (e) { /* 已断开 */ }
-  }
-}
-
-/**
- * 等 drain 或 close。3 秒兜底：宁可丢掉缓存，也不能卡住播放。
- * v3.3.13：once 注册的是包装函数，off 必须配对；用 on + off 才能真清掉。
- */
-function waitDrain(emitter) {
-  return new Promise((r) => {
-    let done = false
-    let timer = null
-    const go = () => {
-      if (done) return
-      done = true
-      if (timer) clearTimeout(timer)
-      emitter.off('drain', go)
-      emitter.off('close', go)
-      r()
-    }
-    emitter.on('drain', go)
-    emitter.on('close', go)
-    timer = setTimeout(go, 3000)
-  })
-}
-
-/**
- * 关闭缓存写流并删掉指定 .part。
- * Windows 上不能删还开着的文件，所以等 close 再删；1 秒兜底 timer 保存句柄，
- * 删成功即 clearTimeout，避免 del 被调两次。
- */
-function removePartFile(p, ps) {
-  if (!p) return
-  let fallback = null
-  let done = false
-  const del = () => {
-    if (done) return
-    done = true
-    if (fallback) { clearTimeout(fallback); fallback = null }
-    try { fs.unlinkSync(p) } catch (e) { /* 忽略 */ }
-  }
-  if (!ps) { del(); return }
-  try {
-    ps.once('close', del)
-    ps.destroy()
-    if (!done) fallback = setTimeout(del, 1000)
-  } catch (e) { del() }
-}
+const _MODS = [PROTO, SCHEMA, DLYW, MPVM, DL, DC, SP].filter(Boolean)
+for (const M of _MODS) M.init(G)
 
 
-function toLxUrl(filePath) {  if (!filePath) return null
-  const norm = path.resolve(filePath).replace(/\\/g, '/')
-  // 固定用 local 当 host，完整路径（含盘符）放在 path 里：
-  // 若把盘符塞进 authority（lxfile:///D:/…），Chromium 会把它规范成 host，盘符就丢了。
-  const body = norm.split('/').map((seg) => (/^[A-Za-z]:$/.test(seg) ? seg : encodeURIComponent(seg))).join('/')
-  return 'lxfile://local/' + body.replace(/^\/+/, '')
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /* ---------------- 默认配置 ---------------- */
 
@@ -1539,7 +529,7 @@ function createWindow() {
     // 主窗口真要关掉 → 桌面歌词一起收（否则只剩一个歌词窗悬空，进程也不会退出）。
     // 这里的 quitting 只用来阻止歌词窗口把 enabled 改成 false，下次启动仍能恢复。
     quitting = true
-    closeLyricWindow()
+    DLYW.closeLyricWindow()
   })
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -2115,172 +1105,23 @@ async function readEmbeddedCached(trackId, audioPath, audioMtime) {
   return text
 }
 
-/* ---------------- 桌面歌词浮窗 ---------------- */
 
-let dlyricWin = null
-/**
- * 最近一次推给歌词窗口的内容。
- * 歌词窗口是异步加载的，刚打开时那次推送必然早于页面就绪（webContents.send 会静默丢弃），
- * 渲染层又按内容去重、不会重发 → 表现为「打开后不显示歌词，暂停一下才出来」。
- * 所以主进程必须缓存一份，在页面就绪时补发。
- */
-let lastDlyricData = null
 
-function dlyricCfg() {
-  return store.get().settings.desktopLyric || {}
-}
 
-function sendToDlyric(channel, payload) {
-  if (dlyricWin && !dlyricWin.isDestroyed()) {
-    dlyricWin.webContents.send(channel, payload)
-  }
-}
 
-/** 歌词窗口就绪/重载后补发：配置 + 当前歌词行 */
-function replayDlyricState() {
-  sendToDlyric('dlyric:cfg', dlyricCfg())
-  if (lastDlyricData) sendToDlyric('dlyric:data', lastDlyricData)
-}
 
-/** 锁定 = 鼠标穿透；同时把最新配置推给歌词窗口 */
-function applyDlyricLock() {
-  const cfg = dlyricCfg()
-  if (dlyricWin && !dlyricWin.isDestroyed()) {
-    dlyricWin.setIgnoreMouseEvents(!!cfg.locked)
-    sendToDlyric('dlyric:cfg', cfg)
-  }
-}
 
-/** 把 开/关 + 锁定 状态同步给主窗口（按钮图标/提示、点击语义都依赖它） */
-function notifyDlyricState() {
-  const cfg = dlyricCfg()
-  sendToRenderer('dlyric:open-state', {
-    open: !!(dlyricWin && !dlyricWin.isDestroyed()),
-    locked: !!cfg.locked
-  })
-}
 
-function createLyricWindow() {
-  if (dlyricWin && !dlyricWin.isDestroyed()) return dlyricWin
-  const cfg = dlyricCfg()
-  const b = cfg.bounds || {}
-  dlyricWin = new BrowserWindow({
-    width: b.width || 900,
-    height: b.height || 120,
-    x: Number.isFinite(b.x) ? b.x : undefined,
-    y: Number.isFinite(b.y) ? b.y : undefined,
-    minWidth: 300,
-    minHeight: 70,
-    transparent: true,
-    frame: false,
-    resizable: true,
-    skipTaskbar: true,
-    alwaysOnTop: true,
-    hasShadow: false,
-    show: false,
-    title: '桌面歌词',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      spellcheck: false
-    }
-  })
-  // screen-saver 层级：压在普通置顶窗口之上
-  dlyricWin.setAlwaysOnTop(true, 'screen-saver')
-  dlyricWin.loadFile(path.join(__dirname, '..', 'renderer', 'dlyric.html'))
 
-  dlyricWin.once('ready-to-show', () => {
-    dlyricWin.show()
-    applyDlyricLock()
-  })
 
-  // 页面加载完就补发一次（dlyric:ready 的兜底，重载/刷新时同样能立刻出词）
-  dlyricWin.webContents.on('did-finish-load', () => replayDlyricState())
 
-  // 位置/尺寸持久化（去抖）
-  let lastLyricBounds = null
-  const saveBounds = debounce(() => {
-    if (!dlyricWin || dlyricWin.isDestroyed()) return
-    lastLyricBounds = dlyricWin.getNormalBounds ? dlyricWin.getNormalBounds() : dlyricWin.getBounds()
-    store.patch({ settings: { desktopLyric: { bounds: lastLyricBounds } } })
-  }, 400)
-  dlyricWin.on('resize', saveBounds)
-  dlyricWin.on('move', saveBounds)
-  // 关闭前窗口还在，记下最后一次位置（去抖那次可能来不及触发）
-  dlyricWin.on('close', () => {
-    if (dlyricWin && !dlyricWin.isDestroyed()) {
-      try { lastLyricBounds = dlyricWin.getNormalBounds ? dlyricWin.getNormalBounds() : dlyricWin.getBounds() } catch (e) { /* 忽略 */ }
-    }
-  })
-
-  // 歌词窗口自行关闭（控制条 ✕ 或系统方式）→ 通知主窗口同步按钮状态。
-  // 注意退出App时也会触发 closed，用 quitting 区分，避免把 enabled 改没。
-  dlyricWin.on('closed', () => {
-    // v3.3.13：去抖的那次落盘可能被进程退出吞掉，这里用最后一次位置同步兜一次
-    if (lastLyricBounds) {
-      try { store.patch({ settings: { desktopLyric: { bounds: lastLyricBounds } } }) } catch (e) { /* 忽略 */ }
-    }
-    dlyricWin = null
-    if (!quitting) {
-      store.patch({ settings: { desktopLyric: { enabled: false } } })
-      notifyDlyricState()
-    }
-  })
-
-  return dlyricWin
-}
-
-function closeLyricWindow() {
-  if (dlyricWin && !dlyricWin.isDestroyed()) dlyricWin.close()
-  else if (dlyricWin) dlyricWin = null
-}
-
-/* ---------------- 独占输出（mpv + WASAPI exclusive） ---------------- */
-
-let mpvEngine = null
-
-/**
- * mpv 诊断日志环形缓冲（v1.8）。
- * 渲染层收到 mpv:event 时只关心"要不要更新界面"，排查问题需要的上下文
- * （启动参数、audio-out-params、回退共享、引擎退出码）散在各处，面板统一从这里取。
- * 只收低频、有信息量的事件：time/volume/pause 这类 1~2Hz 的不要，会瞬间冲满。
- */
-const MPV_LOG_MAX = 800
-const mpvLogs = []
-let mpvLogSeq = 0
-function pushMpvLog(level, text) {
-  const s = String(text == null ? '' : text)
-  if (!s) return
-  mpvLogs.push({ seq: ++mpvLogSeq, at: Date.now(), level: level || 'info', text: s.slice(0, 2000) })
-  if (mpvLogs.length > MPV_LOG_MAX) mpvLogs.splice(0, mpvLogs.length - MPV_LOG_MAX)
-}
-
-/**
- * 引擎路径查找顺序：LX_MPV 环境变量（调试） → exe 同级 engine\mpv.exe（成品）
- * → 项目根 engine\mpv.exe（开发）。
- */
-function mpvExePath() {
-  const candidates = []
-  if (process.env.LX_MPV) candidates.push(process.env.LX_MPV)
-  candidates.push(
-    app.isPackaged
-      ? path.join(path.dirname(process.execPath), 'engine', 'mpv.exe')
-      : path.join(__dirname, '..', '..', 'engine', 'mpv.exe')
-  )
-  for (const p of candidates) {
-    try { if (p && fs.existsSync(p)) return p } catch {}
-  }
-  return candidates[candidates.length - 1]
-}
 
 /**
  * 从「当前正在加载的流地址」反推回 song，作废它的直链缓存。
  * 只处理主进程自己拼的两种地址：lxstream://play/<source>/<id> 与本地代理的 /stream?src=&id=
  */
 function invalidateCurrentStream() {
-  const file = String((mpvEngine && mpvEngine._lastFile) || '')
+  const file = String((MPVM.mpvEngine && MPVM.mpvEngine._lastFile) || '')
   if (!file) return
   try {
     // 第四轮 §3.3 #3：旧的 legacy 分支是死代码 —— lxstream://play/<src>/<id> 里 "play" 是 host，
@@ -2305,870 +1146,36 @@ function invalidateCurrentStream() {
   } catch (e) { /* 不是流地址（本地文件），忽略 */ }
 }
 
-function onMpvEvent(evt) {
-  // 独占打不开（设备不支持该格式/被别的程序独占）→ 自动回退共享一次并告知界面
-  // v3.3.20：只有 mpv 判定为「AO 打不开」时才回退共享。
-  // 以前只要有 fellBack=false 就回退 —— 一个坏文件（404 / 不支持的编码）就能让整个
-  // 会话永久降到共享输出，后面所有歌都不再位完美，用户只能重启。
-  // 判定交给 mpv.js：本引擎从没成功开出过 AO，且错误详情里有设备类关键词。
-  if (evt.type === 'file-error' && evt.aoFailed && mpvEngine && mpvEngine.exclusive && !mpvEngine.fellBack) {
-    mpvEngine.fellBack = true
-    logLine('[mpv] 独占输出失败，回退共享：' + (evt.message || ''))
-    pushMpvLog('warn', '独占输出失败，回退共享：' + (evt.message || ''))
-    // 第四轮 §4.2 #2：没有 catch 就是一次 unhandledRejection，界面还会停在「独占中」
-    mpvEngine.restart({ exclusive: false }).then((r) => {
-      pushMpvLog(r.ok ? 'warn' : 'error', r.ok ? '已重启引擎为共享输出' : '回退共享也失败：' + (r.error || ''))
-      sendToRenderer('mpv:event', r.ok
-        ? { type: 'fallback', message: (evt.message || ''), exclusive: false }
-        : { type: 'error', message: r.error || '独占失败且回退共享也失败' })
-    }).catch((err) => {
-      pushMpvLog('error', '回退共享异常：' + ((err && err.message) || err))
-      sendToRenderer('mpv:event', { type: 'error', message: '独占失败且回退共享也失败' })
-    })
-    return
-  }
-  // 输出参数是"是否位完美"的第一手证据，落日志便于事后核对
-  if (evt.type === 'format') {
-    logLine('[mpv] audio-out-params=' + JSON.stringify(evt.params))
-    pushMpvLog('info', 'audio-out-params=' + JSON.stringify(evt.params))
-  }
-  if (evt.type === 'file-error') {
-    logLine('[mpv] file-error: ' + (evt.message || ''))
-    pushMpvLog('error', 'file-error: ' + (evt.message || ''))
-    // v3.3.17：播不出来就把这条直链的缓存作废。
-    // 平台签名直链会提前失效，而缓存 TTL 是 20 分钟 —— 不作废的话，
-    // 用户在这段时间里每次点这首歌都会命中同一条死链，换源逻辑压根不触发。
-    invalidateCurrentStream()
-  }
-  if (evt.type === 'log' && (evt.level === 'error' || evt.level === 'fatal')) {
-    logLine('[mpv][log] ' + evt.text)
-    pushMpvLog(evt.level === 'fatal' ? 'error' : 'warn', '[' + evt.level + '] ' + evt.text)
-  }
-  if (evt.type === 'engine-exit') {
-    pushMpvLog('error', '引擎退出 code=' + evt.code + (evt.stderr ? ' stderr=' + evt.stderr : ''))
-  }
-  if (evt.type === 'ao-lost') {
-    logLine('[mpv] ' + (evt.message || '独占输出中断'))
-    pushMpvLog('warn', evt.message || '独占输出中断')
-  }
-  if (evt.type === 'ao-recovered') {
-    logLine('[mpv] 独占输出已自动恢复')
-    pushMpvLog('info', '独占输出已自动恢复')
-  }
-  if (evt.type === 'exclusive-lost') {
-    logLine('[mpv] ' + (evt.message || '自动夺回独占失败'))
-    pushMpvLog('error', evt.message || '自动夺回独占失败')
-  }
-  if (evt.type === 'error') pushMpvLog('error', evt.message || '引擎错误')
-  if (evt.type === 'loaded') pushMpvLog('info', 'file-loaded')
-  sendToRenderer('mpv:event', evt)
-}
 
-/** 进行中的释放流程（见 releaseMpv 的说明） */
-let mpvReleasing = null
 
-async function ensureMpv(exclusive, opts = {}) {
-  // 释放流程还在跑（stop + sweep 最长约 11 秒）就先等它结束，
-  // 否则新起的引擎会被 release 的 sweep 当成孤儿杀掉
-  if (mpvReleasing) await mpvReleasing.catch(() => {})
-  if (!mpvEngine) {
-    mpvEngine = new MpvEngine({ exePath: mpvExePath(), onEvent: onMpvEvent })
-  }
-  const wantExclusive = exclusive !== false
-  const audioDevice = String(store.get().settings.audioDevice || '').trim()
-  const startVolume = Math.max(0, Math.min(1, Number(store.get().settings.volume ?? 1)))
-  if (mpvEngine.running) {
-    // v3.3.6 / v2.8.6：以前只要引擎在跑就直接返回，不管它现在是独占还是共享 ——
-    // 于是「要独占但引擎是共享」时独占根本开不起来（用户看到：开了独占却没位完美），
-    // 「要共享但引擎是独占」时则一直霸着声卡。模式对不上就重启到目标模式。
-    if (opts.forceMode && mpvEngine.exclusive !== wantExclusive) {
-      pushMpvLog('info', '引擎模式与请求不一致（当前 ' + (mpvEngine.exclusive ? '独占' : '共享') + '），重启为' + (wantExclusive ? '独占' : '共享'))
-      const r = await mpvEngine.restart({ exclusive: wantExclusive, audioDevice, volume: startVolume })
-      if (r.ok) {
-        // v3.3.20：重启成功就是一次全新的独占尝试，回退标记必须清掉，
-        // 否则用户「关掉再打开独占」也换不回可回退状态（标记永不复位）
-        if (wantExclusive) mpvEngine.fellBack = false
-        startDeviceWatch()
-      }
-      return r
-    }
-    return { ok: true, exclusive: mpvEngine.exclusive }
-  }
-  // 输出设备来自设置；空字符串 = 跟随系统默认
-  // v2.5：启动音量跟随设置（以前 mpv 固定 --volume=100，重启引擎音量就被重置）
-  pushMpvLog('info', '启动引擎：exclusive=' + wantExclusive + ' ao=' + (process.env.LX_TEST_MUTE === '1' ? 'null(测试静音)' : 'wasapi') + ' device=' + (audioDevice || '(系统默认)') + ' volume=' + Math.round(startVolume * 1000) / 10)
-  const r = await mpvEngine.start({ exclusive: wantExclusive, audioDevice, volume: startVolume })
-  logLine('[mpv] start exclusive=' + wantExclusive + ' ' + JSON.stringify(r) + ' exe=' + mpvExePath())
-  pushMpvLog(r.ok ? 'info' : 'error',
-    '启动结果：' + (r.ok ? 'ok' : '失败 ' + (r.error || '')) + ' exe=' + mpvExePath())
-  // 独占流跑起来之后才开始盯设备（共享模式下 mpv 自己会跟系统默认设备走）
-  if (r.ok && wantExclusive) {
-    // v3.3.20：重启/重新开启成功后清除回退标记 —— 否则一次 file-error 回退过，
-    // 之后即使重启回独占，这段代码也不会再走回退分支（标记永不复位）
-    mpvEngine.fellBack = false
-    startDeviceWatch()
-  }
-  return r
-}
 
-/**
- * 关掉引擎，并**确认声卡真的还回来了**。
- *
- * v3.3.6 / v2.8.6：用户报「开了独占再关掉，其他软件还是没声音，播放器自己还能继续放」。
- * 根因是「关独占」以前只做了两件事：发信号杀进程 + 立刻重载界面，
- * 既没等进程真退出，也没检查设备是否真的释放，更没扫掉可能残留的孤儿进程。
- * 现在这条路径做全套：
- *   1) 等 mpv 进程真正退出（stop()）；
- *   2) 扫一遍属于本进程却还活着的 mpv（竞态产生的孤儿），一律杀掉；
- *   3) 用一个共享模式的 mpv 实测设备能不能打开；
- *   4) 还占着就把结果回报给界面，明确告诉用户，而不是让用户自己猜。
- */
-/**
- * 完整释放独占（对外入口）。
- *
- * v3.3.17：同一时刻只允许一份在执行。releaseMpv 内部会 sweep 掉「命令行里带着
- * 本进程 PID 管道名」的所有 mpv 进程 —— 并发调用时，先启动的那份会在后启动的那份
- * 起好新引擎之后才跑 sweep，把**新引擎**当孤儿杀掉，用户看到「独占已开启但没声音」。
- * 并发的第二份直接复用同一份 Promise；ensureMpv 也会先等它结束再起进程。
- */
-function releaseMpv(opts = {}) {
-  if (mpvReleasing) return mpvReleasing
-  mpvReleasing = releaseMpvOnce(opts).finally(() => { mpvReleasing = null })
-  return mpvReleasing
-}
 
-async function releaseMpvOnce({ probe = true } = {}) {
-  const eng = mpvEngine
-  mpvEngine = null
-  stopDeviceWatch()
-  let exited = true
-  if (eng) {
-    pushMpvLog('info', '关闭引擎')
-    const r = await eng.stop()
-    exited = !!r.exited
-    if (!exited) pushMpvLog('warn', '引擎进程没有正常退出（pid ' + r.pid + '），已强制结束')
-  }
-  // 扫残留：属于本进程（管道名里带本 PID）的 mpv 一定是我们的，活着就是孤儿
-  const leftover = await sweepOurMpv()
-  if (leftover.length) {
-    pushMpvLog('warn', '发现残留的 mpv 进程（已强杀）：' + leftover.join(', '))
-    logLine('[mpv] 残留孤儿进程已清理: ' + leftover.join(','))
-  }
-  let blocked = false
-  let detail = ''
-  if (probe) {
-    const p = await probeDeviceFree()
-    blocked = !!p.blocked
-    detail = p.detail || ''
-    pushMpvLog(blocked ? 'warn' : 'info', blocked ? '声卡仍被占用：别的程序可能还是没声音' : '声卡已释放，其他程序可以正常发声')
-  }
-  return { ok: true, exited, leftover, blocked, detail }
-}
 
-/** 列出（并杀掉）属于本进程的残留 mpv —— 竞态产生的孤儿会一直霸着声卡 */
-async function sweepOurMpv(listTimeout = 8000, killTimeout = 5000) {
-  if (process.platform !== 'win32') return []
-  const selfPid = process.pid
-  const script = [
-    'Get-CimInstance Win32_Process -Filter "Name=\'mpv.exe\'" | ForEach-Object {',
-    '  $m = [regex]::Match($_.CommandLine, \'lxmpv-(\\d+)-\')',
-    '  if (-not $m.Success) { return }',
-    '  if ([int]$m.Groups[1].Value -ne ' + selfPid + ') { return }',
-    '  $_.ProcessId',
-    '}'
-  ].join('\n')
-  // v3.3.9：改异步 —— 同步版（execFileSync 8 秒 + 逐个 taskkill 各 5 秒）会把主进程
-  // 事件循环卡到 13 秒，期间流代理和所有 IPC 全部停摆
-  const listPids = () => new Promise((resolve) => {
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
-      { windowsHide: true, timeout: listTimeout }, (err, stdout) => {
-        if (err || !stdout) return resolve([])
-        resolve(String(stdout).split(/\r?\n/).map((x) => x.trim()).filter((x) => /^\d+$/.test(x)))
-      })
-  })
-  const killPid = (pid) => new Promise((resolve) => {
-    execFile('taskkill', ['/PID', pid, '/F'], { windowsHide: true, timeout: killTimeout }, () => resolve())
-  })
-  const pids = await listPids()
-  for (const pid of pids) await killPid(pid)
-  return pids
-}
 
-/** 探测用的 0.5 秒静音 wav（mpv 得有东西播才会去开声卡） */
-let probeWavPath = ''
-function ensureProbeWav() {
-  if (probeWavPath) { try { if (fs.existsSync(probeWavPath)) return probeWavPath } catch {} }
-  try {
-    const rate = 48000
-    const frames = Math.floor(rate * 0.5)
-    const bytes = frames * 2
-    const buf = Buffer.alloc(44 + bytes)
-    buf.write('RIFF', 0); buf.writeUInt32LE(36 + bytes, 4); buf.write('WAVE', 8)
-    buf.write('fmt ', 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(1, 22)
-    buf.writeUInt32LE(rate, 24); buf.writeUInt32LE(rate * 2, 28); buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34)
-    buf.write('data', 36); buf.writeUInt32LE(bytes, 40)
-    probeWavPath = path.join(DATA_DIR, 'probe-silence.wav')
-    fs.writeFileSync(probeWavPath, buf)
-    return probeWavPath
-  } catch (err) {
-    return ''
-  }
-}
 
-/**
- * 实测声卡现在能不能被别人用：拿共享模式的 mpv 试着打开默认设备。
- * 打不开（AUDCLNT_E_DEVICE_IN_USE）就说明还被谁占着 —— 这就是「其他软件没声音」的判定依据。
- * 顺带效果：以共享方式打开一次，Windows 会把端点的独占状态清干净，别人更容易立刻接回来。
- */
-function probeDeviceFree() {
-  return new Promise((resolve) => {
-    const wav = ensureProbeWav()
-    const exe = mpvExePath()
-    if (!wav || !exe || !fs.existsSync(exe)) {
-      resolve({ blocked: false, detail: 'mpv 不可用，跳过探测' })
-      return
-    }
-    const args = [
-      '--no-config', '--no-video', '--ao=wasapi', '--audio-exclusive=no',
-      '--length=0.4', '--msg-level=all=warn', wav
-    ]
-    // 探测的必须是「用户实际在用的那个设备」：独占是按设备占的，
-    // 探测默认设备而用户选的是 USB DAC，就会漏判（明明还占着却报可用）。
-    const dev = String(store.get().settings.audioDevice || '').trim()
-    if (dev) args.splice(3, 0, '--audio-device=' + dev)
-    execFile(exe, args, { windowsHide: true, timeout: 12000 }, (err, stdout, stderr) => {
-      const out = (stdout || '') + (stderr || '')
-      const blocked = /AUDCLNT_E_DEVICE_IN_USE|0x8889000a|EXCLUSIVE_MODE/i.test(out)
-      const first = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || ''
-      // 第四轮 §4.2 #5：以前完全忽略 err —— 探测超时被杀、或根本没输出时
-      // blocked=false 会被当成「声卡已释放」，把用户引向一个必然失败的切换
-      if (!blocked && (err || !out)) {
-        resolve({ blocked: null, uncertain: true, detail: '探测未取得结论（超时或无输出）' })
-        return
-      }
-      resolve({ blocked, detail: blocked ? first : '' })
-    })
-  })
-}
 
-function stopMpv() {
-  // 保留旧的同步入口（退出流程用），真正等待进程退出的逻辑在 releaseMpv() 里
-  const eng = mpvEngine
-  mpvEngine = null
-  stopDeviceWatch()
-  if (!eng) return Promise.resolve({ ok: true, exited: true })
-  pushMpvLog('info', '关闭引擎')
-  return eng.stop()
-}
 
-/* ---------------- 输出设备热插拔（v2.1） ---------------- */
 
-/**
- * 独占模式最典型的翻车场景：接 USB DAC 听歌，人走开把线拔了 —— mpv 的独占流会直接失效，
- * 但界面什么都不会说，用户只会觉得"播放器卡住了/没声音"。
- * 这里每 8 秒对一次 WASAPI 设备列表：选定的设备消失就自动退回系统默认并告知界面；
- * 设备插回来后自动切回去（只在同一次运行里记着，重启不猜）。
- */
-let deviceWatchId = null
-let lostDevice = ''
 
-let deviceWatchBusy = false
-function startDeviceWatch() {
-  if (deviceWatchId || process.platform !== 'win32') return
-  deviceWatchId = setInterval(async () => {
-    // 第四轮 §4.1 #8：一轮里 listDevices(4s) + restart(可 >8s) 会超过 8 秒间隔，
-    // 没有闸门就会多轮并发，重复写设置、重复发事件、重复排队 restart
-    if (deviceWatchBusy) return
-    if (!mpvEngine || !mpvEngine.running || !store.get().settings.exclusiveOutput) return
-    deviceWatchBusy = true
-    try {
-    // v3.3.6 / v2.8.6：抓住这一轮的引擎实例。下面 await 期间用户可能已经关了独占
-    // （引擎被换掉/停掉）。这时如果还拿旧实例去 restart()，就会在「关独占」之后
-    // 又起一个新的独占 mpv —— 那个进程没人管，就是一个霸着声卡的孤儿。
-    const eng = mpvEngine
-    const cur = String(store.get().settings.audioDevice || '')
-    let devs
-    try {
-      devs = await eng.listDevices()
-    } catch {
-      return
-    }
-    // await 之后重新确认：引擎还是同一个、还在跑、独占仍然开着
-    if (mpvEngine !== eng || !eng.running || !store.get().settings.exclusiveOutput) return
-    const names = new Set(devs.map((d) => d.name))
-    if (cur && !names.has(cur)) {
-      lostDevice = cur
-      pushMpvLog('error', '输出设备已断开：' + cur + ' → 自动切回系统默认')
-      logLine('[device] 设备断开，回退系统默认：' + cur)
-      // v3.3.17：先 restart 成功再写设置与发事件。
-      // 以前顺序反了：设置被清空 + 界面收到「已切回默认」，而 restart 的返回值被丢弃 ——
-      // restart 失败（设备被别的程序独占 / 驱动还没恢复）时用户看到「已切回」却完全没声音，
-      // 而且下次启动 DAC 偏好已经丢了。
-      let ok = false
-      try { ok = !!(await eng.restart({ exclusive: true, audioDevice: '' })).ok } catch (e) { ok = false }
-      if (!ok) {
-        pushMpvLog('error', '切回系统默认设备失败，独占可能已中断')
-        sendToRenderer('device-lost', { device: cur, restored: false, error: '切回系统默认设备失败，请手动重开独占' })
-        return
-      }
-      store.patch({ settings: { audioDevice: '' } })
-      sendToRenderer('device-lost', { device: cur, restored: false })
-      return
-    }
-    if (!cur && lostDevice && names.has(lostDevice)) {
-      const back = lostDevice
-      lostDevice = ''
-      pushMpvLog('info', '输出设备已接回：' + back + ' → 自动切回')
-      logLine('[device] 设备接回，自动切回：' + back)
-      let ok = false
-      try { ok = !!(await eng.restart({ exclusive: true, audioDevice: back })).ok } catch (e) { ok = false }
-      if (!ok) {
-        // 接回失败：保留 lostDevice，等下一轮（8 秒后）再试，但别写进设置
-        lostDevice = back
-        pushMpvLog('warn', '设备已插回但切换失败，稍后重试：' + back)
-        return
-      }
-      store.patch({ settings: { audioDevice: back } })
-      sendToRenderer('device-lost', { device: back, restored: true })
-    }
-    } finally { deviceWatchBusy = false }
-  }, 8000)
-  if (deviceWatchId.unref) deviceWatchId.unref()
-  logLine('[device] 开始监视输出设备（8s 一次）')
-}
 
-function stopDeviceWatch() {
-  if (deviceWatchId) { clearInterval(deviceWatchId); deviceWatchId = null }
-  lostDevice = ''
-}
 
-/* ---------------- IPC ---------------- */
 
-/* ---------------- 联网版：下载目录 / 进行中的下载 ---------------- */
 
-/** 下载目录：用户设置优先，否则「我的音乐\猪专属下载」 */
-function downloadDir() {
-  const custom = String(store.get().settings.onlineDownloadDir || '').trim()
-  if (custom) return custom
-  try {
-    return path.join(app.getPath('music'), '猪专属下载')
-  } catch (err) {
-    return path.join(DATA_DIR, 'downloads')
-  }
-}
 
-/* ---------------- 在线音乐下载管理（v3.3） ---------------- */
 
-/**
- * 任务表：id → {
- *   key, song, status: queued|downloading|pausing|paused|done|error,
- *   received, total, speed, path(目标文件), ext, error, at, abort, deleted
- * }
- *
- * 「暂停」不是取消：abort 掉 fetch，但 .part 留着；「继续」用 Range 从断点续，
- * 所以暂停一个 200MB 的母带不会把已下的白扔。只有「删除」才清残片。
- */
-const dlTasks = new Map()
-let dlSeq = 0
-let dlSaveTimer = null
 
-function dlFile() { return path.join(userData, 'downloads.json') }
 
-function toDownloadDto(t) {
-  return {
-    id: t.id,
-    key: t.key,
-    title: (t.song && t.song.title) || '',
-    artist: (t.song && t.song.artist) || '',
-    source: (t.song && t.song.source) || '',
-    status: t.status,
-    received: t.received || 0,
-    total: t.total || 0,
-    speed: t.speed || 0,
-    path: t.path || '',
-    ext: t.ext || '',
-    error: t.error || '',
-    at: t.at || 0
-  }
-}
 
-/** 推给界面；save=false 用于高频进度（别每 250ms 写一次盘） */
-const dlSentSig = new Map()   // id → 上次推送的签名（增量推送用）
-// v3.3.21：done/error 任务以前只有用户手动「清除已完成」才摘，长会话里 Map 与 dlSentSig 慢慢涨。
-// 现在超过上限自动摘最旧的（按创建时间 at；done 的文件是用户音乐不动，error 的 .part 在置 error 时已清）。
-// 上限给 100：正常一次会话下不满，只有挂机数天才会触达。
-const DL_FINISHED_MAX = 100
-function dlPruneFinished() {
-  const fin = Array.from(dlTasks.values()).filter((t) => t.status === 'done' || t.status === 'error')
-  if (fin.length <= DL_FINISHED_MAX) return
-  fin.sort((a, b) => (a.at || 0) - (b.at || 0))
-  let removed = 0
-  for (const t of fin.slice(0, fin.length - DL_FINISHED_MAX)) {
-    if (t.rescanTimer) { clearTimeout(t.rescanTimer); t.rescanTimer = null }
-    dlTasks.delete(t.id); removed++
-  }
-  // error 任务会落盘，摘了要触发保存，否则重启后又复活
-  if (removed) dlSaveSoon()
-}
-function dlBroadcast(save) {
-  dlPruneFinished()
-  // 第四轮 §4.5.3 #13：以前每 250ms 把**全表**推一遍（几十个任务 × 每秒 4 次）。
-  // 改成只推有变化的条目，并用 full 标记告诉渲染层「这次是全量快照」。
-  const all = Array.from(dlTasks.values())
-  const full = save !== false      // 结构性变化（新增/暂停/删除/完成）→ 发全量；进度 tick → 发增量
-  const changed = []
-  for (const t of all) {
-    const sig = [t.status, t.received, t.total, t.speed, t.error, t.path].join('|')
-    if (full || dlSentSig.get(t.id) !== sig) { dlSentSig.set(t.id, sig); changed.push(toDownloadDto(t)) }
-  }
-  for (const id of Array.from(dlSentSig.keys())) {
-    if (!dlTasks.has(id)) dlSentSig.delete(id)
-  }
-  if (changed.length || full) {
-    const payload = { full, items: full ? all.map(toDownloadDto) : changed }
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('online:dl-update', payload)
-    }
-  }
-  if (save !== false) dlSaveSoon()
-}
 
-/** 只持久化「还没完成」的任务，重启后一律按暂停恢复 */
-function dlSaveSoon() {
-  if (dlSaveTimer) return
-  dlSaveTimer = setTimeout(() => {
-    dlSaveTimer = null
-    dlSaveNow()
-  }, 700)
-}
 
-/** 立即落盘（退出前调用；平时走去抖） */
-function dlSaveNow() {
-  if (dlSaveTimer) { clearTimeout(dlSaveTimer); dlSaveTimer = null }
-  try {
-    const keep = Array.from(dlTasks.values())
-      .filter((t) => t.status !== 'done')
-      .map((t) => ({
-        id: t.id, key: t.key, song: t.song,
-        // 第四轮 §4.5.3 #9：error 任务也要落盘 —— 以前重启后任务消失，
-        // 磁盘上的 .part 孤儿文件再没有任何清理入口
-        status: t.status === 'error' ? 'error' : 'paused',
-        error: t.error || '',
-        received: t.received || 0, total: t.total || 0,
-        path: t.path || '', ext: t.ext || '', at: t.at || 0
-      }))
-    atomicWriteJson(dlFile(), keep)
-  } catch (err) { /* 写不进去就算了，不影响下载 */ }
-}
 
-/**
- * taskId → 本次下载实际用的 { url, ext }。
- * v3.3.20：暂停后继续时，解析可能拿到**另一条**直链（换源、签名刷新），
- * 而 .part 里是上一份直链的字节 —— 直接 append 就是一个坏文件却显示「完成」。
- * 这里记住本次的直链与格式，续传前比对；不一致就丢弃残片重下。
- */
-const dlTargetCache = new Map()
 
-function dlLoad() {
-  try {
-    const arr = JSON.parse(fs.readFileSync(dlFile(), 'utf8'))
-    if (!Array.isArray(arr)) return
-    for (const r of arr) {
-      if (!r || !r.id || !r.song) continue
-      dlTasks.set(r.id, { ...r, status: 'paused', speed: 0, abort: null, deleted: false })
-    }
-    if (arr.length) logLine('[dl] 恢复', arr.length, '个未完成任务')
-  } catch (err) { /* 没有历史任务 */ }
-}
 
-/** 删残片要重试：Windows 上写流还没 close 时 unlink 会失败（EBUSY/EPERM） */
-function dlUnlinkRetry(p, tries = 0) {
-  if (!p) return
-  try {
-    fs.unlinkSync(p)
-  } catch (err) {
-    if (err.code === 'ENOENT') return
-    if (tries < 10) setTimeout(() => dlUnlinkRetry(p, tries + 1), 400)
-  }
-}
 
-function dlSafeName(s) {
-  return String(s || '').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
-}
 
-/** 定目标文件名；重名加 (2)(3)，也避开同名的 .part */
-function dlPickPath(song, ext) {
-  const dir = downloadDir()
-  fs.mkdirSync(dir, { recursive: true })
-  const base = dlSafeName(`${song.artist} - ${song.title}`).slice(0, 120) || '未知歌曲'
-  let target = path.join(dir, `${base}.${ext}`)
-  let n = 1
-  // v3.3.20：用 'wx' 原子占位代替 existsSync 检查。同一首歌从两个源各点一次下载
-  // （或两首同名歌）时，两个任务都会通过 existsSync 检查、然后各自隔一次网络握手
-  // 才真正打开 .part —— 互相截断/交错写，最后各自 rename 成同一个文件名，
-  // 产物是两份编码流的混合体，任务却都显示「完成」。
-  // 'wx' 在创建失败（EEXIST）时才换序号，天然原子。
-  for (;;) {
-    const part = target + '.part'
-    try {
-      const fd = fs.openSync(part, 'wx')
-      fs.closeSync(fd)
-      return target
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err
-    }
-    n++
-    target = path.join(dir, `${base} (${n}).${ext}`)
-  }
-}
 
-/** 跑一个任务（首次开始 / 继续都走这里） */
-async function dlRun(task) {
-  if (task.status === 'downloading') return
-  task.status = 'downloading'
-  task.error = ''
-  task.deleted = false
-  const ctrl = new AbortController()
-  task.abort = ctrl
-  dlBroadcast(true)
 
-  let ws = null
-  let reader = null     // v3.3.18：提到 try 外，异常路径也能 cancel 上游读者
-  let endTimer = null   // 写盘收尾的 10 秒超时句柄，finally 里兜底清理
-  try {
-    let info = null
-    try { info = await online.getPlayable(task.song, qualityPref(), { signal: ctrl.signal }) } catch (err) { info = null }
-    // 暂停/删除可能发生在解析期间（最长十几秒），解析回来必须立刻收手
-    if (ctrl.signal.aborted || task.deleted) {
-      throw Object.assign(new Error('download aborted'), { name: 'AbortError' })
-    }
-    if (!info || !info.url) throw new Error('没有可用地址（可能版权限制）')
 
-    if (!task.path) {
-      const ext = info.ext === 'm4a' ? 'm4a' : info.ext === 'flac' ? 'flac' : 'mp3'
-      task.ext = ext
-      task.path = dlPickPath(task.song, ext)
-    }
-    const part = task.path + '.part'
-    // v3.3.20：同一个任务的直链/格式变了，旧 .part 就不是同一份内容 —— 不能续传
-    const tgt = dlTargetCache.get(task.id)
-    const curExt = (task.ext || info.ext || '').toString()
-    if (tgt && (tgt.url !== info.url || tgt.ext !== curExt)) {
-      logLine('[dl] 直链或格式已变化，丢弃残片从头下载')
-      try { fs.unlinkSync(part) } catch (e) { /* 不存在 */ }
-    }
-    dlTargetCache.set(task.id, { url: info.url, ext: curExt })
-    let offset = 0
-    try { offset = fs.statSync(part).size } catch (err) { offset = 0 }
-
-    const headers = { 'User-Agent': 'Mozilla/5.0' }
-    if (info.referer) headers.Referer = info.referer
-    if (info.headers && typeof info.headers === 'object') Object.assign(headers, info.headers)
-    if (offset > 0) headers.Range = 'bytes=' + offset + '-'
-
-    // v3.3.16：握手阶段单独限时。下载同样会卡在「连接已建立、响应头一直不来」，
-    // 而 ctrl 只服务于用户暂停/删除 —— 拿它当超时会把「超时」误判成「用户暂停」。
-    const openOnce = async (from) => {
-      const headCtrl = new AbortController()
-      const headTimer = setTimeout(() => { try { headCtrl.abort() } catch (e) { /* 忽略 */ } }, 20000)
-      const h = { ...headers }
-      if (from > 0) h.Range = 'bytes=' + from + '-'
-      else delete h.Range
-      try {
-        return await fetch(info.url, {
-          headers: h,
-          signal: typeof AbortSignal.any === 'function'
-            ? AbortSignal.any([ctrl.signal, headCtrl.signal])
-            : ctrl.signal,
-          redirect: 'follow'
-        })
-      } finally {
-        clearTimeout(headTimer)
-      }
-    }
-    let res = await openOnce(offset)
-    if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status)
-    // 服务端不认 Range 就会回 200 全量，这时只能从头写
-    if (res.status === 200 && offset > 0) offset = 0
-    let cr = res.headers.get('content-range') || ''
-    // 第四轮 §4.5.2 #6：续传必须校验服务端给的 Content-Range 起点**真的等于**我们请求的 offset。
-    // 以前完全不校验：服务端改回别的段（或忽略 Range 却仍回 206）时，新数据会被 append 到
-    // 已有 .part 后面，直接写出一个损坏文件，而且任务显示「下载完成」。
-    if (offset > 0) {
-      const m = cr.match(/bytes\s+(\d+)-/)
-      if (!m || Number(m[1]) !== offset) {
-        logLine('[dl] 续传起点与请求不符，丢弃残片重下', offset, cr || '(no content-range)')
-        try { if (res.body) res.body.cancel() } catch (e) { /* 忽略 */ }
-        try { fs.unlinkSync(part) } catch (e) { /* 忽略 */ }
-        offset = 0
-        res = await openOnce(0)
-        if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status)
-        cr = res.headers.get('content-range') || ''
-      }
-    }
-    const len = Number(res.headers.get('content-length')) || 0
-    task.total = /\/\d+/.test(cr) ? Number(cr.split('/')[1]) : (offset + len)
-    task.received = offset
-
-    ws = fs.createWriteStream(part, { flags: offset > 0 ? 'a' : 'w' })
-    // v3.3.9：写流必须有 error 监听 + drain 要与「写错误/abort」竞速 ——
-    // 以前磁盘满/文件被锁时：error 无人处理直接 uncaughtException，
-    // 而循环卡在 await drain 上永远出不来（abort 只作用于下一次 read），
-    // 任务永久停在 downloading，暂停/删除全部失效
-    const wsError = new Promise((resolve) => ws.once('error', (e) => resolve(e)))
-    const abortedEv = new Promise((resolve) => {
-      if (ctrl.signal) {
-        if (ctrl.signal.aborted) resolve({ aborted: true })
-        else ctrl.signal.addEventListener('abort', () => resolve({ aborted: true }), { once: true })
-      }
-    })
-    reader = res.body.getReader()
-    // 只建一个 drain 等待器：以前每次写阻塞都新建一个 once('drain')，
-    // 而被 wsError / abort 赢下的 race 不会移除那个监听，长下载会累积到
-    // MaxListenersExceededWarning，且监听闭包一直攥着 buffer 引用
-    let drainWait = null
-    const waitDrain = () => {
-      if (!drainWait) {
-        drainWait = new Promise((r) => ws.once('drain', () => { drainWait = null; r() }))
-      }
-      return drainWait
-    }
-    let lastT = Date.now()
-    let lastB = task.received
-    let lastEmit = 0
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const buf = Buffer.from(value)
-      task.received += buf.length
-      if (!ws.write(buf)) {
-        const ev = await Promise.race([
-          waitDrain(),
-          wsError.then((e) => ({ wsErr: e })),
-          abortedEv
-        ])
-        if (ev && ev.wsErr) throw ev.wsErr
-        if (ev && ev.aborted) throw Object.assign(new Error('download aborted'), { name: 'AbortError' })
-      }
-      const now = Date.now()
-      if (now - lastEmit >= 250) {
-        lastEmit = now
-        const dt = (now - lastT) / 1000
-        if (dt > 0.25) {
-          task.speed = Math.max(0, Math.round((task.received - lastB) / dt))
-          lastB = task.received
-          lastT = now
-        }
-        dlBroadcast(false)
-      }
-      if (task.deleted) { try { ctrl.abort() } catch (err) { /* 忽略 */ } break }
-    }
-    // v3.3.13：写流在 end() 前/中出错时 finish 永不触发 → 任务永久挂起。
-    // 与 drain 一样必须与「写错误/abort/超时」竞速
-    const ended = await Promise.race([
-      new Promise((r) => ws.end(r)),
-      wsError.then((e) => ({ wsErr: e })),
-      abortedEv,
-      new Promise((r) => { endTimer = setTimeout(() => r({ timeout: true }), 10000) })
-    ])
-    if (endTimer) { clearTimeout(endTimer); endTimer = null }
-    if (ended && ended.wsErr) throw ended.wsErr
-    if (ended && ended.aborted) throw Object.assign(new Error('download aborted'), { name: 'AbortError' })
-    if (ended && ended.timeout) throw new Error('写盘收尾超时')
-    ws = null
-    if (task.deleted) throw Object.assign(new Error('__deleted'), { name: 'AbortError' })
-    if (task.total && task.received + 1024 < task.total) throw new Error('下载不完整（连接中断）')
-    fs.renameSync(part, task.path)
-    task.status = 'done'
-    task.speed = 0
-    if (task.total) task.received = task.total
-    logLine('[dl] 完成', path.basename(task.path), (task.received / 1048576).toFixed(1) + 'MB')
-    // 落盘后丢给曲库做增量扫描，下载完就能在「最近添加」里看到
-    // v3.3.9：下载目录也要一并扫（用户自选目录往往不在 musicDirs 里，
-    // 以前下完的歌永远不进库）；扫描进行中被跳过时 30 秒后补一次
-    if (library) {
-      const scanDirs = Array.from(new Set([...(store.get().settings.musicDirs || []), downloadDir()]))
-      library.scan(scanDirs).then((r) => {
-        if (r && r.skipped) {
-          // 补扫 timer 存句柄：触发即清，任务被删除时 dlDelete 也会清
-          task.rescanTimer = setTimeout(() => {
-            task.rescanTimer = null
-            try { library.scan(scanDirs).catch(() => {}) } catch (e) { /* 忽略 */ }
-          }, 30000)
-          if (task.rescanTimer.unref) task.rescanTimer.unref()
-        }
-      }).catch(() => {})
-    }
-  } catch (err) {
-    if (ws) { try { ws.destroy() } catch (e) { /* 忽略 */ } }
-    if (task.deleted) {
-      dlTasks.delete(task.id)
-      dlUnlinkRetry(task.path ? task.path + '.part' : '')
-      dlUnlinkRetry(task.path || '')
-    } else if (task.abort !== ctrl) {
-      // 这一轮已被新一轮接管（暂停后立刻点继续）：状态归新一轮管，不要覆盖
-    } else if (ctrl.signal.aborted) {
-      // v3.3.16：判据收紧为「本轮自己的控制器被 abort」。以前只看 err.name/消息里有没有
-      // abort，握手超时（另一个 controller）也会被当成用户暂停，任务永远停在 paused。
-      task.status = 'paused'
-      task.speed = 0
-    } else if (err && err.name === 'AbortError') {
-      task.status = 'error'
-      task.error = '连接超时或已中断'
-      task.speed = 0
-      // v3.3.20：占位的 .part 记得清掉，否则重试时 'wx' 会误以为名字被占而换新文件名，
-      // 旧的空占位永远留在下载目录里
-      dlUnlinkRetry(task.path ? task.path + '.part' : '')
-      logLine('[dl] 中断', path.basename(task.path || ''), task.error)
-    } else {
-      task.status = 'error'
-      task.error = (err && err.message) || '下载失败'
-      task.speed = 0
-      dlUnlinkRetry(task.path ? task.path + '.part' : '')
-      logLine('[dl] 失败', task.error)
-    }
-  } finally {
-    if (endTimer) { clearTimeout(endTimer); endTimer = null }
-    // v3.3.18：异常/断开时上游连接不能挂到 undici 自己超时
-    if (reader) { try { const r = reader.cancel(); if (r && r.catch) r.catch(() => {}) } catch (e) { /* 忽略 */ } }
-    // v3.3.13：异常路径也要释放写流句柄
-    if (ws) { try { ws.destroy() } catch (e) { /* 忽略 */ } }
-    // v3.3.9：只清掉自己这轮的 abort 控制器，别抹掉新一轮任务的
-    if (task.abort === ctrl) task.abort = null
-    dlBroadcast(true)
-  }
-}
-
-/** 音质设置 → 各音源认的 prefer 值（只有 lossless / best / 128k 三种） */
-function qualityPref() {
-  const q = store.get().settings.onlineQuality
-  if (q === 'master') return 'master'
-  if (q === 'lossless') return 'lossless'
-  if (q === '128k') return '128k'
-  return 'best'
-}
-
-/* 音质探测：结果缓存 10 分钟 + 并发闸门（最多 3 个同时跑，别把解析服务打爆） */
-const probeCache = new Map()
-const PROBE_TTL = 10 * 60 * 1000
-let probeRunning = 0
-const probeWaiting = []
-
-/** 并发闸门包装：音质探测最多 3 个同时跑（见上方 PROBE_TTL/probeCache），
- *  多余的调用排队等前面完成。返回值透传 fn 的 Promise。 */
-function probeLimit(fn) {
-  return new Promise((resolve, reject) => {
-    const run = () => {
-      probeRunning++
-      fn().then(resolve, reject).finally(() => {
-        probeRunning--
-        const next = probeWaiting.shift()
-        if (next) next()
-      })
-    }
-    if (probeRunning < 3) run()
-    else probeWaiting.push(run)
-  })
-}
-
-/** 递归剔除 __proto__ / constructor / prototype 等原型污染键（保留其它值） */
-const FORBIDDEN_SETTING_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
-function sanitizePlainValue(v) {
-  if (Array.isArray(v)) return v.map(sanitizePlainValue)
-  if (v && typeof v === 'object') {
-    const o = {}
-    for (const [k, x] of Object.entries(v)) {
-      if (FORBIDDEN_SETTING_KEYS.has(k)) continue
-      o[k] = sanitizePlainValue(x)
-    }
-    return o
-  }
-  return v
-}
-/**
- * 已知数值键的取值范围。渲染层可以调 settings:patch，光校验「是有限数」不够：
- * volume=5 会让 audio.volume 赋值抛 IndexSizeError，fadeMs 为负会让淡入淡出反向，
- * onlineCacheLimitMB 为负会让缓存淘汰逻辑算错目标。
- */
-const SETTING_RANGES = {
-  volume: [0, 1],
-  fadeMs: [0, 3000],
-  lyricFontSize: [8, 200],
-  lyricOffset: [-60, 60],
-  onlineCacheLimitMB: [0, 102400],
-  targetLufs: [-40, 0],
-  windowWidth: [200, 10000],
-  windowHeight: [200, 10000]
-}
-/** 数值 map（lyricOffsetById / trackGains / resumePos / manualGains）的条数上限 */
-const SETTING_MAP_MAX = 5000
-// 第四轮 §4.1 #5：数组型设置的长度上限。超长 musicDirs 会让 startWatching() 无限
-// fs.watch，句柄耗尽后整个曲库增删都失效（历史 #26 只补了数值范围，没补长度）
-const SETTING_ARRAY_MAX = 200
-
-function clampSetting(key, v) {
-  const r = SETTING_RANGES[key]
-  if (!r) return v
-  return Math.min(r[1], Math.max(r[0], v))
-}
-
-/**
- * 按 DEFAULT_SETTINGS 的形状校验一个 settings patch：
- *  · 只放行模板里已有的键（顶层白名单）；
- *  · 数组元素类型须与模板一致、数值键须为有限数（并夹到 SETTING_RANGES 范围内）、
- *    布尔键须为布尔、字符串键须为字符串；
- *  · 空对象模板 = 数值 map（歌词偏移/增益/断点），只留有限数，条数上限 SETTING_MAP_MAX；
- *  · 递归拒绝 __proto__/constructor/prototype，未知类型一律丢弃。
- * template 传 DEFAULT_SETTINGS.desktopLyric 即可用于 dlyric:cfg 的子对象过滤。
- */
-function sanitizeSettingsPatch(patch, template = DEFAULT_SETTINGS) {
-  const out = {}
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return out
-  if (!template || typeof template !== 'object') return out
-  for (const [k, v] of Object.entries(patch)) {
-    if (FORBIDDEN_SETTING_KEYS.has(k)) continue
-    if (!Object.prototype.hasOwnProperty.call(template, k)) continue  // 白名单
-    const tv = template[k]
-    if (Array.isArray(tv)) {
-      if (!Array.isArray(v)) continue
-      if (tv.length && !v.every((x) => typeof x === typeof tv[0])) continue
-      if (v.length > SETTING_ARRAY_MAX) continue
-      let arr = v.map(sanitizePlainValue)
-      // musicDirs 每个元素都要是合法的白名单根，否则等于给 lxfile 开了任意目录读权限
-      if (k === 'musicDirs') arr = arr.filter((d) => typeof d === 'string' && isSafeMediaRoot(d))
-      out[k] = arr
-    } else if (tv && typeof tv === 'object') {
-      if (!v || typeof v !== 'object' || Array.isArray(v)) continue
-      const tvKeys = Object.keys(tv)
-      if (tvKeys.length === 0) {
-        // 空对象模板 = 数值 map（lyricOffsetById / trackGains / manualGains / resumePos）
-        const clean = {}
-        let n = 0
-        for (const [mk, mv] of Object.entries(v)) {
-          if (FORBIDDEN_SETTING_KEYS.has(mk)) continue
-          // v3.3.17：数值 map 也要设条数上限 —— 否则一次 patch 就能塞进十万条，
-          // 之后每次 saveSettings 都要把整份 settings.json 重写一遍
-          if (n >= SETTING_MAP_MAX) break
-          if (typeof mv === 'number' && Number.isFinite(mv)) { clean[mk] = mv; n++ }
-        }
-        out[k] = clean
-      } else {
-        out[k] = sanitizeSettingsPatch(v, tv)
-      }
-    } else if (tv === null) {
-      // 模板为 null = 自由结构（窗口 bounds 等），只做递归去污染键
-      out[k] = sanitizePlainValue(v)
-    } else if (typeof tv === 'number') {
-      if (typeof v === 'number' && Number.isFinite(v)) out[k] = clampSetting(k, v)
-    } else if (typeof tv === 'boolean') {
-      if (typeof v === 'boolean') out[k] = v
-    } else if (typeof tv === 'string') {
-      if (typeof v === 'string') out[k] = v
-    }
-    // 其余类型（undefined/function/...）→ 拒绝该键
-  }
-  return out
-}
 
 /**
  * 注册全部 IPC 通道。
@@ -3220,12 +1227,12 @@ function registerLibraryIpc() {
     // 但扫出来的曲目过不了 isAllowedMediaPath —— 用户看到「有歌名、点了放不出来」。
     const fallbackDirs = store.get().settings.musicDirs
     const allowed = new Set((Array.isArray(fallbackDirs) ? fallbackDirs : [])
-      .filter((d) => typeof d === 'string' && isSafeMediaRoot(d))
-      .map((d) => path.resolve(fixDriveRoot(d)).toLowerCase()))
+      .filter((d) => typeof d === 'string' && PROTO.isSafeMediaRoot(d))
+      .map((d) => path.resolve(PROTO.fixDriveRoot(d)).toLowerCase()))
     const rawDirs = Array.isArray(dirs) && dirs.length ? dirs : fallbackDirs
     const targetDirs = (Array.isArray(rawDirs) ? rawDirs : [])
-      .filter((d) => typeof d === 'string' && isSafeMediaRoot(d)
-        && allowed.has(path.resolve(fixDriveRoot(d)).toLowerCase()))
+      .filter((d) => typeof d === 'string' && PROTO.isSafeMediaRoot(d)
+        && allowed.has(path.resolve(PROTO.fixDriveRoot(d)).toLowerCase()))
     if (!targetDirs.length) {
       return { ok: false, error: '没有可用的音乐目录（路径不在允许范围内）', added: 0, updated: 0, removed: 0, failed: 0, total: library.list().length }
     }
@@ -3262,7 +1269,7 @@ function registerSettingsIpc() {
   ipcMain.handle('settings:patch', (e, patch) => {
     const before = store.get().settings || {}
     // v3.3.13：键白名单 + 按 DEFAULT_SETTINGS 形状做值校验 + 递归防原型污染
-    const filtered = sanitizeSettingsPatch(patch, DEFAULT_SETTINGS)
+    const filtered = SCHEMA.sanitizeSettingsPatch(patch, DEFAULT_SETTINGS)
     const blocked = []
     for (const k of Object.keys(patch && typeof patch === 'object' ? patch : {})) {
       if (!Object.prototype.hasOwnProperty.call(filtered, k)) blocked.push(k)
@@ -3368,7 +1375,7 @@ function registerPlaylistIpc() {
     const file = filePaths[0]
     let entries = []
     try {
-      entries = decodeText(fs.readFileSync(file)).split(/\r?\n/)
+      entries = PROTO.decodeText(fs.readFileSync(file)).split(/\r?\n/)
     } catch (err) {
       return { ok: false, error: err.message }
     }
@@ -3465,7 +1472,7 @@ function registerLyricIpc() {
       try {
         const buf = await fsp.readFile(lrc)
         watchLyricFile([lrc, audio], trackId)
-        return { text: decodeText(buf), mtimeMs: lrcMtime, source: 'lrc' }
+        return { text: PROTO.decodeText(buf), mtimeMs: lrcMtime, source: 'lrc' }
       } catch (err) { /* 读不到就往下试内嵌 */ }
     }
 
@@ -3479,7 +1486,7 @@ function registerLyricIpc() {
       try {
         const buf = await fsp.readFile(lrc)
         watchLyricFile([lrc], trackId)
-        return { text: decodeText(buf), mtimeMs: lrcMtime, source: 'lrc' }
+        return { text: PROTO.decodeText(buf), mtimeMs: lrcMtime, source: 'lrc' }
       } catch (err) { /* 忽略 */ }
     }
     watchLyricFile(null)
@@ -3492,7 +1499,7 @@ function registerLyricIpc() {
 function registerOnlineIpc() {
   // —— 联网版：在线音乐 ——
   ipcMain.handle('online:sources', () => online.listSources())
-  ipcMain.handle('online:proxyBase', () => ensureStreamBase())
+  ipcMain.handle('online:proxyBase', () => SP.ensureStreamBase())
 
   ipcMain.handle('online:search', async (e, { keyword, page, limit, sources } = {}) => {
     const kw = String(keyword || '').trim()
@@ -3524,7 +1531,7 @@ function registerOnlineIpc() {
     if (prev) { try { prev.abort() } catch (err) { /* 忽略 */ } }
     const ctrl = new AbortController()
     playableCtrls.set(e.sender, ctrl)
-    const prefer = qualityPref()
+    const prefer = DL.qualityPref()
     // 第四轮 §4.5.2 #3：online:probe 有 8s 总超时，而真正决定「点歌后多久出声」的
     // online:playable 反而没有 —— 内部预算再全，也不该让一个 IPC 无限挂着。
     // 无损档要等 7s/12s 的无损窗口，给 16s；其它档 12s。
@@ -3588,11 +1595,11 @@ function registerOnlineIpc() {
    */
   ipcMain.handle('online:probe', async (e, song) => {
     if (!song || !song.source || !song.id) return { ok: false }
-    const prefer = qualityPref()
+    const prefer = DL.qualityPref()
     if (prefer === '128k') return { ok: false, skipped: true }
     const ck = `${song.source}:${song.id}:${prefer}`
-    const hit = probeCache.get(ck)
-    if (hit && Date.now() - hit.at < PROBE_TTL) return hit.data
+    const hit = DL.probeCache.get(ck)
+    if (hit && Date.now() - hit.at < DL.PROBE_TTL) return hit.data
     // 第四轮 §4.5.2 #4：按 sender 取消旧轮 —— 换关键词只递增渲染层的 probeToken，
     // 已发出的 IPC 不可取消，旧轮会跑满 8s 并继续烧 ChKSz 额度。
     const prevProbe = probeCtrls.get(e.sender)
@@ -3614,7 +1621,7 @@ function registerOnlineIpc() {
       }
       if (!info) {
         // 失败也短缓存 30 秒：滚动列表反复重发同一首的探测同样会烧额度
-        probeCache.set(ck, { at: Date.now() - (PROBE_TTL - 30000), data: { ok: false } })
+        DL.probeCache.set(ck, { at: Date.now() - (DL.PROBE_TTL - 30000), data: { ok: false } })
         throw new Error('no info')
       }
       const data = {
@@ -3625,17 +1632,17 @@ function registerOnlineIpc() {
         ext: info.ext || 'mp3',
         size: info.size || 0
       }
-      probeCache.set(ck, { at: Date.now(), data })
+      DL.probeCache.set(ck, { at: Date.now(), data })
       // v3.3.7：加上限淘汰，长会话不再缓慢膨胀
-      if (probeCache.size > 500) {
+      if (DL.probeCache.size > 500) {
         const now = Date.now()
-        for (const [k, v] of probeCache) { if (now - v.at > PROBE_TTL) probeCache.delete(k) }
-        while (probeCache.size > 500) probeCache.delete(probeCache.keys().next().value)
+        for (const [k, v] of DL.probeCache) { if (now - v.at > DL.PROBE_TTL) DL.probeCache.delete(k) }
+        while (DL.probeCache.size > 500) DL.probeCache.delete(DL.probeCache.keys().next().value)
       }
       return data
     }
     try {
-      return await probeLimit(run)
+      return await DL.probeLimit(run)
     } catch (err) {
       return { ok: false }
     } finally {
@@ -3656,7 +1663,7 @@ function registerOnlineIpc() {
   ipcMain.handle('online:download', async (e, song) => {
     if (!song || !song.source || !song.id) return { ok: false, error: '参数不完整' }
     const key = `${song.source}:${song.id}`
-    for (const t of dlTasks.values()) {
+    for (const t of DL.dlTasks.values()) {
       if (t.key !== key) continue
       if (t.status === 'paused') return { ok: false, error: '这首在下载列表里（已暂停），去列表点继续', id: t.id }
       if (t.status === 'downloading' || t.status === 'queued' || t.status === 'pausing') return { ok: false, error: '这首正在下载中', id: t.id }
@@ -3667,40 +1674,40 @@ function registerOnlineIpc() {
         t.total = 0
         t.speed = 0
         t.status = 'queued'
-        dlBroadcast(true)
-        dlRun(t)
-        return { ok: true, id: t.id, dir: downloadDir() }
+        DL.dlBroadcast(true)
+        DL.dlRun(t)
+        return { ok: true, id: t.id, dir: DL.downloadDir() }
       }
     }
     const task = {
-      id: 'd' + Date.now().toString(36) + (++dlSeq),
+      id: 'd' + Date.now().toString(36) + (++DL.dlSeq),
       key,
       song: { source: song.source, id: song.id, title: song.title || '', artist: song.artist || '', duration: song.duration || 0 },
       status: 'queued',
       received: 0, total: 0, speed: 0,
       path: '', ext: '', at: Date.now()
     }
-    dlTasks.set(task.id, task)
-    dlBroadcast(true)
-    dlRun(task)
-    return { ok: true, id: task.id, dir: downloadDir() }
+    DL.dlTasks.set(task.id, task)
+    DL.dlBroadcast(true)
+    DL.dlRun(task)
+    return { ok: true, id: task.id, dir: DL.downloadDir() }
   })
 
-  ipcMain.handle('online:dlList', () => Array.from(dlTasks.values()).map(toDownloadDto))
+  ipcMain.handle('online:dlList', () => Array.from(DL.dlTasks.values()).map(DL.toDownloadDto))
 
   ipcMain.handle('online:dlPause', (e, id) => {
-    const t = dlTasks.get(String(id))
+    const t = DL.dlTasks.get(String(id))
     if (!t || t.status !== 'downloading') return { ok: false }
     t.status = 'pausing'
     // v3.3.20：暂停后继续会重新解析，直链可能换了一条 —— 忘掉旧目标，续传前会比对
-    dlTargetCache.delete(t.id)
+    DL.dlTargetCache.delete(t.id)
     try { if (t.abort) t.abort.abort() } catch (err) { /* 忽略 */ }
-    dlBroadcast(true)
+    DL.dlBroadcast(true)
     return { ok: true }
   })
 
   ipcMain.handle('online:dlResume', (e, id) => {
-    const t = dlTasks.get(String(id))
+    const t = DL.dlTasks.get(String(id))
     // v3.3.9：pausing 必须拦 —— abort 还在途时续传会双写同一个 .part（文件损坏），
     // 且旧循环的 finally 会把新任务的 abort 控制器抹掉，任务从此无法暂停/删除
     // v3.3.13：done/error 也拒绝，避免重跑覆盖已完成/已失败的任务
@@ -3714,12 +1721,12 @@ function registerOnlineIpc() {
       t.speed = 0
     }
     t.status = 'paused'
-    dlRun(t)
+    DL.dlRun(t)
     return { ok: true }
   })
 
   ipcMain.handle('online:dlDelete', (e, id) => {
-    const t = dlTasks.get(String(id))
+    const t = DL.dlTasks.get(String(id))
     if (!t) return { ok: false }
     // v3.3.10：卡在 pausing 且下载循环已退出（abort 控制器已被 finally 清掉）的
     // 兜底 —— abort() 不会有人响应，直接当 paused 走下面的正常删除路径
@@ -3731,30 +1738,30 @@ function registerOnlineIpc() {
       try { if (t.abort) t.abort.abort() } catch (err) { /* 忽略 */ }
       return { ok: true }
     }
-    dlTasks.delete(t.id)
+    DL.dlTasks.delete(t.id)
     if (t.rescanTimer) { clearTimeout(t.rescanTimer); t.rescanTimer = null }
     // 已完成的文件是用户的音乐，不删；没完成的残片才清（带重试，见 dlUnlinkRetry）
-    if (t.status !== 'done' && t.path) dlUnlinkRetry(t.path + '.part')
-    dlBroadcast(true)
+    if (t.status !== 'done' && t.path) DL.dlUnlinkRetry(t.path + '.part')
+    DL.dlBroadcast(true)
     return { ok: true }
   })
 
   ipcMain.handle('online:dlClearDone', () => {
     let n = 0
-    for (const [id, t] of dlTasks) {
+    for (const [id, t] of DL.dlTasks) {
       if (t.status === 'done' || t.status === 'error') {
         // v3.3.13：error/未完成任务的 .part 残片别留着
-        if (t.status !== 'done' && t.path) dlUnlinkRetry(t.path + '.part')
+        if (t.status !== 'done' && t.path) DL.dlUnlinkRetry(t.path + '.part')
         if (t.rescanTimer) { clearTimeout(t.rescanTimer); t.rescanTimer = null }
-        dlTasks.delete(id); n++
+        DL.dlTasks.delete(id); n++
       }
     }
-    dlBroadcast(true)
+    DL.dlBroadcast(true)
     return { ok: true, removed: n }
   })
 
   ipcMain.handle('online:dlReveal', (e, id) => {
-    const t = dlTasks.get(String(id))
+    const t = DL.dlTasks.get(String(id))
     if (!t || !t.path) return false
     try { shell.showItemInFolder(t.path) } catch (err) { /* 忽略 */ }
     return true
@@ -3768,7 +1775,7 @@ function registerOnlineIpc() {
   })
 
   ipcMain.handle('online:openDownloadDir', async () => {
-    const dir = downloadDir()
+    const dir = DL.downloadDir()
     try {
       await fsp.mkdir(dir, { recursive: true })
       shell.openPath(dir)
@@ -3777,10 +1784,10 @@ function registerOnlineIpc() {
   })
 
   // —— 联网版：在线缓存 ——
-  ipcMain.handle('online:cacheInfo', () => cacheStats())
+  ipcMain.handle('online:cacheInfo', () => DC.cacheStats())
 
   ipcMain.handle('online:cacheClear', () => {
-    const r = cacheClear()
+    const r = DC.cacheClear()
     logLine('[cache] 用户清理缓存，删除', r.removed, '首')
     return { ...cacheStats(), removed: r.removed }
   })
@@ -3789,13 +1796,13 @@ function registerOnlineIpc() {
     const dir = await pickMediaDir('选择缓存目录')
     if (!dir) return null
     // 换目录不动老文件：用户可能还想手动找回；真要腾地方有「清理缓存」
-    cacheIdx = null
+    DC.cacheIdx = null
     store.patch({ settings: { ...store.get().settings, onlineCacheDir: dir } })
-    return cacheStats()
+    return DC.cacheStats()
   })
 
   ipcMain.handle('online:openCacheDir', async () => {
-    const dir = cacheDirPath()
+    const dir = DC.cacheDirPath()
     try {
       await fsp.mkdir(dir, { recursive: true })
       shell.openPath(dir)
@@ -3861,7 +1868,7 @@ function registerSystemIpc() {
     return res.canceled ? [] : res.filePaths
   })
   ipcMain.handle('shell:showItem', (e, filePath) => {
-    if (filePath && fs.existsSync(filePath) && isAllowedMediaPath(filePath)) shell.showItemInFolder(filePath)
+    if (filePath && fs.existsSync(filePath) && PROTO.isAllowedMediaPath(filePath)) shell.showItemInFolder(filePath)
   })
 
 }
@@ -3899,40 +1906,40 @@ function registerDlyricIpc() {
   // —— 桌面歌词 ——
   ipcMain.handle('dlyric:open', () => {
     store.patch({ settings: { desktopLyric: { enabled: true } } })
-    createLyricWindow()
-    notifyDlyricState()
-    return dlyricCfg()
+    DLYW.createLyricWindow()
+    DLYW.notifyDlyricState()
+    return DLYW.dlyricCfg()
   })
   ipcMain.handle('dlyric:close', () => {
-    closeLyricWindow()
-    notifyDlyricState()
+    DLYW.closeLyricWindow()
+    DLYW.notifyDlyricState()
     return true
   })
-  ipcMain.handle('dlyric:isOpen', () => !!(dlyricWin && !dlyricWin.isDestroyed()))
+  ipcMain.handle('dlyric:isOpen', () => !!(DLYW.dlyricWin && !DLYW.dlyricWin.isDestroyed()))
   ipcMain.handle('dlyric:unlock', () => {
     store.patch({ settings: { desktopLyric: { locked: false } } })
-    applyDlyricLock()
-    notifyDlyricState()
-    return dlyricCfg()
+    DLYW.applyDlyricLock()
+    DLYW.notifyDlyricState()
+    return DLYW.dlyricCfg()
   })
   // 主窗口 → 歌词窗口：当前歌词行（同时缓存，供窗口就绪时补发）
   ipcMain.handle('dlyric:state', (e, payload) => {
-    lastDlyricData = payload || null
-    sendToDlyric('dlyric:data', payload)
+    DLYW.lastDlyricData = payload || null
+    DLYW.sendToDlyric('dlyric:data', payload)
     return true
   })
   // 歌词窗口 → 主进程：配置修改（锁定/字号/颜色）→ 同步主窗口按钮
   ipcMain.handle('dlyric:cfg', (e, patch) => {
     // v3.3.13：复用 settings patch 过滤（只允许 desktopLyric 已有键 + 值校验 + 防原型污染）
-    const clean = sanitizeSettingsPatch(patch, DEFAULT_SETTINGS.desktopLyric)
+    const clean = SCHEMA.sanitizeSettingsPatch(patch, DEFAULT_SETTINGS.desktopLyric)
     store.patch({ settings: { desktopLyric: clean } })
-    applyDlyricLock()
-    notifyDlyricState()
-    return dlyricCfg()
+    DLYW.applyDlyricLock()
+    DLYW.notifyDlyricState()
+    return DLYW.dlyricCfg()
   })
   // 歌词窗口加载完成：立即回推一次完整配置 + 当前歌词行（否则要等下一句才出词）
   ipcMain.handle('dlyric:ready', (e) => {
-    replayDlyricState()
+    DLYW.replayDlyricState()
     return true
   })
 
@@ -3941,7 +1948,7 @@ function registerDlyricIpc() {
 /** 独占输出（mpv 后端）：启停 / 加载 / 传输控制 / 设备枚举与切换 / 释放 */
 function registerMpvIpc() {
   // —— 独占输出（mpv 后端） ——
-  ipcMain.handle('mpv:start', (e, exclusive) => ensureMpv(exclusive !== false, { forceMode: true }))
+  ipcMain.handle('mpv:start', (e, exclusive) => MPVM.ensureMpv(exclusive !== false, { forceMode: true }))
   ipcMain.handle('mpv:load', async (e, filePath, opts) => {
     let target = filePath
     // 旧会话里可能还存着 lxstream:// 地址（早期实现），这里兜一下；新地址都是 http 代理
@@ -3954,36 +1961,36 @@ function registerMpvIpc() {
       target = info.url
     }
     // v3.3.7：引擎没跑起来还返回 true，渲染层会以为加载成功，界面假「播放中」
-    if (!mpvEngine || !mpvEngine.running) return false
+    if (!MPVM.mpvEngine || !MPVM.mpvEngine.running) return false
     // v3.3.9：本地文件只放行曲库/下载/数据目录之内（网址不受限，播放走的是本机代理）
-    if (!/^https?:\/\//i.test(target) && !isAllowedMediaPath(target)) {
+    if (!/^https?:\/\//i.test(target) && !PROTO.isAllowedMediaPath(target)) {
       logLine('[mpv] 拒绝加载曲库目录之外的文件:', target)
       return false
     }
-    mpvEngine.load(target, opts || {})
+    MPVM.mpvEngine.load(target, opts || {})
     return true
   })
-  ipcMain.handle('mpv:play', () => { if (mpvEngine) mpvEngine.play(); return true })
-  ipcMain.handle('mpv:pause', () => { if (mpvEngine) mpvEngine.pause(); return true })
+  ipcMain.handle('mpv:play', () => { if (MPVM.mpvEngine) MPVM.mpvEngine.play(); return true })
+  ipcMain.handle('mpv:pause', () => { if (MPVM.mpvEngine) MPVM.mpvEngine.pause(); return true })
   // v3.3.13：日常「停止播放」用 reset()（不报废引擎）；stop() 是关独占/退出语义，
   // 会置 _disposed 让引擎永久报废，绝不能用于这里
-  ipcMain.handle('mpv:stop', () => { if (mpvEngine) mpvEngine.reset(); return true })
-  ipcMain.handle('mpv:seek', (e, sec) => { if (mpvEngine) mpvEngine.seek(Number(sec) || 0); return true })
-  ipcMain.handle('mpv:volume', (e, v) => { if (mpvEngine) mpvEngine.setVolume(Number(v) || 0); return true })
-  ipcMain.handle('mpv:mute', (e, m) => { if (mpvEngine) mpvEngine.setMute(!!m); return true })
+  ipcMain.handle('mpv:stop', () => { if (MPVM.mpvEngine) MPVM.mpvEngine.reset(); return true })
+  ipcMain.handle('mpv:seek', (e, sec) => { if (MPVM.mpvEngine) MPVM.mpvEngine.seek(Number(sec) || 0); return true })
+  ipcMain.handle('mpv:volume', (e, v) => { if (MPVM.mpvEngine) MPVM.mpvEngine.setVolume(Number(v) || 0); return true })
+  ipcMain.handle('mpv:mute', (e, m) => { if (MPVM.mpvEngine) MPVM.mpvEngine.setMute(!!m); return true })
   // A-B 循环（v2.1）：a=null 清除
   ipcMain.handle('mpv:setAbLoop', (e, a, b) => {
-    if (mpvEngine) mpvEngine.setAbLoop(a, b)
+    if (MPVM.mpvEngine) MPVM.mpvEngine.setAbLoop(a, b)
     return true
   })
   // v3.3.17：必须等进程真的退出。以前同步返回 true，渲染层紧接着的 mpv:start 会在
   // 旧进程还占着 WASAPI 设备时起新引擎 —— 两个 mpv 抢同一个设备，
   // 新进程独占打不开，走回退分支，用户看到「独占失败，已回退共享」。
-  ipcMain.handle('mpv:quit', async () => { await stopMpv().catch(() => {}); return true })
+  ipcMain.handle('mpv:quit', async () => { await MPVM.stopMpv().catch(() => {}); return true })
   // v3.3.6 / v2.8.6：完整的「释放独占」流程 —— 等进程真退出 + 扫残留孤儿 + 实测声卡
   ipcMain.handle('mpv:release', async () => {
     try {
-      return await releaseMpv({ probe: true })
+      return await MPVM.releaseMpv({ probe: true })
     } catch (err) {
       return { ok: false, error: err.message }
     }
@@ -3991,7 +1998,7 @@ function registerMpvIpc() {
   // 只探测「声卡现在能不能给别人用」，不动引擎（诊断面板用）
   ipcMain.handle('mpv:probeDevice', async () => {
     try {
-      return await probeDeviceFree()
+      return await MPVM.probeDeviceFree()
     } catch (err) {
       return { blocked: false, detail: err.message }
     }
@@ -4029,12 +2036,12 @@ function registerMpvIpc() {
     let startedHere = false
     let eng = null
     try {
-      if (!mpvEngine || !mpvEngine.running) {
-        const r = await ensureMpv(false)
+      if (!MPVM.mpvEngine || !MPVM.mpvEngine.running) {
+        const r = await MPVM.ensureMpv(false)
         if (!r.ok) return { ok: false, devices: [], error: r.error || '引擎未启动' }
         startedHere = true
       }
-      eng = mpvEngine
+      eng = MPVM.mpvEngine
       const devices = await eng.listDevices()
       return { ok: true, devices }
     } catch (err) {
@@ -4044,7 +2051,7 @@ function registerMpvIpc() {
       // v3.3.9：但枚举的几百毫秒里用户可能点了播放（引擎被复用加载了文件），
       // 这时不能杀 —— 用「引擎还是同一个且从未加载过文件」作判据。
       // v3.3.13：枚举期间被切成独占的引擎（restart 不换实例也不改 _lastFile）不能误杀
-      if (startedHere && mpvEngine === eng && !eng._lastFile && eng.exclusive === false) stopMpv()
+      if (startedHere && MPVM.mpvEngine === eng && !eng._lastFile && eng.exclusive === false) MPVM.stopMpv()
     }
   })
 
@@ -4053,11 +2060,11 @@ function registerMpvIpc() {
     const name = String(device || '')
     const prevDevice = String(store.get().settings.audioDevice || '')
     store.patch({ settings: { audioDevice: name } })
-    if (!mpvEngine || !mpvEngine.running) return { ok: true, applied: false }
+    if (!MPVM.mpvEngine || !MPVM.mpvEngine.running) return { ok: true, applied: false }
     if (!store.get().settings.exclusiveOutput) return { ok: true, applied: false }
     // v2.5：重启时带上当前音量（重启后不再被重置成 100；播放状态由 restart 内部恢复）
     const startVolume = Math.max(0, Math.min(1, Number(store.get().settings.volume ?? 1)))
-    const r = await mpvEngine.restart({ exclusive: true, audioDevice: name, volume: startVolume })
+    const r = await MPVM.mpvEngine.restart({ exclusive: true, audioDevice: name, volume: startVolume })
     // v3.3.13：重启彻底失败 → 设置回退到调用前的值，避免界面显示的设备与实际不符
     if (!r.ok) {
       store.patch({ settings: { ...store.get().settings, audioDevice: prevDevice } })
@@ -4092,11 +2099,11 @@ function registerDiagIpc() {
       exclusiveOutput: s.exclusiveOutput === true,
       audioDevice: s.audioDevice || '',
       watchFolders: s.watchFolders !== false,
-      mpvExe: mpvExePath(),
-      mpvExeExists: (() => { try { return fs.existsSync(mpvExePath()) } catch { return false } })(),
-      mpvRunning: !!(mpvEngine && mpvEngine.running),
-      mpvExclusive: mpvEngine ? !!mpvEngine.exclusive : null,
-      mpvFellBack: mpvEngine ? !!mpvEngine.fellBack : false,
+      mpvExe: MPVM.mpvExePath(),
+      mpvExeExists: (() => { try { return fs.existsSync(MPVM.mpvExePath()) } catch { return false } })(),
+      mpvRunning: !!(MPVM.mpvEngine && MPVM.mpvEngine.running),
+      mpvExclusive: MPVM.mpvEngine ? !!MPVM.mpvEngine.exclusive : null,
+      mpvFellBack: MPVM.mpvEngine ? !!MPVM.mpvEngine.fellBack : false,
       trackCount: library.list().length,
       failureCount: library.listFailures().length,
       scanning: !!activeScan || library.scanning
@@ -4132,10 +2139,10 @@ function registerDiagIpc() {
     const since = Number(sinceSeq) || 0
     return {
       ok: true,
-      seq: mpvLogSeq,
-      entries: mpvLogs.filter((x) => x.seq > since),
-      running: !!(mpvEngine && mpvEngine.running),
-      exclusive: mpvEngine ? !!mpvEngine.exclusive : null
+      seq: MPVM.mpvLogSeq,
+      entries: MPVM.mpvLogs.filter((x) => x.seq > since),
+      running: !!(MPVM.mpvEngine && MPVM.mpvEngine.running),
+      exclusive: MPVM.mpvEngine ? !!MPVM.mpvEngine.exclusive : null
     }
   })
 
@@ -4224,19 +2231,6 @@ function registerPowerIpc() {
   ipcMain.handle('sleep:get', () => ({ minutes: sleepMinutes, endsAt: sleepEndsAt || null }))
 }
 
-/** 文本解码：优先 UTF-8，失败回退 GBK（Windows 中文 lrc 常见） */
-function decodeText(buf) {
-  let text = buf.toString('utf8')
-  const bad = (text.match(/\uFFFD/g) || []).length
-  if (bad > 0) {
-    try {
-      const decoder = new TextDecoder('gbk')
-      const alt = decoder.decode(buf)
-      if ((alt.match(/\uFFFD/g) || []).length < bad) text = alt
-    } catch {}
-  }
-  return text.replace(/^\uFEFF/, '')
-}
 
 /** 转成渲染层用的精简结构（路径换成自定义协议 URL） */
 function toClientTrack(t) {
@@ -4275,8 +2269,8 @@ function toClientTrack(t) {
     // 内嵌封面走 lxcover://（内存 LRU），同目录的封面图仍走 lxfile://
     cover: t.cover === COVER_EMBEDDED
       ? 'lxcover://local/' + encodeURIComponent(t.id)
-      : toLxUrl(resolveCoverPath(t.cover, library.coverDir)),
-    audio: toLxUrl(t.path)
+      : PROTO.toLxUrl(resolveCoverPath(t.cover, library.coverDir)),
+    audio: PROTO.toLxUrl(t.path)
   }
 }
 
@@ -4369,14 +2363,14 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       lyricDir: path.join(userData, 'lyrics')
     })
 
-    cacheCleanupParts()
-    dlLoad()
-    registerFileProtocol()
-    registerCoverProtocol()
+    DC.cacheCleanupParts()
+    DL.dlLoad()
+    PROTO.registerFileProtocol()
+    PROTO.registerCoverProtocol()
     online.setLogger(logLine)
     online.setExtraKey(store.get().settings.onlineChkszKey || '')
     online.setQingEnabled(store.get().settings.onlineQingOn !== false)
-    startStreamServer()
+    SP.startStreamServer()
     await library.init()
     registerIpc()
 
@@ -4414,7 +2408,7 @@ if (gotLock) cleanChromiumCache().catch(() => {})
 
     // 上次开着桌面歌词 → 启动时恢复
     if (store.get().settings.desktopLyric && store.get().settings.desktopLyric.enabled) {
-      createLyricWindow()
+      DLYW.createLyricWindow()
     }
 
     app.on('activate', () => {
@@ -4455,13 +2449,13 @@ if (gotLock) cleanChromiumCache().catch(() => {})
     stopWatching()
     // v3.3.23：中止封面后台预热，退出链不再被 setTimeout 拖着
     try { if (library) library.stopCoverWarmup() } catch (err) { /* 忽略 */ }
-    const hadEngine = !!mpvEngine
+    const hadEngine = !!MPVM.mpvEngine
     // v3.3.13：清理链必须能收敛 —— stopMpv 的 Promise 万一永不 settle，
     // 也不能让用户只能 taskkill。20 秒后无条件退出（> _stopProcess 最坏 8.2s + sweep 8s）。
     const finishQuit = () => {
       if (quitCleanupDone) return
       quitCleanupDone = true
-      try { dlSaveNow() } catch (err) { /* 忽略 */ }   // 任何退出路径都不丢下载任务（幂等）
+      try { DL.dlSaveNow() } catch (err) { /* 忽略 */ }   // 任何退出路径都不丢下载任务（幂等）
       try { if (store) store.flush() } catch (err) { /* 忽略 */ }
       try { if (tray) tray.destroy() } catch (err) { /* 忽略 */ }
       app.quit()
@@ -4471,17 +2465,17 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       // 用硬超时保证 finishQuit 一定执行，绝不长时间阻塞事件循环
       const hard = setTimeout(finishQuit, 3500)
       try {
-        sweepOurMpv(2000, 1500).catch(() => {}).finally(() => {
+        MPVM.sweepOurMpv(2000, 1500).catch(() => {}).finally(() => {
           clearTimeout(hard)
           finishQuit()
         })
       } catch (e) { clearTimeout(hard); finishQuit() }
     }, 20000)
     try {
-      stopMpv().catch(() => {}).finally(() => {
+      MPVM.stopMpv().catch(() => {}).finally(() => {
         (async () => {
-          if (hadEngine) { try { await sweepOurMpv() } catch (err) { /* 忽略 */ } }
-          try { dlSaveNow() } catch (err) { /* 忽略 */ }
+          if (hadEngine) { try { await MPVM.sweepOurMpv() } catch (err) { /* 忽略 */ } }
+          try { DL.dlSaveNow() } catch (err) { /* 忽略 */ }
           clearTimeout(quitGuard)
           finishQuit()
         })()

@@ -104,27 +104,31 @@ try {
   ok('曲末时间窗在换曲时复位', /_lastEndedAt\s*=\s*0/.test(srcP) || /_lastEndedAt\s*=\s*0/.test(srcA))
 } catch (e) { ok('播放链路单测组', false, e.message.slice(0, 200)) }
 
-// (d) main.js：流超时拆分 / 白名单 / 原子写 / quitGuard / skipped
+// (d) main.js 模块组：流超时拆分 / 白名单 / 原子写 / quitGuard / skipped
+// v3.3.24 拆分后：流代理与白名单在 streamproxy.js / protocols.js，下载在 downloader.js，缓存在 dircache.js
 try {
   const m = fs.readFileSync(path.join(REPO, 'src/main/main.js'), 'utf8')
-  ok('流代理不再用 AbortSignal.timeout 罩整个响应体', !/fetch\(info\.url[^\n]*AbortSignal\.timeout/.test(m))
-  ok('流代理有握手 AbortController', /AbortController/.test(m))
-  ok('流代理有正文 idle watchdog', /idleTimer|touch\s*\(/.test(m))
-  ok('白名单含 cacheDirPath', /cacheDirPath\(\)/.test(m.slice(m.indexOf('function isAllowedMediaPath'), m.indexOf('function isAllowedMediaPath') + 900)))
-  ok('白名单处理 D: 盘符', /\$1\\\\|\[A-Za-z\]:/.test(m))
+  const sp = fs.readFileSync(path.join(REPO, 'src/main/streamproxy.js'), 'utf8')
+  const proto = fs.readFileSync(path.join(REPO, 'src/main/protocols.js'), 'utf8')
+  const dl = fs.readFileSync(path.join(REPO, 'src/main/downloader.js'), 'utf8')
+  ok('流代理不再用 AbortSignal.timeout 罩整个响应体', !/fetch\(info\.url[^\n]*AbortSignal\.timeout/.test(sp))
+  ok('流代理有握手 AbortController', /AbortController/.test(sp))
+  ok('流代理有正文 idle watchdog', /idleTimer|touch\s*\(/.test(sp))
+  ok('白名单含 cacheDirPath', /cacheDirPath\(\)/.test(proto.slice(proto.indexOf('function isAllowedMediaPath'), proto.indexOf('function isAllowedMediaPath') + 900)))
+  ok('白名单处理 D: 盘符', /\$1\\\\|\[A-Za-z\]:/.test(proto))
   ok('quitGuard 提到 20 秒', /const quitGuard = setTimeout\([\s\S]{0,600}?\}\s*,\s*20000\)/.test(m))
   ok('finishQuit 内调 dlSaveNow', /function finishQuit[\s\S]{0,500}dlSaveNow/.test(m) || /const finishQuit[\s\S]{0,500}dlSaveNow/.test(m))
   ok('lib:scan 处理 skipped', /res\.skipped|result\.skipped|\.skipped/.test(m))
-  ok('有 atomicWriteJson', /atomicWriteJson/.test(m))
+  ok('有 atomicWriteJson', /atomicWriteJson/.test(fs.readFileSync(path.join(REPO, 'src/main/dircache.js'), 'utf8')))
   ok('settings:patch 有值校验/危险键过滤', /sanitizeSettingsPatch|__proto__/.test(m))
   ok('mpv:stop 改调 reset()', /'mpv:stop'[^\n]*reset\(\)/.test(m))
   ok('电源保留 systemShutdownPending', /systemShutdownPending/.test(m))
   // v3.3.21：done/error 任务驻留上限（§6.2 第 7 项）
   ok('有 dlPruneFinished 且 dlBroadcast 先修剪',
-      /function dlPruneFinished[\s\S]{0,600}/.test(m) &&
-      /function dlBroadcast\([\s\S]{0,120}dlPruneFinished\(\)/.test(m))
+      /function dlPruneFinished[\s\S]{0,600}/.test(dl) &&
+      /function dlBroadcast\([\s\S]{0,120}dlPruneFinished\(\)/.test(dl))
   ok('dlPruneFinished 不删用户文件（函数体无 unlink）',
-      !/function dlPruneFinished[\s\S]{0,600}?unlink/.test(m))
+      !/function dlPruneFinished[\s\S]{0,600}?unlink/.test(dl))
 } catch (e) { ok('main.js 单测组', false, e.message.slice(0, 200)) }
 
 // (e) app.js：连续失败计数 / flush / state.exclusive
