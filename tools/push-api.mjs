@@ -99,7 +99,7 @@ async function pushBranch(branch, base) {
 
 async function main() {
   // 远端允许的 HEAD：原始基准，或上一轮 API 推送产出的（已知坏树）链头——重推要覆盖后者
-  const KNOWN_OWN = new Set(['fe6c82864142d2331adae180d47fc37fea049c70', '48ae008c5fbbb3c072d57ae7475495a413ab739e', '376bde7ff8ede767017d6e4a1205c32289ccd5de', '8fb101784d50e9522ae280fc8f7b2e0509951f70'])
+  const KNOWN_OWN = new Set(['f33dc5d7c73746d678fd726303825324c8139ee0', 'dca22aa4069d8b04dbecc41a9a125eaf5f2331af', 'fe6c82864142d2331adae180d47fc37fea049c70', '376bde7ff8ede767017d6e4a1205c32289ccd5de'])
   for (const branch of ['master', 'online']) {
     const remoteHead = (await api(`/repos/${REPO}/git/ref/heads/${branch}`)).object.sha
     if (!KNOWN_OWN.has(remoteHead)) {
@@ -107,8 +107,8 @@ async function main() {
     }
     console.log(`${branch} 远端 HEAD:`, remoteHead.slice(0, 8), '→ 允许重推')
   }
-  await pushBranch('online', 'fe6c828')
-  await pushBranch('master', '376bde7')
+  await pushBranch('online', 'dca22aa')
+  await pushBranch('master', 'f33dc5d')
   console.log('\n全部推送完成')
 }
 main().catch(e => { console.error('ERROR', e.message); process.exit(1) })

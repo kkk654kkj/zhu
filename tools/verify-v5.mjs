@@ -173,8 +173,19 @@ try {
   const rm = lib.slice(lib.indexOf('async function readAudioMeta'), lib.indexOf('function resolveTitleArtist'))
   ok('扫描期不再把封面写进内存 LRU', !/coverCacheSet/.test(rm) && /COVER_EMBEDDED/.test(rm))
   const gc = lib.slice(lib.indexOf('async getCover('), lib.indexOf('  list() {'))
-  ok('封面缓存 key 按专辑共享',
-      /albumArtist/.test(gc) && /coverCacheSet\(key/.test(gc) && /_coverInFlight\.has\(key\)/.test(gc))
+  ok('封面缓存 key 按专辑共享（coverKeyOf 统一生成）',
+      /function coverKeyOf\(t\)/.test(lib) && /const key = coverKeyOf\(t\)/.test(gc) &&
+      /coverCacheSet\(key/.test(gc) && /_coverInFlight\.has\(key\)/.test(gc))
+  // v3.3.23：封面后台预热
+  ok('封面预热存在且用同一把 key（coverKeyOf）',
+      /startCoverWarmup\(\)/.test(lib) && /stopCoverWarmup\(\)/.test(lib) &&
+      /coverKeyOf\(t\)/.test(lib) && /coverKeyOf\(t\)/.test(gc.slice(0, 600)))
+  ok('预热串行节流且可中止',
+      /_coverWarmupAbort/.test(lib) && /setTimeout\(r, DELAY\)/.test(lib))
+  ok('构造函数初始化预热句柄',
+      /_coverWarmupAbort = true/.test(lib) && /_coverWarmupTimer = null/.test(lib))
+  ok('退出链中止预热',
+      /library\.stopCoverWarmup\(\)/.test(fs.readFileSync(path.join(REPO, 'src/main/main.js'), 'utf8')))
 } catch (e) { ok('虚拟滚动/封面单测组', false, e.message.slice(0, 200)) }
 
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)

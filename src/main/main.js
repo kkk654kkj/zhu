@@ -3243,6 +3243,8 @@ function registerLibraryIpc() {
       const res = await run
       if (res && res.skipped) return res   // 竞态兜底：不要广播 skipped
       if (!sender.isDestroyed()) sender.send('lib:scan-done', res)
+      // v3.3.23：扫描完成后后台预热内嵌封面（重启预热循环，自动停掉旧循环）
+      try { library.startCoverWarmup() } catch (err) { /* 忽略 */ }
       return res
     } finally {
       if (activeScan === run) activeScan = null
@@ -4389,9 +4391,17 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       })
       activeScan = run
       run
-        .then((res) => { if (res && res.skipped) return; sendToRenderer('lib:scan-done', res) })
+        .then((res) => {
+          if (res && res.skipped) return
+          sendToRenderer('lib:scan-done', res)
+          // v3.3.23：扫描完成后后台预热内嵌封面（串行节流，不抢 IO）
+          try { library.startCoverWarmup() } catch (err) { /* 忽略 */ }
+        })
         .catch((err) => console.error('[library] 首次扫描失败:', err))
         .finally(() => { if (activeScan === run) activeScan = null })
+    } else {
+      // v3.3.23：缓存直接加载（无扫描）——避开启动高峰 5 秒后开始预热
+      setTimeout(() => { try { if (library) library.startCoverWarmup() } catch (err) { /* 忽略 */ } }, 5000).unref?.()
     }
 
     createWindow()
@@ -4441,6 +4451,8 @@ if (gotLock) cleanChromiumCache().catch(() => {})
     event.preventDefault()
     quitting = true
     stopWatching()
+    // v3.3.23：中止封面后台预热，退出链不再被 setTimeout 拖着
+    try { if (library) library.stopCoverWarmup() } catch (err) { /* 忽略 */ }
     const hadEngine = !!mpvEngine
     // v3.3.13：清理链必须能收敛 —— stopMpv 的 Promise 万一永不 settle，
     // 也不能让用户只能 taskkill。20 秒后无条件退出（> _stopProcess 最坏 8.2s + sweep 8s）。
