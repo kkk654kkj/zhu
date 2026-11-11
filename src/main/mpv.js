@@ -18,6 +18,14 @@ const net = require('net')
 const fs = require('fs')
 const path = require('path')
 
+/**
+ * 判定「这条 file-error 是声卡开不出来，而不是文件本身坏了」的关键词。
+ * WASAPI 的失败码（AUDCLNT_E_DEVICE_IN_USE / AUDCLNT_E_UNSUPPORTED_FORMAT）与
+ * mpv 的 AO 初始化文案都落在这里。判错的代价是「一个坏文件 → 整个会话永久降级」，
+ * 所以宁可少判（当成单曲故障、走换源/跳曲），也不要多判。
+ */
+const AO_ERROR_RE = /audio.?out|AUDCLNT|wasapi|audio device|Could not open/i
+
 const PIPE_PREFIX = '\\\\.\\pipe\\lxmpv-'
 
 /**
@@ -67,6 +75,17 @@ class MpvEngine {
     // _recoverAttempts/_lastRecoverAt：自动夺回的退避与冷却。
     this._aoLostAt = 0
     this._aoParams = null      // 最近一次 audio-out-params（看门狗按状态判定，不靠事件跳变）
+    // v3.3.20：本引擎实例是否成功开出过 AO。用来区分「设备打不开」与「这个文件坏了」——
+    // 上层只在 aoFailed 时回退共享，不能见一个 file-error 就永久降级。
+    this._aoEverOpened = false
+    this._fileLoadedAt = 0     // v3.3.20：看门狗的起播宽限基线（file-loaded 时置位）
+    // v3.3.20：进程 stderr / AO 日志的**序号时钟**。file-error 判性质时比较
+    // 「本次 load 之后有没有出现过 AO 类错误」，用序号而不是滚动尾缓冲的下标。
+    this._errSeq = 0
+    this._aoErrSeq = 0
+    this._aoLogSeq = 0
+    this._errSeqAtLoad = 0
+    this._lastAoLog = ''
     this._paused = true
     this._idle = true
     this._recoverAttempts = 0
@@ -215,8 +234,16 @@ class MpvEngine {
     this._stderr = ''
     if (proc.stderr) {
       proc.stderr.on('data', (d) => {
-        stderrTail = (stderrTail + d.toString()).slice(-800)
+        const prev = stderrTail
+        stderrTail = (prev + d.toString()).slice(-800)
         this._stderr = stderrTail
+        // v3.3.20：序号时钟 + 在**累积后**的整段尾缓冲上测关键词
+        // （mpv 的 stderr 常把 "ao/wasapi" 和错误码分两次 write，按单块测会漏）；
+        // `!AO_ERROR_RE.test(prev)` 保证同一条滞留的旧报错只记一次 ——
+        // 否则它还在 800 字尾缓冲里时，后续任何无关 stderr 都会把它重新计时，
+        // 下一首又被判成 aoFailed（同进程未 restart 的情况下）。
+        this._errSeq++
+        if (AO_ERROR_RE.test(stderrTail) && !AO_ERROR_RE.test(prev)) this._aoErrSeq = this._errSeq
       })
     }
     proc.on('exit', (code) => {
@@ -246,6 +273,9 @@ class MpvEngine {
     // 设备真被别的程序占着时会无限重启 + 反复弹「已恢复」
     this._aoLostAt = 0
     this._aoParams = null
+    this._aoEverOpened = false   // 新进程 = 新 AO 状态（见 file-error 判性质）
+    this._fileLoadedAt = 0
+    this._errSeqAtLoad = this._errSeq
     this._eofAt = 0          // 新进程不继承旧曲的曲末配对标记
     this._paused = true
     this._idle = true
@@ -403,6 +433,7 @@ class MpvEngine {
         // 若「重启后 AO 从头就打不开」则不会再有 null 跳变事件——
         // 所以判定必须由 _wdTick 主动轮询这个缓存，不能靠事件跳变
         this._aoParams = data || null
+        if (data) this._aoEverOpened = true   // v3.3.20：本引擎成功开出过 AO
         this.onEvent({ type: 'format', params: data || null })
         break
       case 'volume':
@@ -423,6 +454,8 @@ class MpvEngine {
     switch (msg.event) {
       case 'file-loaded': {
         this._idle = false
+        // v3.3.20：看门狗的起播宽限基线（见 _wdTick）
+        this._fileLoadedAt = Date.now()
         // v3.3.13：唤醒所有等 file-loaded 的续播等待者（集合方式，不包 onEvent）
         const waiters = this._loadedWaiters
         this._loadedWaiters = []
@@ -434,8 +467,25 @@ class MpvEngine {
         const reason = msg.reason || ''
         // mpv 在 AO 初始化失败时也会走 end-file/error，这里上报给上层决定是否回退共享
         if (reason === 'error') {
-          const detail = msg.error || this._lastLog || (this._stderr || '').trim().slice(-300) || 'mpv 无法播放该文件'
-          this.onEvent({ type: 'file-error', message: detail })
+        // v3.3.20：把「AO 打不开」与「这个文件坏了」分开上报。
+        // 以前上层只看「有 file-error 就回退共享」，于是一个 404 / 不支持的编码
+        // 文件就能把整个会话永久降到共享输出（audit-main 第 7 条）。
+        // 判据用**序号**而不是 stderr 文本：_stderr 是滚动的 800 字符尾缓冲，
+        // 按下标切片会算错；序号只增不减，跨 load 的比较才是可靠的。
+        // detail 只用于给人看（日志 / toast）。判性质一律用序号，不解析文本。
+        const detail = [msg.error, this._lastAoLog, this._lastLog]
+          .filter(Boolean)
+          .filter((s, i, a) => a.indexOf(s) === i)   // 同一条文案别重复拼
+          .join(' | ')
+          || String(this._stderr || '').trim().slice(-300) || 'mpv 无法播放该文件'
+        const fresh = this._errSeqAtLoad || 0
+        const aoFailed = !this._aoParams && (
+          this._aoEverOpened ||                 // 曾经开出过 AO，现在开不出来 = 设备被抢/挂了
+          this._aoErrSeq > fresh ||             // 本次 load 之后出现过 AO 类 stderr
+          this._aoLogSeq > fresh ||             // 本次 load 之后出现过 AO 类 mpv 日志
+          AO_ERROR_RE.test(String(msg.error || ''))
+        )
+        this.onEvent({ type: 'file-error', message: detail, aoFailed })
         } else if (reason === 'eof') {
           // 与刚刚上报的 eof-reached 属于同一对（含切歌后才迟到的情况）→ 吞掉，
           // 只让渲染层收到一次曲末事件，避免一次曲末跳两首。
@@ -449,10 +499,19 @@ class MpvEngine {
       case 'log-message': {
         const text = (msg.text || '').trim()
         if (!text) return
+        // v3.3.20：日志也要推进序号。mpv 是用 `--no-terminal --really-quiet` 起的，
+        // stderr 基本恒空 —— 只靠 stderr 计时的话 _errSeq 永远是 0，
+        // AO 日志这条判据就是死代码。两个来源共用同一把时钟，跨 load 比较才有意义。
+        this._errSeq++
         // 保留最近一条 warn/error：AO 初始化失败时 end-file 的 error 字段是空的，
         // 真正的原因（如 AUDCLNT_E_DEVICE_IN_USE）只能从这里拿到
         if (msg.level === 'error' || msg.level === 'fatal' || msg.level === 'warn') {
           this._lastLog = text.slice(0, 300)
+          // 单独留一条「像 AO 错误」的日志，供 file-error 判性质用
+          if (AO_ERROR_RE.test(text)) {
+            this._lastAoLog = text.slice(0, 300)
+            this._aoLogSeq = this._errSeq
+          }
         }
         this.onEvent({ type: 'log', level: msg.level, text })
         return
@@ -471,6 +530,13 @@ class MpvEngine {
     this._idle = false
     // v3.3.13：推进 load 代次，让排队中的续播 _waitLoaded 自动作废
     this._loadSeq++
+    // v3.3.20：以「本次 load 时的 stderr 序号」为基线，file-error 判性质时只认之后的新错误；
+    // 同时清掉上一首遗留的 AO 记忆（同进程不 restart 的连续播放场景）
+    this._errSeqAtLoad = this._errSeq
+    this._aoEverOpened = false
+    this._fileLoadedAt = 0   // 新 load 重置起播宽限
+    this._lastAoLog = ''
+    this._lastLog = ''   // 同 AO 记忆一起清：否则坏文件的 toast 会带上上一首的 warn 文案
     if (paused) this._send(['set_property', 'pause', true])
     this._send(['loadfile', filePath, 'replace'])
   }
@@ -738,6 +804,11 @@ class MpvEngine {
       this._recoverAttempts = 0
       return
     }
+    // v3.3.20：起播宽限。load 之后 mpv 要先建流缓冲才开 AO，网络直链/冷盘上
+    // 可能要几秒 —— 以前从第一个 tick 就开始计 2.5 秒，慢起播的歌会被当成
+    // 「AO 丢失」强杀重启引擎，重启后同样来不及出声，三轮后误报「声卡被占用」。
+    // file-loaded 之后仍拿不到 AO 才是真丢失。
+    if (this._fileLoadedAt === 0 || Date.now() - this._fileLoadedAt < 4000) { this._aoLostAt = 0; return }
     if (!this._aoLostAt) { this._aoLostAt = Date.now(); return }
     const lostFor = Date.now() - this._aoLostAt
     if (lostFor < 2500) return

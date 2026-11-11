@@ -90,6 +90,11 @@ class Store {
       }
     } catch (err) {
       console.error('[store] 读取失败，使用默认值:', err.message)
+      // v3.3.20：读取失败（杀软/索引器占用、EACCES、JSON 损坏）以前直接回落默认值，
+      // 而 save() 250ms 内就会拿默认值覆盖同一路径 —— playlists / favorites / 设置
+      // 就此永久消失，且没有任何备份（.tmp 有 quarantine，正式文件反而没有）。
+      // 这里先把原文件改名留证，再回落默认值，最坏情况也能手工捡回来。
+      this._quarantineUnreadable()
       this.data = cloneDefaults(this.defaults)
       this.data._v = SCHEMA_VERSION
     }
@@ -123,6 +128,20 @@ class Store {
   /** 损坏的 tmp 不直接删，改名备份留证 */
   _quarantineCorruptTmp(tmp) {
     try { fs.renameSync(tmp, tmp + '.corrupt-' + Date.now()) } catch (e) { /* 占用，忽略 */ }
+  }
+
+  /**
+   * 读不动的正式文件不删、不覆盖，改名留证（与 _quarantineCorruptTmp 同一口径）。
+   * 改名失败（被占用）时至少打一条带路径的日志 —— 用户还能自己去捞。
+   */
+  _quarantineUnreadable() {
+    const bak = this.file + '.unreadable-' + Date.now()
+    try {
+      fs.renameSync(this.file, bak)
+      console.error('[store] 原文件已备份为 ' + bak)
+    } catch (e) {
+      console.error('[store] 原文件备份失败（' + (e.message || e) + '），请手工保留 ' + this.file)
+    }
   }
 
   /**
