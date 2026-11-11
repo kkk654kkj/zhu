@@ -186,6 +186,33 @@ function main() {
     /powerPending \|\| systemShutdownPending/.test(mainSrc))
   ok('dlyric 配置入口用同一把清洗尺子',
     /dlyric:cfg[\s\S]{0,800}?sanitizeSettingsPatch\(/.test(mainSrc))
+
+  console.log('\n=== 5) 标题栏拖动 + 虚拟滚动哨兵（v2.8.27 / v3.3.28） ===')
+  /* 为什么盯这两条：
+     1) 125% 缩放下 -webkit-app-region: drag 的系统命中矩形会整体下移约 19px，
+        右上角按钮下半截被判成 HTCAPTION、点击被吞。修法是把拖动搬到主进程，
+        一旦有人把 CSS 的 drag 写回来，问题会原样复发 —— 所以直接哨兵 CSS。
+     2) 虚拟滚动以前每滚 40px 就把可视区 20+ 行 innerHTML 重建一次，行内封面
+        重新请求 + 重新解码，表现为滚动时整屏封面闪。修法是头尾增删复用节点。 */
+  ok('主进程接管标题栏拖动（win:drag-start / win:drag-end）',
+    /ipcMain\.on\('win:drag-start'/.test(mainSrc) && /ipcMain\.on\('win:drag-end'/.test(mainSrc))
+  ok('拖动用 setBounds 且显式带 width/height（防 125% 缩放下尺寸漂移）',
+    /win:drag-start[\s\S]{0,900}?win\.setBounds\(\{\s*x[^}]*width:\s*b0\.width/.test(mainSrc))
+  ok('拖动松手把尺寸拨回起始值',
+    /win:drag-end[\s\S]{0,600}?windowDragOrigin\.width/.test(mainSrc))
+  const preloadSrc = read('src/main/preload.js')
+  ok('preload 暴露 dragStart / dragEnd',
+    /dragStart:\s*\(\)\s*=>\s*ipcRenderer\.send\('win:drag-start'\)/.test(preloadSrc) &&
+    /dragEnd:\s*\(\)\s*=>\s*ipcRenderer\.send\('win:drag-end'\)/.test(preloadSrc))
+  const appCss = read('src/renderer/css/app.css')
+  ok('CSS 不再声明 app-region: drag（回退即复发按钮点不动）',
+    !/^\s*-webkit-app-region:\s*drag\s*;/m.test(appCss))
+  const uiSrc = read('src/renderer/js/ui.js')
+  ok('虚拟滚动改为头尾增删（保留 _rowHtml 单一模板）',
+    /_rowHtml\(i\)/.test(uiSrc) && /data-sp="top"/.test(uiSrc))
+  ok('滚动帧不再整块重建 tableBody',
+    !/body\.innerHTML\s*=\s*\n?\s*`<div style="height:\$\{start/.test(uiSrc))
+
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
 }

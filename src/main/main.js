@@ -1491,6 +1491,16 @@ function accentFromImage(img) {
   }
 }
 
+/** v2.8.27：窗口拖动定时器（见 registerWindowIpc 里 win:drag-start 的注释） */
+let windowDragTimer = null
+let windowDragOrigin = null
+function stopWindowDrag() {
+  if (windowDragTimer) {
+    clearInterval(windowDragTimer)
+    windowDragTimer = null
+  }
+}
+
 /** 窗口控制：最小化 / 最大化 / 关闭 / 迷你模式 */
 function registerWindowIpc() {
   // —— 窗口控制 ——
@@ -1507,6 +1517,47 @@ function registerWindowIpc() {
   })
   ipcMain.handle('win:close', () => win && win.close())
   ipcMain.handle('win:isMaximized', () => (win ? win.isMaximized() : false))
+  /* v2.8.27：标题栏拖动改主进程实现（渲染层 mousedown → 这里跟随光标 setBounds）。
+     为什么弃用 -webkit-app-region: drag —— 实测（WM_NCHITTEST，125% 缩放）：
+     drag 区域的系统命中矩形整体下移约 19px（恰等于系统标题栏高度 SM_CYCAPTION），
+     y<19 返回 HTCLIENT、y>=19 全变 HTCAPTION，与 CSS 怎么改都无关。
+     结果就是右上角按钮的下半截被当成标题栏，点击被系统吞掉（「按钮点不动，
+     只能从窗口顶边往下点」）。改主进程拖动后窗口不再有 drag 矩形，整条标题栏
+     都是 HTCLIENT，按钮怎么点都生效。 */
+  ipcMain.on('win:drag-start', (e) => {
+    if (!win || win.isDestroyed() || winMaxState || win.isFullScreen()) return
+    if (BrowserWindow.fromWebContents(e.sender) !== win) return
+    const p0 = screen.getCursorScreenPoint()
+    const b0 = win.getBounds()
+    windowDragOrigin = { width: b0.width, height: b0.height }
+    const dx = p0.x - b0.x
+    const dy = p0.y - b0.y
+    let lastX = null
+    let lastY = null
+    stopWindowDrag()
+    windowDragTimer = setInterval(() => {
+      if (!win || win.isDestroyed()) return stopWindowDrag()
+      const p = screen.getCursorScreenPoint()
+      const x = p.x - dx
+      const y = p.y - dy
+      // 光标没动就不调 setBounds —— 每调一次都要过一遍 DIP↔物理换算，
+      // 125% 缩放下会累积舍入误差（窗口一点点变大）。
+      if (x === lastX && y === lastY) return
+      lastX = x
+      lastY = y
+      // 必须显式带 width/height，理由同上（只传 x/y 时尺寸漂得更快）。
+      win.setBounds({ x, y, width: b0.width, height: b0.height })
+    }, 16)
+  })
+  ipcMain.on('win:drag-end', () => {
+    stopWindowDrag()
+    // 拖动过程中难免累积一两个像素的舍入误差，松手后把尺寸拨回起始值
+    if (!win || win.isDestroyed() || !windowDragOrigin) return
+    const b = win.getBounds()
+    if (b.width !== windowDragOrigin.width || b.height !== windowDragOrigin.height) {
+      win.setBounds({ x: b.x, y: b.y, width: windowDragOrigin.width, height: windowDragOrigin.height })
+    }
+  })
   // 迷你模式：渲染层只表达意图，缩放/持久化都在主进程做
   ipcMain.handle('win:setMini', (e, on) => applyMini(!!on))
   ipcMain.handle('win:isMini', () => miniActive)

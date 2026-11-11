@@ -148,27 +148,71 @@ const UI = {
     const viewH = body.clientHeight || 600
     const start = Math.max(0, Math.floor(body.scrollTop / TABLE_ROW_H) - TABLE_VBUF)
     const end = Math.min(n, Math.ceil((body.scrollTop + viewH) / TABLE_ROW_H) + TABLE_VBUF)
-    if (!force && start === this._tStart && end === this._tEnd) return
+    const oldStart = this._tStart
+    const oldEnd = this._tEnd
+    // 首帧 / 强制（切视图·排序·搜索·收藏变化）→ 整块重建，上下带占位块
+    if (force || oldStart < 0 || oldEnd <= oldStart || start >= oldEnd || end <= oldStart) {
+      this._tStart = start
+      this._tEnd = end
+      const rows = []
+      for (let i = start; i < end; i++) rows.push(this._rowHtml(i))
+      // 占位 div 不带 class，closest('.tr') 查不到，点空白走原有 clearSelection 分支
+      body.innerHTML =
+        `<div data-sp="top" style="height:${start * TABLE_ROW_H}px"></div>` +
+        rows.join('') +
+        `<div data-sp="bottom" style="height:${(n - end) * TABLE_ROW_H}px"></div>`
+      this._markSortHeader(this._tCtx.sortKey, this._tCtx.sortDir)
+      return
+    }
+    if (start === oldStart && end === oldEnd) return
+    /* v2.8.27 / v3.3.28：滚动改成「头尾增删」，不再整块 innerHTML 重建。
+       以前每滚 40px 就把可视区 20+ 行全销毁重建：行内封面 <img> 要重新请求 +
+       重新解码（lxcover 协议原来还是 no-store），表现就是滚动时整屏封面闪。
+       现在留在视口里的行连节点都不动，图片自然不闪，顺带省掉每帧的合成层重建。 */
+    const topSp = body.firstElementChild
+    const botSp = body.lastElementChild
+    if (!topSp || !botSp || topSp.dataset.sp !== 'top' || botSp.dataset.sp !== 'bottom') {
+      this._tStart = -1
+      this._renderTableWindow(true)
+      return
+    }
+    // 先删多余行，再补新行（topSp 之后是首行，botSp 之前是末行）
+    for (let i = oldStart; i < start; i++) body.children[1].remove()
+    for (let i = end; i < oldEnd; i++) botSp.previousElementSibling.remove()
+    if (start < oldStart) {
+      let html = ''
+      for (let i = start; i < oldStart; i++) html += this._rowHtml(i)
+      topSp.insertAdjacentHTML('afterend', html)
+    }
+    if (end > oldEnd) {
+      let html = ''
+      for (let i = oldEnd; i < end; i++) html += this._rowHtml(i)
+      botSp.insertAdjacentHTML('beforebegin', html)
+    }
+    topSp.style.height = `${start * TABLE_ROW_H}px`
+    botSp.style.height = `${(n - end) * TABLE_ROW_H}px`
     this._tStart = start
     this._tEnd = end
-    const ctx = this._tCtx
+  },
+
+  /** 单行 HTML：整块重建与增量更新共用，避免两套模板走偏 */
+  _rowHtml(i) {
+    const ctx = this._tCtx || {}
+    const t = this._tTracks[i]
     const curId = this._tCurrentId != null ? this._tCurrentId : ctx.currentId
-    const selected = ctx.selected
-    const rows = new Array(end - start)
-    for (let i = start; i < end; i++) {
-      const t = tracks[i]
-      const isCur = t.id === curId
-      const isSel = selected && selected.has(t.id)
-      // v2.8.25 UI 美化：行内小封面（无封面只留渐变占位块）+ 正在播放行的均衡器动画。
-      // 两者都不改变行高（40px 虚拟滚动不变量）；封面 img 失败由 init 里的
-      // error 捕获委托统一摘除，占位块天然兜底。
-      const cv = `<span class="cv-mini">${t.cover ? `<img src="${esc(t.cover)}" loading="lazy" alt="" />` : ''}</span>`
-      const eq = isCur ? '<span class="eq-bars"><i></i><i></i><i></i></span>' : ''
-      // v2.8.26（追加清单 #7）：行内快捷钮（收藏/加入歌单），hover 浮现，覆盖在时长列上；
-      // 点击走 tableBody 的委托（bindTrackListUi），复用右键菜单的动作管道
-      const favOn = ctx.favorites && ctx.favorites.has(t.id) ? ' on' : ''
-      const acts = `<span class="row-acts"><button class="row-act${favOn}" data-act="fav" title="${favOn ? '取消收藏' : '加入收藏'}">${icon('heart')}</button><button class="row-act" data-act="addpl" title="加入歌单">${icon('plus')}</button></span>`
-      rows[i - start] = `<div class="tr${isCur ? ' playing' : ''}${isSel ? ' selected' : ''}" data-id="${esc(t.id)}" data-index="${i}">
+    const isCur = t.id === curId
+    const isSel = ctx.selected && ctx.selected.has(t.id)
+    // v2.8.25 UI 美化：行内小封面（无封面只留渐变占位块）+ 正在播放行的均衡器动画。
+    // 两者都不改变行高（40px 虚拟滚动不变量）；封面 img 失败由 init 里的
+    // error 捕获委托统一摘除，占位块天然兜底。
+    // v2.8.27：去掉 loading="lazy" —— 自定义协议不参与 lazy 调度，滚动时反而多一帧空白。
+    const cv = `<span class="cv-mini">${t.cover ? `<img src="${esc(t.cover)}" decoding="async" draggable="false" alt="" />` : ''}</span>`
+    const eq = isCur ? '<span class="eq-bars"><i></i><i></i><i></i></span>' : ''
+    // v2.8.26（追加清单 #7）：行内快捷钮（收藏/加入歌单），hover 浮现，覆盖在时长列上；
+    // 点击走 tableBody 的委托（bindTrackListUi），复用右键菜单的动作管道
+    const favOn = ctx.favorites && ctx.favorites.has(t.id) ? ' on' : ''
+    const acts = `<span class="row-acts"><button class="row-act${favOn}" data-act="fav" title="${favOn ? '取消收藏' : '加入收藏'}">${icon('heart')}</button><button class="row-act" data-act="addpl" title="加入歌单">${icon('plus')}</button></span>`
+    return `<div class="tr${isCur ? ' playing' : ''}${isSel ? ' selected' : ''}" data-id="${esc(t.id)}" data-index="${i}">
           <div class="c-idx">
             <span class="num" draggable="true" title="拖到左侧歌单可加入歌单">${i + 1}</span>
             <span class="btn-play-row">${icon('play')}</span>
@@ -186,13 +230,6 @@ const UI = {
           <div class="c-dur">${fmtDuration(t.duration)}</div>
           ${acts}
         </div>`
-    }
-    // 占位 div 不带 class，closest('.tr') 查不到，点空白走原有 clearSelection 分支
-    body.innerHTML =
-      `<div style="height:${start * TABLE_ROW_H}px"></div>` +
-      rows.join('') +
-      `<div style="height:${(n - end) * TABLE_ROW_H}px"></div>`
-    this._markSortHeader(ctx.sortKey, ctx.sortDir)
   },
 
   _markSortHeader(key, dir) {

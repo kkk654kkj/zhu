@@ -88,7 +88,6 @@ input { font: inherit; color: inherit; }
   padding: 0 0 0 12px;
   background: var(--bg-deep);
   border-bottom: 1px solid var(--line-soft);
-  -webkit-app-region: drag;
   position: relative;
   z-index: 30;
 }
@@ -108,18 +107,22 @@ input { font: inherit; color: inherit; }
 
 .tb-center { flex: 1; display: flex; justify-content: center; }
 
-/* 拖动窗口的三条硬规则（v1.6.1）：
-   1) 可拖区域只设 drag，真正的交互控件（输入框、按钮）才 no-drag；
-      以前整个 .tb-center 都是 no-drag，而它 flex:1 占满中间，
-      结果标题栏只有左侧十几像素能拖 —— 表现就是「窗口拖不动」。
-   2) <img> 默认 draggable=true，会吃掉所在 drag 区域的拖动（拖 logo/封面没反应），
-      必须显式关掉 user-drag。
-   3) drag 区域里的文字要禁选，否则按下拖动变成框选文本。 */
-#titlebar, .tb-left, .tb-center { -webkit-app-region: drag; }
-/* -webkit-app-region 不继承到子元素（子元素默认是 none，既不是 drag 也不是 no-drag），
-   所以 logo 图片、标题文字这些装饰元素要显式给 drag，否则在它们上面按下仍然拖不动。
-   .tb-left / .mv-brand 里没有任何交互控件，可以整块给。 */
-.tb-left, .tb-left *, .mv-brand, .mv-brand * { -webkit-app-region: drag; }
+/* 拖动窗口（v2.8.27 全部改主进程实现，见 js/dragwin.js）：
+ *
+ * 以前这里是 -webkit-app-region: drag 的老写法（v1.6.1 起）。125% 缩放下实测发现，
+ * 只要窗口里存在 drag 矩形，系统层的命中区就会整体下移约 SM_CYCAPTION（约 19px）：
+ * WM_NCHITTEST 在 y<19 返回 HTCLIENT、y>=19 全返回 HTCAPTION —— 右上角按钮的下半截
+ * 因此被当成标题栏，点击被系统吞掉（表现为「按钮点不动，只能从窗口顶边往下摸」）。
+ * 改成主进程跟随光标 setPosition 后窗口不再有 drag 矩形，整条标题栏都是 HTCLIENT。
+ *
+ * 所以：这里不再声明任何 app-region: drag。规则 2/3 仍然有效 ——
+ * <img> 的 -webkit-user-drag 要关掉，标题栏文字要禁选。 */
+#titlebar { -webkit-app-region: no-drag; -webkit-user-select: none; }
+#titlebar img, .mv-cover img, .mv-brand img { -webkit-user-drag: none; }
+/* 拖动中给个抓手光标，和系统标题栏手感一致 */
+body.win-dragging #titlebar, body.win-dragging .mv-head, body.win-dragging .mv-body { cursor: grabbing; }
+/* 右上角整组：自身 + 所有子孙都显式 no-drag，双保险 */
+.tb-right, .tb-right * { -webkit-app-region: no-drag; }
 #titlebar { -webkit-user-select: none; }
 #titlebar img, .mv-cover img, .mv-brand img { -webkit-user-drag: none; }
 
@@ -373,6 +376,9 @@ input { font: inherit; color: inherit; }
   min-height: 0;
   overflow-y: auto;
   padding-bottom: 12px;
+  /* v2.8.27：虚拟滚动改成头尾增删后，占位块高度变化会触发浏览器的滚动锚定，
+     把 scrollTop 又拽回去（表现为滚一下跳一下）。这里直接关掉锚定。 */
+  overflow-anchor: none;
 }
 
 /* v2.8.25 UI 美化（C 方案）：行卡片化。
@@ -1250,7 +1256,7 @@ body.mini #playerbar { display: none; }
   align-items: center;
   justify-content: space-between;
   padding: 0 6px 0 10px;
-  -webkit-app-region: drag;
+  /* v2.8.27：拖动改主进程实现（dragwin.js），不再声明 app-region */
 }
 .mv-brand { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .mv-brand img { width: 16px; height: 16px; border-radius: 4px; display: block; }
@@ -1284,7 +1290,7 @@ body.mini #playerbar { display: none; }
   gap: 10px;
   padding: 2px 16px 4px;
   overflow: hidden;
-  -webkit-app-region: drag;
+  /* v2.8.27：拖动改主进程实现（dragwin.js），不再声明 app-region */
 }
 /* 高度跟着窗口走：保证卡片被拉小时封面先缩，标题/歌词/控制条永远不被挤出去 */
 .mv-cover {
@@ -2242,7 +2248,7 @@ body.mini #fsView { display: none; }
   align-items: center;
   color: var(--txt-3);
   font-size: 12px;
-  -webkit-app-region: drag;
+  /* v2.8.27：拖动改主进程实现（dragwin.js），不再声明 app-region */
 }
 .fs-head .mini-btn { -webkit-app-region: no-drag; }
 
