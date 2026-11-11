@@ -861,6 +861,21 @@ function bindTrackListUi() {
     const id = row.dataset.id
     const track = state.byId.get(id)
     if (!track) return
+    // v2.8.26（追加清单 #7）：行内快捷钮优先于整行播放，复用右键菜单动作管道
+    const actBtn = e.target.closest('.row-act')
+    if (actBtn) {
+      e.stopPropagation()
+      currentMenuTrack = track
+      currentMenuTracks = [track]
+      if (actBtn.dataset.act === 'fav') { handleCtxAction('fav'); return }
+      if (actBtn.dataset.act === 'addpl') {
+        const r = actBtn.getBoundingClientRect()
+        UI.showContextMenu(r.left, r.bottom + 6, state.playlists.length
+          ? state.playlists.map((p) => ({ label: p.name, act: 'add-pl', arg: p.id }))
+          : [{ label: '（暂无歌单）', act: 'noop' }])
+        return
+      }
+    }
     const index = Number(row.dataset.index)
     // Ctrl 点选 / Shift 范围选：只改变选中，不触发播放（v1.7）
     if (e.ctrlKey || e.metaKey) { toggleSelection(id, index); return }
