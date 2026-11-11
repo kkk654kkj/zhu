@@ -170,12 +170,17 @@ async function req(url, opts = {}) {
   }
 }
 
+/** 打日志用的 URL：剥掉 query —— ChKSz/音源的鉴权参数都在 query 里，80 字符正好切进 key 本体 */
+function safeUrlForLog(u) {
+  try { const x = new URL(String(u)); return x.origin + x.pathname.slice(0, 48) } catch (e) { return '(非法 URL)' }
+}
+
 async function reqText(url, opts = {}) {
   try {
     const res = await req(url, opts)
     if (!res.ok) {
       try { res.release && res.release() } catch (e) { /* 忽略 */ }
-      logger('[req] HTTP ' + res.status + ' ' + String(url).slice(0, 80))
+      logger('[req] HTTP ' + res.status + ' ' + safeUrlForLog(url))
       return null
     }
     return await res.text()
@@ -184,7 +189,7 @@ async function reqText(url, opts = {}) {
     // 以前所有错误一律 return null，AbortError 在 searchOne / qingResolveOnce 眼里
     // 等于「本源没结果」，于是被取消的链会把剩下的源继续跑完（ChKSz 还照扣额度）。
     if (err && err.name === 'AbortError' && opts && opts.signal && opts.signal.aborted) throw abortError()
-    logger('[req] ' + ((err && err.message) || err) + ' ' + String(url).slice(0, 80))
+    logger('[req] ' + ((err && err.message) || err) + ' ' + safeUrlForLog(url))
     return null
   }
 }
