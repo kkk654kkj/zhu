@@ -78,9 +78,13 @@ const CASES = [
     `document.querySelectorAll('#tableBody .tr').length`,
     (v) => v > 0],
 
-  ['DOM 行数与状态一致',
-    `document.querySelectorAll('#tableBody .tr').length === state.visible.length`,
-    (v) => v === true],
+  ['DOM 行数与状态一致（虚拟滚动：可视窗口 ≤ 全量，虚拟化生效时必有占位）',
+    `(() => { const rows = document.querySelectorAll('#tableBody .tr').length
+       const total = state.visible.length
+       const spacers = Array.from(document.getElementById('tableBody').children)
+         .filter((el) => !el.classList.contains('tr')).length
+       return { rows, total, spacers } })()`,
+    (v) => v.rows > 0 && v.rows <= v.total && (v.rows === v.total || v.spacers >= 1)],
 
   ['曲目索引完整（byId === tracks）',
     `state.byId.size === state.tracks.length`,

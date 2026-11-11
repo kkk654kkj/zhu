@@ -1,6 +1,10 @@
 'use strict'
 /* 视图渲染层：只负责把状态画到 DOM，不做业务决策 */
 
+/* 虚拟滚动参数：行高必须与 css .tr 的 height 严格一致（40px + 水平 margin 不影响垂直） */
+const TABLE_ROW_H = 40
+const TABLE_VBUF = 8   // 可视区上下各多渲染 8 行缓冲，滚动时不露白
+
 const UI = {
   els: {},
 
@@ -96,22 +100,62 @@ const UI = {
 
   /**
    * @param {Array} tracks 已排序过滤后的列表
-   * @param {object} ctx {currentId, playing, favorites:Set, playCounts, sortKey, sortDir}
+   * @param {object} ctx {currentId, playing, favorites, playCounts, showCounts, sortKey, sortDir, selected}
    */
   renderTable(tracks, ctx) {
     const body = this.els.tableBody
+    this._tTracks = tracks
+    this._tCtx = ctx || {}
+    this._tCurrentId = this._tCtx.currentId || null
     if (!tracks.length) {
       body.innerHTML = ''
+      this._tStart = -1
+      this._tEnd = -1
       return
     }
-    // 一次性拼好整段 HTML 再赋 innerHTML。
-    // 旧实现复用同一个 div 逐行 innerHTML（每行解析一次 HTML），n 行 = n+1 次解析；
-    // 曲库上千首时切视图/搜索有明显掉帧。现在是 1 次解析 + 1 次布局。
-    const rows = new Array(tracks.length)
-    for (let i = 0; i < tracks.length; i++) {
+    // v3.3.22：虚拟滚动。曲库上千首时一次性拼 n 行 HTML 仍会让 DOM 节点数破万、
+    // 切视图/搜索掉帧。改为只渲染可视区 ± 缓冲行，上下用占位 div 撑住总高度；
+    // 滚动时 rAF 节流重画窗口。行高固定 40px（css .tr），事件委托（click/contextmenu/
+    // dragstart 都挂在 tableBody 上）与 data-index 语义不变。
+    if (!this._tScrollBound) {
+      this._tScrollBound = true
+      let raf = 0
+      body.addEventListener('scroll', () => {
+        if (raf) return
+        raf = requestAnimationFrame(() => {
+          raf = 0
+          this._renderTableWindow(false)
+        })
+      })
+    }
+    // 与旧实现（innerHTML 重建后浏览器自动回顶）行为一致：切视图/排序/搜索回顶部
+    if (body.scrollTop) body.scrollTop = 0
+    this._tStart = -1
+    this._tEnd = -1
+    this._renderTableWindow(true)
+  },
+
+  /** 只重画可视窗口；内容总高不变，scrollTop 由占位 div 维持 */
+  _renderTableWindow(force) {
+    const body = this.els.tableBody
+    const tracks = this._tTracks
+    if (!tracks || !tracks.length) return
+    const n = tracks.length
+    const viewH = body.clientHeight || 600
+    const start = Math.max(0, Math.floor(body.scrollTop / TABLE_ROW_H) - TABLE_VBUF)
+    const end = Math.min(n, Math.ceil((body.scrollTop + viewH) / TABLE_ROW_H) + TABLE_VBUF)
+    if (!force && start === this._tStart && end === this._tEnd) return
+    this._tStart = start
+    this._tEnd = end
+    const ctx = this._tCtx
+    const curId = this._tCurrentId != null ? this._tCurrentId : ctx.currentId
+    const selected = ctx.selected
+    const rows = new Array(end - start)
+    for (let i = start; i < end; i++) {
       const t = tracks[i]
-      const isCur = t.id === ctx.currentId
-      rows[i] = `<div class="tr${isCur ? ' playing' : ''}" data-id="${esc(t.id)}" data-index="${i}">
+      const isCur = t.id === curId
+      const isSel = selected && selected.has(t.id)
+      rows[i - start] = `<div class="tr${isCur ? ' playing' : ''}${isSel ? ' selected' : ''}" data-id="${esc(t.id)}" data-index="${i}">
           <div class="c-idx">
             <span class="num" draggable="true" title="拖到左侧歌单可加入歌单">${i + 1}</span>
             <span class="btn-play-row">${icon('play')}</span>
@@ -129,8 +173,11 @@ const UI = {
           <div class="c-dur">${fmtDuration(t.duration)}</div>
         </div>`
     }
-
-    body.innerHTML = rows.join('')
+    // 占位 div 不带 class，closest('.tr') 查不到，点空白走原有 clearSelection 分支
+    body.innerHTML =
+      `<div style="height:${start * TABLE_ROW_H}px"></div>` +
+      rows.join('') +
+      `<div style="height:${(n - end) * TABLE_ROW_H}px"></div>`
     this._markSortHeader(ctx.sortKey, ctx.sortDir)
   },
 
@@ -149,6 +196,9 @@ const UI = {
   },
 
   setRowPlaying(id, playing) {
+    // v3.3.22：虚拟滚动后可视窗口重画需要最新的当前曲 id（ctx 里的会过时）
+    if (playing) this._tCurrentId = id
+    else if (this._tCurrentId === id) this._tCurrentId = null
     $$('#tableBody .tr').forEach((el) => {
       el.classList.toggle('playing', el.dataset.id === id)
     })

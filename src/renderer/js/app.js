@@ -990,7 +990,8 @@ function renderView() {
     playCounts: state.playCounts,
     showCounts: state.view === 'most',   // 只在「最常播放」里显示次数，其他视图不挤
     sortKey: state.sortKey,
-    sortDir: state.sortDir
+    sortDir: state.sortDir,
+    selected: state.selected             // v3.3.22 虚拟滚动：重画可视窗口时带上选中态
   })
 }
 

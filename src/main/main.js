@@ -1501,6 +1501,8 @@ function createWindow() {
 
   win.once('ready-to-show', () => {
     if (bounds.maximized && !miniActive) win.maximize()
+    // v3.3.22：LX_TEST_HIDDEN=1 时窗口不显示（后台冒烟/成品实测），绝不抢前台焦点
+    if (process.env.LX_TEST_HIDDEN === '1') return
     win.show()
   })
 
