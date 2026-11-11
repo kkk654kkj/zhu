@@ -72,8 +72,37 @@ function parseLrc(text) {
       continue
     }
     const content = line.slice(lastEnd).trim()
+
+    // v3.3.27（追加清单 #2）：A2 增强歌词的词内时间标签 <mm:ss.xxx> 或 <start,end>。
+    // ≥2 个标签才当逐字行（单个标签无意义），否则按整句处理（降级）。
+    // 词文本 = 本标签到下一标签之间；词尾缺省时由渲染层用下一词起点推。
+    let words = null
+    if (/<\d{1,3}:\d{1,2}/.test(content)) {
+      const wordRe = /<(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?(?:,(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?)?>/g
+      const wm = []
+      let wm2
+      while ((wm2 = wordRe.exec(content))) wm.push(wm2)
+      if (wm.length >= 2) {
+        const toSec = (mm) => {
+          const min = parseInt(mm[1], 10)
+          const sec = parseInt(mm[2], 10)
+          const frac = mm[3] ? parseInt(mm[3].padEnd(3, '0').slice(0, 3), 10) / 1000 : 0
+          return min * 60 + sec + frac
+        }
+        words = []
+        for (let i = 0; i < wm.length; i++) {
+          const st = toSec(wm[i])
+          const en = wm[i][4] != null ? toSec([, wm[i][4], wm[i][5], wm[i][6]]) : null
+          const text = content.slice(wm[i].index + wm[i][0].length, i + 1 < wm.length ? wm[i + 1].index : content.length)
+            .replace(/<[^>]*$/, '').trim()
+          if (text) words.push({ t: st, e: en, text })
+        }
+        if (words.length < 2) words = null
+      }
+    }
+
     for (const t of stamps) {
-      lines.push({ t, text: content || '♪' })
+      lines.push({ t, text: words ? words.map((w) => w.text).join('') || '♪' : (content || '♪'), words })
     }
   }
 
@@ -81,7 +110,8 @@ function parseLrc(text) {
   const plain = timed.length === 0
   const out = (plain ? lines : timed).map((l) => ({
     t: l.t != null ? Math.max(0, l.t - offsetMs / 1000) : null,
-    text: l.text
+    text: l.text,
+    words: l.words || null
   }))
   if (!plain) out.sort((a, b) => a.t - b.t)
   return { lines: out, meta, plain, count: out.length }

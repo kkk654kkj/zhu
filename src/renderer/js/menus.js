@@ -54,6 +54,11 @@ function showTrackMenu(x, y, track) {
     items.push({ label: '复制歌曲信息', act: 'copy' })
   }
 
+  // v2.8.26（追加清单 #5）：主题色入口进右键主菜单（logo 右键之外的第二个入口）
+  if (typeof Theme !== 'undefined' && Theme.menuItems) {
+    items.push({ label: '主题色', icon: 'spark', act: 'noop', sub: Theme.menuItems() })
+  }
+
   UI.showContextMenu(x, y, items)
   currentMenuTrack = track
   currentMenuTracks = targets

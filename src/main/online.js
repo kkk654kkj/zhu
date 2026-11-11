@@ -471,8 +471,55 @@ const wy = {
     const j = await reqJson(`https://music.163.com/api/song/lyric?id=${encode(song.id)}&lv=1&kv=1&tv=-1`, {
       headers: { Referer: 'https://music.163.com' }, ...opts
     })
+    // v3.3.27（追加清单 #2）：优先 klyric（卡拉OK 逐字，同一次请求里 kv=1 已带上），
+    // 转成 A2 增强 LRC（词内 <start,end> 标签）；没有逐字数据再退普通 lrc
+    const k = j && j.klyric && j.klyric.lyric
+    if (k) {
+      const enhanced = klyricToEnhancedLrc(k)
+      if (enhanced) return enhanced
+    }
     const lrc = j && j.lrc && j.lrc.lyric
     return lrc && /\[\d{1,3}:/.test(lrc) ? lrc : null
+  }
+}
+
+/**
+ * v3.3.27（追加清单 #2）：网易 klyric（JSON 串 [{t:行起点ms, c:[{x:词, t:相对偏移ms}]}]）
+ * → A2 增强 LRC：`[mm:ss.xxx]<mm:ss.xxx,mm:ss.xxx>词<...>词`。
+ * 词尾 = 行内下一词起点（最后一词吃行剩余）；解析失败返回 null（退普通 lrc）。
+ */
+function klyricToEnhancedLrc(raw) {
+  try {
+    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw
+    if (!Array.isArray(arr) || !arr.length) return null
+    const fmt = (ms) => {
+      const t = Math.max(0, Math.round(ms))
+      const mm = String(Math.floor(t / 60000)).padStart(2, '0')
+      const ss = String(Math.floor(t / 1000) % 60).padStart(2, '0')
+      const xxx = String(t % 1000).padStart(3, '0')
+      return `${mm}:${ss}.${xxx}`
+    }
+    const lines = []
+    for (let i = 0; i < arr.length; i++) {
+      const L = arr[i]
+      if (!L || !Number.isFinite(L.t) || !Array.isArray(L.c) || !L.c.length) continue
+      const nextT = (arr[i + 1] && Number.isFinite(arr[i + 1].t)) ? arr[i + 1].t : (L.t + 8000)
+      const words = []
+      for (let w = 0; w < L.c.length; w++) {
+        const seg = L.c[w]
+        if (!seg || typeof seg.x !== 'string' || !seg.x) continue
+        const wt = Math.max(L.t, L.t + (Number(seg.t) || 0))
+        const we = (w + 1 < L.c.length && Number.isFinite(Number(L.c[w + 1].t)))
+          ? Math.max(wt, L.t + (Number(L.c[w + 1].t) || 0))
+          : Math.max(wt + 200, nextT)
+        words.push({ wt, we, x: seg.x })
+      }
+      if (!words.length) continue
+      lines.push(`[${fmt(L.t)}]` + words.map((w) => `<${fmt(w.wt)},${fmt(w.we)}>${w.x}`).join(''))
+    }
+    return lines.length ? lines.join('\n') : null
+  } catch {
+    return null
   }
 }
 

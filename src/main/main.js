@@ -166,6 +166,10 @@ try {
 
 let win = null
 let tray = null
+// v2.8.26 修复「放大后按钮无法还原」：Windows 无边框窗口下 isMaximized() 有滞后
+// （快速连点/贴边最大化时返回旧值），用它做分支会走错（已最大化却再 maximize → 空操作）。
+// maximize/unmaximize 事件维护这个权威状态，分支判断与推送都用它。
+let winMaxState = false
 let store = null
 let library = null
 let userData = null
@@ -508,6 +512,16 @@ function createWindow() {
   }
   win.on('resize', debounce(saveBounds, 400))
   win.on('move', debounce(saveBounds, 400))
+
+  // v2.8.26：最大化权威状态 = 事件驱动，变化即推渲染层（外部贴边最大化图标也能跟上）
+  win.on('maximize', () => {
+    winMaxState = true
+    sendToRenderer('win:max-state', true)
+  })
+  win.on('unmaximize', () => {
+    winMaxState = false
+    sendToRenderer('win:max-state', false)
+  })
 
   win.on('close', (e) => {
     if (!quitting) {
@@ -1946,9 +1960,10 @@ function registerWindowIpc() {
   ipcMain.handle('win:minimize', () => win && win.minimize())
   ipcMain.handle('win:toggleMaximize', () => {
     if (!win) return false
-    // v3.3.7：unmaximize 在 Windows 上是异步的，紧接着 isMaximized() 拿到的是
-    // 切换前的旧值，渲染层图标会和实际状态相反 —— 返回「切换意图」
-    const wasMax = win.isMaximized()
+    // v3.3.27：分支判断改用事件维护的 winMaxState（isMaximized() 只做兜底，
+    // 覆盖「启动早期事件还没来得及触发」的边缘情况），返回值 = 切换意图。
+    // v3.3.7 已知问题：isMaximized() 在无边框窗口上有滞后，快速连点时分支走错。
+    const wasMax = winMaxState || win.isMaximized()
     if (wasMax) win.unmaximize()
     else win.maximize()
     return !wasMax

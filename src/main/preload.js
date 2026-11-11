@@ -112,6 +112,8 @@ contextBridge.exposeInMainWorld('api', {
   toggleMaximize: () => invoke('win:toggleMaximize'),
   closeWindow: () => invoke('win:close'),
   isMaximized: () => invoke('win:isMaximized'),
+  /** v2.8.26/3.3.27：最大化状态被主进程事件更新（含外部贴边最大化）时推送 */
+  onMaxState: (cb) => on('win:max-state', cb),
   /** 通知主进程播放状态，用于更新任务栏缩略图媒体按钮 */
   setPlayState: (playing) => ipcRenderer.send('win:play-state', !!playing),
   /** 迷你模式：true=进迷你，false=回完整模式；返回实际状态 */

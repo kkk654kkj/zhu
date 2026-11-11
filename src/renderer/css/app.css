@@ -488,6 +488,34 @@ input { font: inherit; color: inherit; }
 }
 /* 暂停时不跳 */
 .tr.paused .eq-bars i { animation-play-state: paused; }
+
+/* v2.8.26（追加清单 #7）：行内快捷钮 —— hover 浮现，覆盖在时长列上 */
+.row-acts {
+  position: absolute;
+  right: 12px;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s;
+}
+.tr:hover .row-acts { opacity: 1; pointer-events: auto; }
+.tr:hover .c-dur { visibility: hidden; }
+.row-act {
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border-radius: 7px;
+  color: var(--txt-2);
+  background: #171b21;
+  box-shadow: 0 1px 4px rgba(0,0,0,.4);
+}
+.row-act:hover { color: var(--accent); background: var(--bg-hover); }
+.row-act.on { color: var(--danger); }
+.row-act.on:hover { color: var(--danger); }
+.row-act svg { width: 13px; height: 13px; }
 .tr .c-fmt, .tr .c-dur { text-align: center; font-size: 11.5px; color: var(--txt-3); font-variant-numeric: tabular-nums; }
 /* 音质列（v1.9）：16/44.1 这种紧凑写法；hires 用亮一点的颜色挑出来 */
 .tr .c-q {
@@ -631,6 +659,11 @@ input { font: inherit; color: inherit; }
   word-break: break-word;
 }
 .lyric-line:hover { opacity: .9; }
+/* v3.3.27（追加清单 #2）：逐字歌词词级染色。非活动行继承行颜色（不额外染色）；
+   活动行内未唱到的词保持暗色，已唱到的词亮主色 —— 卡拉OK 效果 */
+.lyric-line .kw { transition: color .16s, opacity .16s; }
+.lyric-line.active .kw { color: var(--txt-3); opacity: .55; }
+.lyric-line.active .kw.done { color: var(--accent); opacity: 1; }
 .lyric-line.active {
   color: var(--accent);
   opacity: 1;
@@ -1150,18 +1183,20 @@ input { font: inherit; color: inherit; }
   align-content: start;
 }
 .album-card { cursor: pointer; }
+/* v2.8.26（追加清单 #8）：封面墙与新版面拉齐 —— 圆角 12、常驻投影、hover 浮起加强 */
 .album-card .ac-cover {
   width: 100%;
   aspect-ratio: 1;
-  border-radius: 8px;
+  border-radius: 12px;
   overflow: hidden;
   background: linear-gradient(140deg, #1f2833, #14181e);
   display: grid;
   place-items: center;
   color: var(--txt-3);
+  box-shadow: 0 4px 14px rgba(0,0,0,.35);
   transition: transform .16s, box-shadow .16s;
 }
-.album-card:hover .ac-cover { transform: translateY(-3px); box-shadow: 0 10px 24px rgba(0,0,0,.45); }
+.album-card:hover .ac-cover { transform: translateY(-4px); box-shadow: 0 14px 30px rgba(0,0,0,.5); }
 .album-card .ac-cover img { width: 100%; height: 100%; object-fit: cover; }
 .album-card .ac-cover svg { width: 34px; height: 34px; }
 .album-card .ac-name {
@@ -1192,6 +1227,20 @@ body.mini #playerbar { display: none; }
     linear-gradient(180deg, #14181e, #0d0f13 70%);
   overflow: hidden;
 }
+/* v2.8.26（追加清单 #6）：迷你卡片毛玻璃化 —— 当前封面模糊铺底（--mv-bg 由
+   ui.js _setCovers 写入），配合主题色变量歌词/按钮自动跟随封面取色。 */
+#miniView::before {
+  content: "";
+  position: absolute;
+  inset: -40px;
+  background: var(--mv-bg, none) center / cover no-repeat;
+  filter: blur(46px) saturate(1.4) brightness(.5);
+  z-index: 0;
+}
+#miniView > .mv-head,
+#miniView > .mv-body,
+#miniView > .mv-progress,
+#miniView > .mv-controls { position: relative; z-index: 1; }
 
 /* 顶部：品牌 + 窗口按钮（整条可拖动） */
 .mv-head {
@@ -2165,6 +2214,19 @@ body.mini .hifi-badge { display: none; }
   transition: opacity .2s ease, transform .2s ease;
   pointer-events: none;
 }
+/* v2.8.26（追加清单 #4）：当前封面高斯模糊铺底 —— ui.js _setCovers 写 --fs-bg，
+   无封面时为 none，只剩渐变底色。内容都在 z-index 1 之上。 */
+#fsView::before {
+  content: "";
+  position: absolute;
+  inset: -48px;
+  background: var(--fs-bg, none) center / cover no-repeat;
+  filter: blur(52px) saturate(1.35) brightness(.42);
+  z-index: 0;
+}
+#fsView > .fs-head,
+#fsView > .fs-body,
+#fsView > .fs-foot { position: relative; z-index: 1; }
 #fsView.open {
   opacity: 1;
   transform: scale(1);

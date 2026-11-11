@@ -918,6 +918,21 @@ function bindTrackListUi() {
     const id = row.dataset.id
     const track = state.byId.get(id)
     if (!track) return
+    // v2.8.26（追加清单 #7）：行内快捷钮优先于整行播放，复用右键菜单动作管道
+    const actBtn = e.target.closest('.row-act')
+    if (actBtn) {
+      e.stopPropagation()
+      currentMenuTrack = track
+      currentMenuTracks = [track]
+      if (actBtn.dataset.act === 'fav') { handleCtxAction('fav'); return }
+      if (actBtn.dataset.act === 'addpl') {
+        const r = actBtn.getBoundingClientRect()
+        UI.showContextMenu(r.left, r.bottom + 6, state.playlists.length
+          ? state.playlists.map((p) => ({ label: p.name, act: 'add-pl', arg: p.id }))
+          : [{ label: '（暂无歌单）', act: 'noop' }])
+        return
+      }
+    }
     const index = Number(row.dataset.index)
     // Ctrl 点选 / Shift 范围选：只改变选中，不触发播放（v1.7）
     if (e.ctrlKey || e.metaKey) { toggleSelection(id, index); return }
@@ -1272,6 +1287,12 @@ function bindWindowUi() {
     if (max == null) return
     document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
   })
+  // v2.8.26/3.3.27：主进程事件推送最大化状态（含外部贴边最大化/快速连点兜底）
+  if (window.api.onMaxState) {
+    window.api.onMaxState((max) => {
+      document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
+    })
+  }
   document.getElementById('btnClose').addEventListener('click', async () => {
     // 第四轮 §4.3（退出链）：必须串行等待 —— 以前 fire-and-forget 地发 flush 后立刻关窗，
     // 最后 300ms 内的设置改动（去抖未落盘的那一批）会直接丢掉。
