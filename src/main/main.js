@@ -2692,7 +2692,24 @@ function dlDto(t) {
 
 /** 推给界面；save=false 用于高频进度（别每 250ms 写一次盘） */
 const dlSentSig = new Map()   // id → 上次推送的签名（增量推送用）
+// v3.3.21：done/error 任务以前只有用户手动「清除已完成」才摘，长会话里 Map 与 dlSentSig 慢慢涨。
+// 现在超过上限自动摘最旧的（按创建时间 at；done 的文件是用户音乐不动，error 的 .part 在置 error 时已清）。
+// 上限给 100：正常一次会话下不满，只有挂机数天才会触达。
+const DL_FINISHED_MAX = 100
+function dlPruneFinished() {
+  const fin = Array.from(dlTasks.values()).filter((t) => t.status === 'done' || t.status === 'error')
+  if (fin.length <= DL_FINISHED_MAX) return
+  fin.sort((a, b) => (a.at || 0) - (b.at || 0))
+  let removed = 0
+  for (const t of fin.slice(0, fin.length - DL_FINISHED_MAX)) {
+    if (t.rescanTimer) { clearTimeout(t.rescanTimer); t.rescanTimer = null }
+    dlTasks.delete(t.id); removed++
+  }
+  // error 任务会落盘，摘了要触发保存，否则重启后又复活
+  if (removed) dlSaveSoon()
+}
 function dlBroadcast(save) {
+  dlPruneFinished()
   // 第四轮 §4.5.3 #13：以前每 250ms 把**全表**推一遍（几十个任务 × 每秒 4 次）。
   // 改成只推有变化的条目，并用 full 标记告诉渲染层「这次是全量快照」。
   const all = Array.from(dlTasks.values())

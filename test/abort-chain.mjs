@@ -202,7 +202,29 @@ try {
     }
   }
 
-  console.log('\nOK ' + passed + '/7 项回归断言通过')
+  // ⑧ qingEnsureTicket（v3.3.21）：单个等待者 abort 不连累其他等待者，也不中止共享领票
+  {
+    const A = loadOnline()
+    const captured = []
+    globalThis.fetch = hangingFetch(captured)
+    const c1 = new AbortController()
+    const c2 = new AbortController()
+    const p1 = A.__test.qingEnsureTicket({ signal: c1.signal })
+    const p2 = A.__test.qingEnsureTicket({ signal: c2.signal })
+    await new Promise((r) => rawSetTimeout(r, 10))
+    assert.equal(captured.length, 1, '共享 pending：领票请求只应发一次')
+    c1.abort()
+    const got1 = await withDeadline(p1, 500, 'abort 的等待者应立刻收敛')
+    assert.equal(got1, '')
+    assert.equal(captured[0].aborted, false, 'c1 单独取消不得中止共享领票请求')
+    let c2Settled = false
+    p2.then(() => { c2Settled = true }, () => { c2Settled = true })
+    await new Promise((r) => rawSetTimeout(r, 80))
+    assert.equal(c2Settled, false, 'c2 不应被 c1 的取消连带收敛')
+    ok('单个等待者 abort 不连累其他等待者')
+  }
+
+  console.log('\nOK ' + passed + '/8 项回归断言通过')
 } finally {
   globalThis.fetch = origFetch
 }

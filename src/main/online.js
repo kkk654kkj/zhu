@@ -952,56 +952,91 @@ function qingHeaders(method, url, body, ticket) {
   return h
 }
 
-/** 领票；12 小时有效，提前 10 分钟换新的 */
+/** 领票；12 小时有效，提前 10 分钟换新的。
+ * v3.3.21：领票请求不再绑定第一个调用方的 signal —— 以前 pending 全局共享但 signal 绑发起者，
+ * 它 abort（无损链竞速输家）会让同期等待的其余调用方全部拿到空票一起降级。
+ * 现在：领票请求绑内部共享控制器，只有**所有等待者都 abort** 才中止领票（不留后台请求扣额度）；
+ * 单个调用方 abort 时自己立刻拿空票收敛，共享领票继续跑完供其余等待者使用。 */
+const qingTicketWaiters = new Set()   // 当前领票的等待者 signal
+let qingTicketCtrl = null             // 共享领票请求的内部控制器
 async function qingEnsureTicket(opts = {}) {
   if (qingTicket && Date.now() < qingTicketExp) return qingTicket
-  if (qingTicketPending) return qingTicketPending
   const signal = opts.signal
-  qingTicketPending = (async () => {
-    for (const base of QING_BASES) {
-      if (signal && signal.aborted) return ''
-      try {
-        const url = base + '/gateway/ticket'
-        const body = JSON.stringify({ deviceId: qingDevice, appVersion: QING_VER, platform: 'win32' })
-        const r = await req(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...qingHeaders('POST', url, body) },
-          body,
-          timeout: 8000,
-          signal
-        })
-        const j = await r.json().catch(() => null)
-        if (j && j.ticket) {
-          qingTicket = j.ticket
-          // v3.3.18（第四轮审查 P1 #6）：expiresAt 可能给「绝对毫秒 / 绝对秒 / 相对 TTL 秒」三种口径，
-          // 也可能给 Infinity / 0 / 非法值。原先用 `<1e9 一律当相对秒` 的启发式：
-          //   TTL=300（5 分钟）→ 算出「5 分钟前就过期」→ 每首重领票，而无损窗口只有 7/12s；
-          //   TTL 用毫秒给（43200000）→ 被当秒，算出约 500 天后过期；
-          //   Infinity → 永不过期。三者都让无损链路系统性失效。
-          // 现改为显式单位分支 + 提前量夹取，并保证 qingTicketExp 一定大于 now。
-          const now = Date.now()
-          const raw = Number(j.expiresAt)
-          let absExp
-          if (!Number.isFinite(raw) || raw <= 0) {
-            absExp = now + 3600 * 1000                                   // 没给 / 非法：保守按 1 小时
-          } else if (raw < 1e9) {
-            absExp = now + Math.min(raw * 1000, 12 * 3600 * 1000)         // 相对 TTL 秒（上限 12h）
-          } else if (raw < 1e12) {
-            absExp = raw * 1000                                          // 绝对秒
-          } else {
-            absExp = Math.min(raw, now + 12 * 3600 * 1000)                // 绝对毫秒（异常大值也夹到 12h）
+  if (!qingTicketPending) {
+    const ctrl = new AbortController()
+    qingTicketCtrl = ctrl
+    qingTicketPending = (async () => {
+      for (const base of QING_BASES) {
+        if (ctrl.signal.aborted) return ''
+        try {
+          const url = base + '/gateway/ticket'
+          const body = JSON.stringify({ deviceId: qingDevice, appVersion: QING_VER, platform: 'win32' })
+          const r = await req(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...qingHeaders('POST', url, body) },
+            body,
+            timeout: 8000,
+            signal: ctrl.signal
+          })
+          const j = await r.json().catch(() => null)
+          if (j && j.ticket) {
+            qingTicket = j.ticket
+            // v3.3.18（第四轮审查 P1 #6）：expiresAt 可能给「绝对毫秒 / 绝对秒 / 相对 TTL 秒」三种口径，
+            // 也可能给 Infinity / 0 / 非法值。原先用 `<1e9 一律当相对秒` 的启发式：
+            //   TTL=300（5 分钟）→ 算出「5 分钟前就过期」→ 每首重领票，而无损窗口只有 7/12s；
+            //   TTL 用毫秒给（43200000）→ 被当秒，算出约 500 天后过期；
+            //   Infinity → 永不过期。三者都让无损链路系统性失效。
+            // 现改为显式单位分支 + 提前量夹取，并保证 qingTicketExp 一定大于 now。
+            const now = Date.now()
+            const raw = Number(j.expiresAt)
+            let absExp
+            if (!Number.isFinite(raw) || raw <= 0) {
+              absExp = now + 3600 * 1000                                   // 没给 / 非法：保守按 1 小时
+            } else if (raw < 1e9) {
+              absExp = now + Math.min(raw * 1000, 12 * 3600 * 1000)         // 相对 TTL 秒（上限 12h）
+            } else if (raw < 1e12) {
+              absExp = raw * 1000                                          // 绝对秒
+            } else {
+              absExp = Math.min(raw, now + 12 * 3600 * 1000)                // 绝对毫秒（异常大值也夹到 12h）
+            }
+            const life = Math.max(0, absExp - now)
+            const lead = Math.min(600000, life * 0.1)                       // 提前量 min(10 分钟, 寿命 10%)
+            qingTicketExp = absExp - lead
+            if (!(qingTicketExp > now)) qingTicketExp = now + Math.max(1000, life * 0.5)
+            return qingTicket
           }
-          const life = Math.max(0, absExp - now)
-          const lead = Math.min(600000, life * 0.1)                       // 提前量 min(10 分钟, 寿命 10%)
-          qingTicketExp = absExp - lead
-          if (!(qingTicketExp > now)) qingTicketExp = now + Math.max(1000, life * 0.5)
-          return qingTicket
-        }
-      } catch (err) { /* 换下一条线路 */ }
+        } catch (err) { /* 换下一条线路 */ }
+      }
+      return ''
+    })().finally(() => {
+      qingTicketPending = null
+      qingTicketCtrl = null
+      qingTicketWaiters.clear()
+    })
+  }
+  // 无 signal 的调用方直接共享 pending
+  if (!signal) return qingTicketPending
+  // 有 signal 的调用方与自己的 abort 竞速：abort 立刻拿 '' 收敛；
+  // 若所有等待者都已取消，则中止共享领票请求（不留后台请求）
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (v) => {
+      if (done) return
+      done = true
+      qingTicketWaiters.delete(signal)
+      try { signal.removeEventListener('abort', onAbort) } catch (err) { /* 忽略 */ }
+      resolve(v)
     }
-    return ''
-  })().finally(() => { qingTicketPending = null })
-  return qingTicketPending
+    const onAbort = () => {
+      qingTicketWaiters.delete(signal)
+      if (qingTicketWaiters.size === 0 && qingTicketCtrl) { try { qingTicketCtrl.abort() } catch (err) { /* 忽略 */ } }
+      finish('')
+    }
+    qingTicketWaiters.add(signal)
+    qingTicketPending.then((t) => finish(t || ''), () => finish(''))
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 /** 换一次直链；返回 { url } 或 null */

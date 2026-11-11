@@ -119,6 +119,12 @@ try {
   ok('settings:patch 有值校验/危险键过滤', /sanitizeSettingsPatch|__proto__/.test(m))
   ok('mpv:stop 改调 reset()', /'mpv:stop'[^\n]*reset\(\)/.test(m))
   ok('电源保留 systemShutdownPending', /systemShutdownPending/.test(m))
+  // v3.3.21：done/error 任务驻留上限（§6.2 第 7 项）
+  ok('有 dlPruneFinished 且 dlBroadcast 先修剪',
+      /function dlPruneFinished[\s\S]{0,600}/.test(m) &&
+      /function dlBroadcast\([\s\S]{0,120}dlPruneFinished\(\)/.test(m))
+  ok('dlPruneFinished 不删用户文件（函数体无 unlink）',
+      !/function dlPruneFinished[\s\S]{0,600}?unlink/.test(m))
 } catch (e) { ok('main.js 单测组', false, e.message.slice(0, 200)) }
 
 // (e) app.js：连续失败计数 / flush / state.exclusive
@@ -143,6 +149,14 @@ try {
   const wyStart = o.indexOf('music.163.com/song/media/outer/url')
   ok('wy.getUrl 调用 res.release()', wyStart > 0 && /res\.release\s*&&\s*res\.release\(\)/.test(o.slice(wyStart, wyStart + 900)))
   ok('网络 ext 有白名单收敛', /safeExt|mp3\|m4a\|flac/.test(o))
+  // v3.3.21：qingEnsureTicket 等待者隔离（§6.2 第 6 项）
+  const qseg = o.slice(o.indexOf('async function qingEnsureTicket'), o.indexOf('async function qingResolveOnce'))
+  ok('领票请求绑内部共享控制器', /signal:\s*ctrl\.signal/.test(qseg) && !/timeout: 8000,\s*\n\s*signal: opts\.signal/.test(qseg))
+  ok('等待者竞速：abort 立刻收敛并摘除监听',
+      /addEventListener\('abort', onAbort, \{ once: true \}\)/.test(qseg) &&
+      /removeEventListener\('abort', onAbort\)/.test(qseg))
+  ok('全体等待者取消才中止共享领票',
+      /qingTicketWaiters\.size === 0 && qingTicketCtrl/.test(qseg))
 } catch (e) { ok('online.js 单测组', false, e.message.slice(0, 200)) }
 
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
