@@ -92,7 +92,10 @@ async function collectFiles(dir, depth = 0, errors = []) {
     if (ent.isSymbolicLink()) continue
     if (ent.isDirectory()) {
       if (/^\$RECYCLE|^System Volume Information|^\./i.test(ent.name)) continue
-      out.push(...await collectFiles(full, depth + 1, errors))
+      // v3.3.20：不能用 spread 展开（`push(...arr)`）。大目录下数组元素多过引擎的
+      // 实参上限会抛 RangeError: Maximum call stack size exceeded，整次扫描直接失败。
+      const sub = await collectFiles(full, depth + 1, errors)
+      for (const f of sub) out.push(f)
     } else if (ent.isFile() && AUDIO_EXT.has(extOf(ent.name))) {
       out.push(full)
     }
@@ -190,18 +193,26 @@ const COVER_EMBEDDED = '@embedded'
  */
 const COVER_CACHE = new Map()
 const COVER_CACHE_MAX_BYTES = 160 * 1024 * 1024
+/** 单张内嵌封面进内存的上限：超过就不缓存（见 coverCacheSet 注释） */
+const COVER_ENTRY_MAX_BYTES = 4 * 1024 * 1024
 let coverCacheBytes = 0
 
 function coverCacheSet(id, buf, mime) {
   if (!id || !buf || !buf.length) return
+  // v3.3.20：单张封面也设上限。以前只有总量上限、且 `size > 1` 才淘汰 ——
+  // 一张 8MB 的「封面」（其实是内嵌的大图/整轨扫描件）进来后自己就超限，
+  // 但因为 size 已经等于 1，循环立即退出，它永远留在内存里。
+  // 超限就干脆不缓存，getCover() 每次现场解析（慢一点，但不会吃内存）。
+  if (buf.length > COVER_ENTRY_MAX_BYTES) return
   const prev = COVER_CACHE.get(id)
   if (prev) coverCacheBytes -= prev.buf.length
   const entry = { buf, mime: mime || 'image/jpeg', at: Date.now() }
   COVER_CACHE.delete(id)          // 重新插入以体现"最近使用"
   COVER_CACHE.set(id, entry)
   coverCacheBytes += buf.length
-  // 超限就从头淘汰（Map 保持插入顺序，最旧的在前）
-  while (coverCacheBytes > COVER_CACHE_MAX_BYTES && COVER_CACHE.size > 1) {
+  // 超限就从头淘汰（Map 保持插入顺序，最旧的在前）；允许淘汰到空，
+  // 否则「单条就超总量上限」时永远清不掉
+  while (coverCacheBytes > COVER_CACHE_MAX_BYTES && COVER_CACHE.size > 0) {
     const [oldId, old] = COVER_CACHE.entries().next().value
     COVER_CACHE.delete(oldId)
     coverCacheBytes -= old.buf.length
@@ -869,7 +880,9 @@ class Library {
         }
         // 子目录读不进去时 collectFiles 会回传路径，这里并入 missingRoots：
         // 只要有一个目录不可达，就整体跳过清理（宁可留脏数据，也不能误删曲目）
-        all.push(...await collectFiles(dir, 0, missingRoots))
+        // v3.3.20：同上，避免 `push(...大数组)` 的 RangeError
+        const files = await collectFiles(dir, 0, missingRoots)
+        for (const f of files) all.push(f)
       }
       // 大小写去重：一次建 Map，O(n)。旧写法对每个唯一路径都遍历整个数组（O(n²)），
       // 千首以上会明显拖慢收集阶段。
