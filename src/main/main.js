@@ -818,6 +818,13 @@ let systemShutdownTimer = null
  */
 function onShutdownDone(err, kind) {
   if (!err) return
+  // v3.3.20：取消命令失败 ≠ 关机命令失败。以前两者共用这个回调，
+  // `shutdown /a` 在「本来就没有排队关机」时报错，界面就拿走一条
+  // 「系统拒绝执行关机命令」—— 用户刚点了取消，1 秒后看到红字报错。
+  if (kind === 'cancel') {
+    logLine('[power] 取消关机命令未生效（多半是没有排队中的关机）: ' + (err.message || String(err)))
+    return
+  }
   logLine('[power] shutdown 命令失败 ' + (err.message || String(err)))
   systemShutdownPending = false
   if (systemShutdownTimer) { clearTimeout(systemShutdownTimer); systemShutdownTimer = null }
@@ -831,11 +838,18 @@ function onShutdownDone(err, kind) {
 function cancelPowerAction() {
   // v3.3.13：15 秒反悔窗口结束后系统关机还有 30 秒可取消，两种状态都要能取消
   if (!powerPending && !systemShutdownPending) return false
+  // v3.3.20：只有真的发出过 shutdown /s /t 才需要 /a。
+  // 以前无条件调 `shutdown /a`，没有排队中的关机时它必然失败，失败回调
+  // 又走 onShutdownDone → 给界面推一条「系统拒绝执行关机命令」——
+  // 用户明明取消成功了，1 秒后又看到一条红色报错（本轮 P2）。
+  const needAbort = systemShutdownPending
   if (powerPending) { clearTimeout(powerPending); powerPending = null }
   if (systemShutdownTimer) { clearTimeout(systemShutdownTimer); systemShutdownTimer = null }
   systemShutdownPending = false
   // 第四轮 §4.2 #5：直接传 onShutdownDone 会把 (err, stdout, stderr) 里的 stdout 当 kind
-  try { execFile('shutdown', ['/a'], (err) => onShutdownDone(err, 'shutdown')) } catch (err) { logLine('[power] 取消执行失败 ' + err.message) }
+  if (needAbort) {
+    try { execFile('shutdown', ['/a'], (err) => onShutdownDone(err, 'cancel')) } catch (err) { logLine('[power] 取消执行失败 ' + err.message) }
+  }
   logLine('[power] 已取消')
   refreshTrayMenu()   // v3.3.9：不然「⚠ 取消关机」菜单项一直残留
   sendToRenderer('power-action', { kind: null })
@@ -1162,7 +1176,13 @@ function registerShortcuts() {
 let lastOpenFiles = null
 
 function sendToRenderer(channel, payload) {
-  if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
+  // v3.3.20：isDestroyed() 为 false 时 webContents 仍可能已经被销毁（窗口正在关，
+  // 两个状态不同步），那时 .send() 会抛 "Object has been destroyed" —— 调用点大多在
+  // 异步回调里，抛出去就是一次 uncaughtException。两道都判。
+  if (!win || win.isDestroyed()) return
+  const wc = win.webContents
+  if (!wc || (typeof wc.isDestroyed === 'function' && wc.isDestroyed())) return
+  wc.send(channel, payload)
 }
 
 /** 只盯当前这首的 lrc：外面改了立刻通知渲染层重读，切歌时自动换监听 */
@@ -1395,7 +1415,11 @@ function mpvExePath() {
 
 function onMpvEvent(evt) {
   // 独占打不开（设备不支持该格式/被别的程序独占）→ 自动回退共享一次并告知界面
-  if (evt.type === 'file-error' && mpvEngine && mpvEngine.exclusive && !mpvEngine.fellBack) {
+  // v3.3.20：只有 mpv 判定为「AO 打不开」时才回退共享。
+  // 以前只要有 fellBack=false 就回退 —— 一个坏文件（404 / 不支持的编码）就能让整个
+  // 会话永久降到共享输出，后面所有歌都不再位完美，用户只能重启。
+  // 判定交给 mpv.js：本引擎从没成功开出过 AO，且错误详情里有设备类关键词。
+  if (evt.type === 'file-error' && evt.aoFailed && mpvEngine && mpvEngine.exclusive && !mpvEngine.fellBack) {
     mpvEngine.fellBack = true
     logLine('[mpv] 独占输出失败，回退共享：' + (evt.message || ''))
     pushMpvLog('warn', '独占输出失败，回退共享：' + (evt.message || ''))
@@ -1458,7 +1482,12 @@ async function ensureMpv(exclusive, opts = {}) {
     if (opts.forceMode && mpvEngine.exclusive !== wantExclusive) {
       pushMpvLog('info', '引擎模式与请求不一致（当前 ' + (mpvEngine.exclusive ? '独占' : '共享') + '），重启为' + (wantExclusive ? '独占' : '共享'))
       const r = await mpvEngine.restart({ exclusive: wantExclusive, audioDevice, volume: startVolume })
-      if (r.ok) startDeviceWatch()
+      if (r.ok) {
+        // v3.3.20：重启成功就是一次全新的独占尝试，回退标记必须清掉，
+        // 否则用户「关掉再打开独占」也换不回可回退状态（标记永不复位）
+        if (wantExclusive) mpvEngine.fellBack = false
+        startDeviceWatch()
+      }
       return r
     }
     return { ok: true, exclusive: mpvEngine.exclusive }
@@ -1471,7 +1500,12 @@ async function ensureMpv(exclusive, opts = {}) {
   pushMpvLog(r.ok ? 'info' : 'error',
     '启动结果：' + (r.ok ? 'ok' : '失败 ' + (r.error || '')) + ' exe=' + mpvExePath())
   // 独占流跑起来之后才开始盯设备（共享模式下 mpv 自己会跟系统默认设备走）
-  if (r.ok && wantExclusive) startDeviceWatch()
+  if (r.ok && wantExclusive) {
+    // v3.3.20：重启/重新开启成功后清除回退标记 —— 否则一次 file-error 回退过，
+    // 之后即使重启回独占，这段代码也不会再走回退分支（标记永不复位）
+    mpvEngine.fellBack = false
+    startDeviceWatch()
+  }
   return r
 }
 
@@ -1824,7 +1858,23 @@ function registerLibraryIpc() {
     if (library.scanning || activeScan) {
       return { skipped: true, added: 0, updated: 0, removed: 0, failed: 0, total: library.list().length }
     }
-    const targetDirs = Array.isArray(dirs) && dirs.length ? dirs : store.get().settings.musicDirs
+    // v3.3.20：入参必须与 settings:patch 走同一把尺子。以前直接把渲染层传来的
+    // dirs 交给 library.scan，任何目录都能被索引（越权读到文件名），
+    // 而不在白名单里的根扫出来的曲目又播不了 —— 用户只看到「有歌名但放不出来」。
+    // 全部被拒时不能退化成空扫描（空扫描会走清理阶段把曲目删光），直接报错。
+    // 而且必须与 settings.musicDirs **求交集**：只做形状校验的话，路径照样能被索引，
+    // 但扫出来的曲目过不了 isAllowedMediaPath —— 用户看到「有歌名、点了放不出来」。
+    const fallbackDirs = store.get().settings.musicDirs
+    const allowed = new Set((Array.isArray(fallbackDirs) ? fallbackDirs : [])
+      .filter((d) => typeof d === 'string' && isSafeMediaRoot(d))
+      .map((d) => path.resolve(fixDriveRoot(d)).toLowerCase()))
+    const rawDirs = Array.isArray(dirs) && dirs.length ? dirs : fallbackDirs
+    const targetDirs = (Array.isArray(rawDirs) ? rawDirs : [])
+      .filter((d) => typeof d === 'string' && isSafeMediaRoot(d)
+        && allowed.has(path.resolve(fixDriveRoot(d)).toLowerCase()))
+    if (!targetDirs.length) {
+      return { ok: false, error: '没有可用的音乐目录（路径不在允许范围内）', added: 0, updated: 0, removed: 0, failed: 0, total: library.list().length }
+    }
     const sender = event.sender
     const run = library.scan(targetDirs, (p) => {
       if (!sender.isDestroyed()) {
@@ -2607,6 +2657,16 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
       else if (win) win.show()
     })
+  }).catch((err) => {
+    // v3.3.20：启动链任何一步抛错（store/library 初始化、registerIpc、createWindow）
+    // 以前都是一个没人接的 rejection —— 界面永远不出现，用户只看到「双击没反应」，
+    // 连日志都不知道去哪找。这里至少给出可见提示再退出。
+    try { logLine('FATAL 启动失败: ' + ((err && err.stack) || err)) } catch (e) { /* 忽略 */ }
+    try {
+      const { dialog } = require('electron')
+      dialog.showErrorBox('启动失败', '播放器初始化出错，无法打开窗口。\n\n' + String((err && err.message) || err))
+    } catch (e) { /* 无 GUI 环境 */ }
+    app.exit(1)
   })
 
   // v2.8.9：托盘「退出」的最后一次窗口 bounds patch 发生在窗口 close 事件里
