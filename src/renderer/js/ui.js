@@ -28,6 +28,13 @@ const UI = {
       'btnHifi', 'hifiBadge'
     ]
     for (const id of ids) this.els[id] = document.getElementById(id)
+    // v3.3.20：CSP 是 script-src 'self'，内联 onerror 全被拦掉，封面读不出来时
+    // 只能靠这里收掉裂图。img 的 error 事件不冒泡，必须用捕获阶段的委托。
+    document.addEventListener('error', (e) => {
+      const t = e.target
+      if (!t || t.tagName !== 'IMG') return
+      t.remove()
+    }, true)
     return this.els
   },
 
@@ -76,7 +83,7 @@ const UI = {
     this.els.vhTitle.textContent = title
     this.els.vhSub.textContent = sub
     if (cover) {
-      this.els.vhCover.innerHTML = `<img src="${esc(cover)}" alt="" onerror="this.remove()" />`
+      this.els.vhCover.innerHTML = `<img src="${esc(cover)}" alt="" />`
     } else {
       this.els.vhCover.innerHTML = icon(isAlbum ? 'album' : 'music')
     }
@@ -200,7 +207,7 @@ const UI = {
    * 无封面时退回音符图标；<img> 带 onerror 自清，避免裂图占位。
    */
   _setCovers(cover) {
-    const html = cover ? `<img src="${esc(cover)}" alt="" onerror="this.remove()" />` : icon('music')
+    const html = cover ? `<img src="${esc(cover)}" alt="" />` : icon('music')
     this.els.pbCover.innerHTML = html
     this.els.lpCover.innerHTML = html
     this.els.mvCover.innerHTML = html
@@ -584,7 +591,7 @@ const UI = {
     grid.className = 'album-grid'
     grid.innerHTML = cards.map((c) => `
       <div class="album-card" data-${dataKey}="${esc(c.value)}"${dataKey === 'dir' ? ` title="${esc(c.value)}"` : ''}>
-        <div class="ac-cover">${c.cover ? `<img src="${esc(c.cover)}" alt="" onerror="this.remove()" />` : icon(c.icon)}</div>
+        <div class="ac-cover">${c.cover ? `<img src="${esc(c.cover)}" alt="" />` : icon(c.icon)}</div>
         <div class="ac-name">${esc(c.name)}</div>
         <div class="ac-sub">${c.sub}</div>
       </div>`).join('')
@@ -620,6 +627,11 @@ const UI = {
 
   showContextMenu(x, y, items) {
     const menu = this.els.ctxMenu
+    // v3.3.20：覆盖 _ctxCleanup 之前必须先摘掉上一轮挂在 document/window 上的监听。
+    // 有些路径不会走 hideContextMenu（比如多选工具条的按钮带 stopPropagation），
+    // 旧 handler 留在 document 上，同一次点击会把动作跑两遍 —— 加入歌单重复添加、
+    // 收藏被切两次等于没收藏。这里在 menu.hidden=false 之前调用，不影响本次显示。
+    if (this._ctxCleanup) { const prev = this._ctxCleanup; this._ctxCleanup = null; prev() }
     const build = (list) => list.map((it) => {
       if (it.sep) return '<div class="ctx-sep"></div>'
       if (it.sub && it.sub.length) {
