@@ -34,6 +34,7 @@ v2.8.16 的 4 条 P1 就是这么漏过全部既有验证的：
   2 = 参数错误
 """
 import io
+import os
 import re
 import sys
 
@@ -125,6 +126,7 @@ def strip_noise(src):
             continue
         if c in '\'"':
             q = c
+            out.append(' ')          # v3.3.24：开引号位也要占位（等长性——行号/掩码对齐依赖它）
             i += 1
             start = i
             while i < n:
@@ -135,6 +137,8 @@ def strip_noise(src):
                     break
                 i += 1
             out.append(blank(src[start:min(i, n)]))
+            if i < n:
+                out.append(' ')      # 结束引号位
             i += 1
             prev = q
             word = ''
@@ -147,6 +151,7 @@ def strip_noise(src):
             i += 1
             continue
         if c == '/' and (prev in REGEX_PREV_OK or prev == '' or word in REGEX_KEYWORD_PREV):
+            out.append(' ')          # v3.3.24：开斜杠占位（等长性）
             i += 1
             start = i
             in_class = False
@@ -165,6 +170,8 @@ def strip_noise(src):
                     break
                 i += 1
             out.append(' ' * (i - start))
+            if i < n:
+                out.append(' ')      # 结束斜杠占位
             i += 1
             while i < n and (src[i].isalnum() or src[i] == '_'):
                 out.append(' ')
@@ -267,6 +274,17 @@ def decls(src):
         d |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*(?=[,=)]|$)', m.group(1)))
     d |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*=>', s))
     d |= set(re.findall(r'\bcatch\s*\(\s*([A-Za-z_$][\w$]*)', s))
+    # v3.3.24：for-of / for-in 的循环变量（含解构形式）也是声明。
+    # 以前 `for (const f of ...)` 的 f 会被当成「引用了未声明的外部名」——
+    # 单标识符场景误报一遍，重构脚本按依赖注入时还会把正则字面量外的 f 全改坏。
+    for m in re.finditer(r'\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+(?:of|in)\b', s):
+        d.add(m.group(1))
+    for m in re.finditer(r'\bfor\s*\(\s*(?:const|let|var)\s*(\{[^}]*\}|\[[^\]]*\])\s+(?:of|in)\b', s):
+        inner = m.group(1)[1:-1]
+        for sub in inner.split(','):
+            nm = sub.split(':')[-1].split('=')[0].strip()
+            if re.match(r'^[A-Za-z_$][\w$]*$', nm):
+                d.add(nm)
     return s, d
 
 
@@ -321,6 +339,23 @@ def selftest():
     return 0 if not bad else 1
 
 
+def collect_sources(p):
+    """--base/--target 支持单文件或目录（目录 = 其下全部 .js 文件按文件名序拼接）。
+
+    v3.3.24：模块拆分后一个分支的「声明全集」分散在多个文件里，
+    单文件对比会漏判（比如 main.js 引用了、声明搬去了 protocols.js）。
+    多文件拼接时插 `;` 分隔行，防止上一文件结尾与下一文件开头粘连成新语法。
+    渲染层是全局 script 模式（跨文件裸引用），多文件合并扫描正是它需要的口径；
+    主进程是 CommonJS（跨模块走 require 属性访问，不参与裸引用扫描），同样兼容。
+    """
+    if os.path.isdir(p):
+        files = [os.path.join(p, f) for f in sorted(os.listdir(p)) if f.endswith('.js')]
+        if not files:
+            raise SystemExit('目录里没有 .js 文件: %s' % p)
+        return '\n;\n'.join(read(f) for f in files)
+    return read(p)
+
+
 def main(argv):
     if len(argv) >= 2 and argv[1] == '--selftest':
         return selftest()
@@ -337,8 +372,8 @@ def main(argv):
             print('  ' + c)
         return 0
     base, target = argv[2], argv[3]
-    s_b, d_b = decls(read(base))
-    s_t, d_t = decls(read(target))
+    s_b, d_b = decls(collect_sources(base))
+    s_t, d_t = decls(collect_sources(target))
     hits = sorted(refs(s_t) & (d_b - d_t))
     print('== %s 引用了、基准有声明、自身无声明: %d 个 ==' % (target, len(hits)))
     lines = s_t.split('\n')

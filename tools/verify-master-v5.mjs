@@ -32,11 +32,14 @@ for (const f of ['pack-one.sh', 'install-one.sh']) {
 
 console.log('\n=== 2) 主进程：适用修复都在 ===')
 const m = R('src/main/main.js')
+// v3.3.24 拆分后：白名单/lxfile 协议在 protocols.js，fallback 载荷在 mpv-manager.js
+const protoM = R('src/main/protocols.js')
+const mpvmM = R('src/main/mpv-manager.js')
 ok('P0 mpv:stop 改调 reset()', /'mpv:stop'[^\n]*reset\(\)/.test(m))
-ok('fallback 载荷带 exclusive:false', /type: 'fallback'[^\n]*exclusive: false/.test(m))
+ok('fallback 载荷带 exclusive:false', /type: 'fallback'[^\n]*exclusive: false/.test(mpvmM))
 ok('白名单盘符 D: 归一化', /fixDriveRoot|\[A-Za-z\]:/.test(m))
-ok('白名单 realpath 防 junction', /realpathSync\.native|realpathCached/.test(m))
-ok('lxfile Range 全文锚定', /\^bytes=\\d\*-\\d\*\(,/.test(m))
+ok('白名单 realpath 防 junction', /realpathSync\.native|realpathCached/.test(protoM))
+ok('lxfile Range 全文锚定', /\^bytes=\\d\*-\\d\*\(,/.test(protoM))
 ok('settings:patch 值校验', /sanitizeSettingsPatch/.test(m))
 ok('dlyric:cfg 复用过滤', /sanitizeSettingsPatch[\s\S]{0,2000}dlyric:cfg|dlyric:cfg[\s\S]{0,400}sanitizeSettingsPatch/.test(m))
 ok('lib:scan 处理 skipped', /res\.skipped|\.skipped/.test(m))
@@ -65,6 +68,9 @@ for (const [n, p] of [
 
 console.log('\n=== 4) 渲染层 ===')
 const a = R('src/renderer/js/app.js')
+// v3.3.24 渲染层拆分后：回包增量在 persist.js、onScanDone 在 scan.js
+const perM = R('src/renderer/js/persist.js')
+const scanM = R('src/renderer/js/scan.js')
 const p = R('src/renderer/js/player.js')
 const u = R('src/renderer/js/ui.js')
 ok('连续失败计数', /consecutiveFails/.test(a))
@@ -76,10 +82,10 @@ ok('fallback 置 exclusiveFellBack 而非 exclusive=false',
     /state\.exclusiveFellBack\s*=\s*true/.test(a) &&
     !/function applyExclusiveFallback[\s\S]{0,800}?state\.exclusive\s*=\s*false/.test(a))
 // v3.3.18（第四轮 §4.3 #4）：回包只同步本次 patch 涉及的键，不再整份 Object.assign
-ok('settings 回包按键增量同步', /for \(const k of Object\.keys\(patch\)\)/.test(a) &&
-  !/Object\.assign\(state\.settings, s\)/.test(a))
+ok('settings 回包按键增量同步', /for \(const k of Object\.keys\(patch\)\)/.test(perM) &&
+  !/Object\.assign\(state\.settings, s\)/.test(perM))
 ok('响度预跳过独立计数', /preSkipped/.test(a))
-ok('onScanDone 对象引用', /kept\.indexOf\(curTrack\)/.test(a))
+ok('onScanDone 对象引用', /kept\.indexOf\(curTrack\)/.test(scanM))
 ok('btnMax 意图 token', /maxIntent/.test(a))
 ok('player.skipToNext 已定义', /skipToNext\s*\(/.test(p))
 ok('player.next 支持 fromError', /fromError/.test(p))
