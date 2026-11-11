@@ -93,6 +93,15 @@ const Theme = (() => {
     } catch { /* 取色失败静默：主题色是纯装饰 */ }
   }
 
+  /** v2.8.26（追加清单 #5）：给右键主菜单用的主题色子菜单项（标当前项） */
+  function menuItems() {
+    const cur = currentKey()
+    return PRESETS.map((p) => ({
+      label: (p.key === cur ? '● ' : '○ ') + p.label,
+      act: 'theme-set', arg: p.key
+    }))
+  }
+
   function init() {
     const logo = document.getElementById('logo')
     if (logo) {
@@ -121,5 +130,5 @@ const Theme = (() => {
 
   init()
 
-  return { apply, onTrack, applyVars }
+  return { apply, onTrack, applyVars, menuItems }
 })()

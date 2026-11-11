@@ -1215,6 +1215,12 @@ function bindWindowUi() {
     if (max == null) return
     document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
   })
+  // v2.8.26：主进程事件推送最大化状态（含外部贴边最大化/快速连点兜底）
+  if (window.api.onMaxState) {
+    window.api.onMaxState((max) => {
+      document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
+    })
+  }
   document.getElementById('btnClose').addEventListener('click', async () => {
     // 第四轮 §4.3（退出链）：必须串行等待 —— 以前发完 flush 立刻关窗，
     // 最后 300ms 内的设置改动（去抖未落盘的那批）直接丢掉

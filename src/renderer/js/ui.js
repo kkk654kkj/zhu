@@ -164,6 +164,10 @@ const UI = {
       // error 捕获委托统一摘除，占位块天然兜底。
       const cv = `<span class="cv-mini">${t.cover ? `<img src="${esc(t.cover)}" loading="lazy" alt="" />` : ''}</span>`
       const eq = isCur ? '<span class="eq-bars"><i></i><i></i><i></i></span>' : ''
+      // v2.8.26（追加清单 #7）：行内快捷钮（收藏/加入歌单），hover 浮现，覆盖在时长列上；
+      // 点击走 tableBody 的委托（bindTrackListUi），复用右键菜单的动作管道
+      const favOn = ctx.favorites && ctx.favorites.has(t.id) ? ' on' : ''
+      const acts = `<span class="row-acts"><button class="row-act${favOn}" data-act="fav" title="${favOn ? '取消收藏' : '加入收藏'}">${icon('heart')}</button><button class="row-act" data-act="addpl" title="加入歌单">${icon('plus')}</button></span>`
       rows[i - start] = `<div class="tr${isCur ? ' playing' : ''}${isSel ? ' selected' : ''}" data-id="${esc(t.id)}" data-index="${i}">
           <div class="c-idx">
             <span class="num" draggable="true" title="拖到左侧歌单可加入歌单">${i + 1}</span>
@@ -180,6 +184,7 @@ const UI = {
           <div class="c-fmt"><span class="badge${t.lossless ? ' lossless' : ''}">${esc(t.ext || '')}</span></div>
           <div class="c-q${isHires(t) ? ' hires' : ''}" title="${esc(qualityTitle(t))}">${esc(fmtQuality(t))}</div>
           <div class="c-dur">${fmtDuration(t.duration)}</div>
+          ${acts}
         </div>`
     }
     // 占位 div 不带 class，closest('.tr') 查不到，点空白走原有 clearSelection 分支
@@ -272,6 +277,14 @@ const UI = {
     this.els.mvCover.innerHTML = html
     // v2.8.25：全屏播放页第四处镜像
     if (this.els.fsCover) this.els.fsCover.innerHTML = html
+    // v2.8.26（追加清单 #4/#6）：全屏页与迷你卡片的模糊封面背景。
+    // URL 里的引号转掉（lxfile 是百分号编码不会出现，https 封面可能有）。
+    if (this.els.fsView || document.getElementById('miniView')) {
+      const bg = cover ? `url("${cover.replace(/"/g, '%22')}")` : 'none'
+      if (this.els.fsView) this.els.fsView.style.setProperty('--fs-bg', bg)
+      const mv = document.getElementById('miniView')
+      if (mv) mv.style.setProperty('--mv-bg', bg)
+    }
   },
 
   /** 换按钮内的 svg 图标（主播放条与迷你卡片共用，名字需含 i- 前缀） */
@@ -597,9 +610,16 @@ const UI = {
       box.innerHTML = '<div class="lyric-empty">暂无歌词</div>'
       return
     }
-    box.innerHTML = parsed.lines.map((l, i) =>
-      `<div class="lyric-line${this.lyricState.plain ? ' plain' : ''}" data-i="${i}">${esc(l.text || '♪')}</div>`
-    ).join('')
+    // v3.3.27（追加清单 #2）：逐字行渲染成 .kw 词片段（updateLyricIndex 做词级染色）；
+    // 普通整句行保持原样（降级路径，样式不变）
+    box.innerHTML = parsed.lines.map((l, i) => {
+      if (l.words && l.words.length) {
+        return `<div class="lyric-line${this.lyricState.plain ? ' plain' : ''}" data-i="${i}">` +
+          l.words.map((w) => `<span class="kw">${esc(w.text)}</span>`).join('') +
+          `</div>`
+      }
+      return `<div class="lyric-line${this.lyricState.plain ? ' plain' : ''}" data-i="${i}">${esc(l.text || '♪')}</div>`
+    }).join('')
     box.scrollTop = 0
   },
 
@@ -616,6 +636,18 @@ const UI = {
     // 这里只改「上一行 + 当前行」两处
     if (prevIdx >= 0 && nodes[prevIdx]) nodes[prevIdx].classList.remove('active')
     if (idx >= 0 && nodes[idx]) nodes[idx].classList.add('active')
+    // v3.3.27（追加清单 #2）：逐字行做词级染色（只在活动行内，词数 ≤ 20，开销可忽略）；
+    // 整句行走原路径。curSec 已含歌词偏移，与行时间轴同源。
+    if (idx >= 0 && nodes[idx]) {
+      const words = st.lines[idx] && st.lines[idx].words
+      if (words && words.length) {
+        const kws = nodes[idx].querySelectorAll('.kw')
+        for (let i = 0; i < kws.length; i++) {
+          if (!words[i]) break
+          kws[i].classList.toggle('done', curSec >= words[i].t)
+        }
+      }
+    }
     // 迷你卡片只显示当前一句（没到第一句时留空，CSS 会隐藏这一行）
     const cur = idx >= 0 && st.lines[idx] ? st.lines[idx].text : ''
     if (this.els.mvLyric.textContent !== cur) this.els.mvLyric.textContent = cur
