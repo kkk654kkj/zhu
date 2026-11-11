@@ -59,6 +59,8 @@ contextBridge.exposeInMainWorld('api', {
   addHistory: (trackId) => invoke('history:add', trackId),
   getPlayCounts: () => invoke('playcount:get'),
   incPlayCount: (trackId) => invoke('playcount:inc', trackId),
+  /** v2.8.25 UI 美化：取本地内嵌封面主色（主题色=跟随封面）→ '#rrggbb' | null */
+  accentForTrack: (trackId) => invoke('ui:accentForTrack', trackId),
   getSession: () => invoke('session:get'),
   setSession: (s) => invoke('session:set', s),
 

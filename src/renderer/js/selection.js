@@ -46,7 +46,11 @@ function selectedTracks() {
 function applySettings() {
   const s = state.settings
   if (s.lyricFontSize) UI.setLyricFontSize(s.lyricFontSize)
-  if (s.accent) document.documentElement.style.setProperty('--accent', s.accent)
+  // v2.8.25：主题色统一走 Theme（支持预设名 / auto / 裸 hex 三种存量值）
+  if (s.accent) {
+    if (typeof Theme !== 'undefined') Theme.apply(s.accent, false)
+    else document.documentElement.style.setProperty('--accent', s.accent)
+  }
   player && player.setFadeMs(s.fadeMs ?? 350)
 }
 

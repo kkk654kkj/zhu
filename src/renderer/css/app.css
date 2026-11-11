@@ -39,6 +39,26 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* v2.8.25 UI 美化：跟随主题色的环境光晕（B 方案的低风险版本）。
+   纯装饰层：fixed 铺底、pointer-events none、不参与布局；
+   颜色全部走 --accent 变量 —— 预设色/封面取色改了变量这里自动跟着变。 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(52% 38% at 22% -6%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 70%),
+    radial-gradient(44% 34% at 82% 108%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 70%);
+}
+#titlebar, #app, #playerbar { position: relative; z-index: 1; }
+
+/* v2.8.25 主题色预设（accent=auto 时由 theme.js 直接写变量，不走这里） */
+html[data-accent="cyan"]   { --accent: #22b8cf; --accent-soft: rgba(34,184,207,.13); --accent-dim: #1b93a6; }
+html[data-accent="purple"] { --accent: #a78bfa; --accent-soft: rgba(167,139,250,.13); --accent-dim: #7c5fd3; }
+html[data-accent="orange"] { --accent: #f59e42; --accent-soft: rgba(245,158,66,.14); --accent-dim: #c97f2b; }
+
 svg { width: 16px; height: 16px; fill: currentColor; display: block; }
 
 button {
@@ -160,9 +180,13 @@ input { font: inherit; color: inherit; }
 }
 
 /* ================= 布局 ================= */
+/* v2.8.25 UI 美化（C 方案）：侧边栏与内容区改为两块悬浮圆角面板，
+   窗口底色做衬。#app 自身上下留白，总高度预算同步扣掉顶部 10px。 */
 #app {
-  height: calc(100% - var(--tb-h) - var(--pb-h));
+  height: calc(100% - var(--tb-h) - var(--pb-h) - 20px);
   display: flex;
+  gap: 10px;
+  padding: 10px 10px 0;
   overflow: hidden;
 }
 
@@ -170,11 +194,13 @@ input { font: inherit; color: inherit; }
 #sidebar {
   width: var(--side-w);
   flex: 0 0 var(--side-w);
-  background: var(--bg-deep);
-  border-right: 1px solid var(--line-soft);
+  background: var(--bg-panel);
+  border-right: none;
+  border-radius: 12px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  box-shadow: 0 2px 14px rgba(0,0,0,.28);
 }
 
 .nav-group { padding: 12px 8px 4px; }
@@ -259,8 +285,10 @@ input { font: inherit; color: inherit; }
   display: flex;
   flex-direction: column;
   background: var(--bg-main);
+  border-radius: 12px;
   position: relative;
   overflow: hidden;
+  box-shadow: 0 2px 14px rgba(0,0,0,.28);
 }
 
 .view-header {
@@ -347,17 +375,26 @@ input { font: inherit; color: inherit; }
   padding-bottom: 12px;
 }
 
+/* v2.8.25 UI 美化（C 方案）：行卡片化。
+   注意：虚拟滚动按 40px 等高计算可视窗口，行垂直方向不能有任何 margin ——
+   卡片感只靠背景/圆角/阴影表达。 */
 .tr {
   height: 40px;
   font-size: 12.5px;
   color: var(--txt-2);
-  border-radius: 6px;
-  margin: 0 12px;
+  border-radius: 10px;
+  margin: 0 14px;
   padding: 0 12px;
   cursor: default;
+  background: #1a1f27;
   grid-template-columns: 38px minmax(150px, 1.5fr) minmax(90px, 1fr) minmax(80px, 1fr) 74px 88px 64px;
+  transition: background .12s, transform .12s, box-shadow .12s;
 }
-.tr:hover { background: var(--bg-hover); }
+.tr:hover {
+  background: var(--bg-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,.3);
+}
 .tr.playing { background: var(--accent-soft); }
 .tr.playing .c-title .tt { color: var(--accent); }
 .tr.current-source { background: rgba(49,194,124,.06); }
@@ -367,6 +404,8 @@ input { font: inherit; color: inherit; }
   box-shadow: inset 2px 0 0 var(--accent);
 }
 .tr.selected .c-title .tt { color: var(--txt); }
+/* v2.8.25：正在播放行加同色细色带（选中态的带子优先级更高，二者同现时选中赢） */
+.tr.playing:not(.selected) { box-shadow: inset 2px 0 0 var(--accent); }
 
 .tr .c-idx {
   position: relative;
@@ -411,6 +450,44 @@ input { font: inherit; color: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* v2.8.25 UI 美化（C 方案）：行内专辑小封面。26px 内嵌在 40px 行高里，
+   不改变行高（虚拟滚动不变量）；无封面时只有一个渐变占位块。 */
+.cv-mini {
+  width: 26px; height: 26px;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  overflow: hidden;
+  background: linear-gradient(140deg, #232b36, #161b22);
+  display: grid; place-items: center;
+}
+.cv-mini img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* v2.8.25 UI 美化（A 方案）：正在播放行的「均衡器跳动」小动画，
+   渲染在标题前，一眼可辨当前曲。 */
+.eq-bars {
+  display: inline-flex;
+  gap: 2px;
+  align-items: flex-end;
+  height: 12px;
+  flex: 0 0 auto;
+}
+.eq-bars i {
+  width: 3px;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: eqjump 1s ease-in-out infinite;
+  transform-origin: bottom;
+}
+.eq-bars i:nth-child(1) { height: 6px; animation-delay: 0s; }
+.eq-bars i:nth-child(2) { height: 11px; animation-delay: .25s; }
+.eq-bars i:nth-child(3) { height: 8px; animation-delay: .5s; }
+@keyframes eqjump {
+  0%, 100% { transform: scaleY(.45); }
+  50% { transform: scaleY(1); }
+}
+/* 暂停时不跳 */
+.tr.paused .eq-bars i { animation-play-state: paused; }
 .tr .c-fmt, .tr .c-dur { text-align: center; font-size: 11.5px; color: var(--txt-3); font-variant-numeric: tabular-nums; }
 /* 音质列（v1.9）：16/44.1 这种紧凑写法；hires 用亮一点的颜色挑出来 */
 .tr .c-q {
@@ -576,15 +653,20 @@ input { font: inherit; color: inherit; }
 .lp-offset { font-size: 11px; color: var(--txt-3); min-width: 38px; text-align: center; font-variant-numeric: tabular-nums; }
 
 /* ================= 播放条 ================= */
+/* v2.8.25 UI 美化（C 方案）：播放条与上方面板同宽同圆角，浮成一张卡片。
+   高度预算：标题栏 38 + #app(calc 里已扣 20) + 上边距 10 + 本体 84 + 下边距 10 = 100% */
 #playerbar {
   height: var(--pb-h);
+  margin: 0 10px 10px;
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(400px, 1.6fr) minmax(160px, 1fr);
   align-items: center;
   gap: 16px;
   padding: 0 20px;
-  background: var(--bg-bar);
-  border-top: 1px solid var(--line-soft);
+  background: var(--bg-panel);
+  border-radius: 12px;
+  border-top: none;
+  box-shadow: 0 2px 14px rgba(0,0,0,.28);
   position: relative;
   z-index: 25;
 }
@@ -599,7 +681,12 @@ input { font: inherit; color: inherit; }
   background: linear-gradient(140deg, #1f2833, #14181e);
   color: var(--txt-3);
   overflow: hidden;
+  /* v2.8.25：点击展开全屏播放页（fullscreen.js 接线） */
+  cursor: pointer;
+  transition: transform .14s, box-shadow .14s;
 }
+.pb-cover:hover { transform: scale(1.05); box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+.pb-cover:active { transform: scale(.97); }
 .pb-cover svg { width: 20px; height: 20px; }
 .pb-cover img { width: 100%; height: 100%; object-fit: cover; }
 
@@ -667,7 +754,9 @@ input { font: inherit; color: inherit; }
   height: 3px;
   border-radius: 2px;
   background: #2a303a;
+  transition: height .12s;
 }
+.bar:hover::before { height: 5px; }
 .bar .fill {
   position: absolute;
   left: 0;
@@ -676,7 +765,9 @@ input { font: inherit; color: inherit; }
   border-radius: 2px;
   background: var(--accent);
   pointer-events: none;
+  transition: height .12s;
 }
+.bar:hover .fill { height: 5px; }
 .bar .dot {
   position: absolute;
   width: 9px; height: 9px;
@@ -2054,3 +2145,119 @@ body.mini .hifi-badge { display: none; }
   cursor: pointer;
 }
 .dl-acts button:hover { color: var(--txt); border-color: var(--accent); }
+
+/* ================= 全屏播放页（v2.8.25 UI 美化，方案 C 附） =================
+   点播放条封面展开 / Esc 或再点收起。只是一个 fixed 覆盖层 + 显隐动画，
+   不碰播放逻辑；所有状态（封面/标题/进度/歌词单行/按钮图标）由 ui.js 的
+   同一批更新点镜像写入，与播放条/迷你卡片完全同源。 */
+#fsView {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  padding: 26px 40px 30px;
+  background:
+    radial-gradient(90% 70% at 50% -10%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 65%),
+    var(--bg-deep);
+  opacity: 0;
+  transform: scale(1.03);
+  transition: opacity .2s ease, transform .2s ease;
+  pointer-events: none;
+}
+#fsView.open {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+}
+/* 迷你模式下强制不可见（切换迷你时全屏层若开着会被压在下面） */
+body.mini #fsView { display: none; }
+
+.fs-head {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--txt-3);
+  font-size: 12px;
+  -webkit-app-region: drag;
+}
+.fs-head .mini-btn { -webkit-app-region: no-drag; }
+
+.fs-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 64px;
+  padding: 12px 0;
+}
+.fs-cover {
+  width: min(248px, calc(100vh - 320px), calc(50vw - 80px));
+  height: min(248px, calc(100vh - 320px));
+  flex: 0 0 auto;
+  border-radius: 18px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(140deg, #1f2833, #14181e);
+  color: var(--txt-3);
+  box-shadow: 0 26px 70px rgba(0,0,0,.6), 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.fs-cover svg { width: 72px; height: 72px; }
+.fs-cover img { width: 100%; height: 100%; object-fit: cover; }
+
+.fs-meta {
+  width: min(420px, 44vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.fs-title {
+  font-size: 25px;
+  font-weight: 600;
+  color: var(--txt);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fs-artist { font-size: 13.5px; color: var(--txt-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fs-q {
+  display: inline-flex;
+  align-self: flex-start;
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 4px;
+  padding: 1px 7px;
+  letter-spacing: .3px;
+}
+.fs-q:empty { display: none; }
+.fs-lyric {
+  margin-top: 10px;
+  height: 58px;
+  display: flex;
+  align-items: center;
+  font-size: 16.5px;
+  line-height: 1.5;
+  color: var(--accent);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 60%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 60%, transparent 100%);
+}
+.fs-lyric:empty { visibility: hidden; }
+
+.fs-foot { flex: 0 0 auto; }
+.fs-prog { display: flex; align-items: center; gap: 10px; }
+.fs-prog .t { font-size: 10.5px; color: var(--txt-3); width: 40px; text-align: center; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.fs-ctrl {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  margin-top: 14px;
+}
+.fs-ctrl .icon-btn.play { width: 46px; height: 46px; box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 35%, transparent); }
+.fs-ctrl .icon-btn.play svg { width: 20px; height: 20px; }
