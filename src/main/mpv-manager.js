@@ -1,4 +1,7 @@
 'use strict'
+const path = require('path')
+const fs = require('fs')
+const { execFile } = require('child_process')
 /**
  * v3.3.24 模块拆分：从 main.js 原样搬出（只做 G. 前缀注入，不改逻辑）。
  * init(G) 注入 main 的共享状态访问器（getter，见 main.js 的 G 定义）。
@@ -391,25 +394,25 @@ function stopDeviceWatch() {
 
 module.exports = {
   init,
-  mpvEngine,
+  get mpvEngine() { return mpvEngine },
   MPV_LOG_MAX,
   mpvLogs,
-  mpvLogSeq,
+  get mpvLogSeq() { return mpvLogSeq },
   pushMpvLog,
   mpvExePath,
   onMpvEvent,
-  mpvReleasing,
+  get mpvReleasing() { return mpvReleasing },
   ensureMpv,
   releaseMpv,
   releaseMpvOnce,
   sweepOurMpv,
-  probeWavPath,
+  get probeWavPath() { return probeWavPath },
   ensureProbeWav,
   probeDeviceFree,
   stopMpv,
-  deviceWatchId,
-  lostDevice,
-  deviceWatchBusy,
+  get deviceWatchId() { return deviceWatchId },
+  get lostDevice() { return lostDevice },
+  get deviceWatchBusy() { return deviceWatchBusy },
   startDeviceWatch,
   stopDeviceWatch,
 }
