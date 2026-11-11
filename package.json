@@ -1,6 +1,6 @@
 {
   "name": "lx-player",
-  "version": "3.3.19",
+  "version": "3.3.20",
   "description": "猪专属播放器（本地音乐播放器，参考洛雪音乐助手）",
   "main": "src/main/main.js",
   "author": "local",
