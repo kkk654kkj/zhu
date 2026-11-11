@@ -580,9 +580,9 @@ function removePartFile(p, ps) {
 
 module.exports = {
   init,
-  streamServer,
-  streamBase,
-  streamReady,
+  get streamServer() { return streamServer },
+  get streamBase() { return streamBase },
+  get streamReady() { return streamReady },
   ensureStreamBase,
   parseRangeHeader,
   serveLocalFile,

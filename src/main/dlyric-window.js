@@ -1,4 +1,5 @@
 'use strict'
+const path = require('path')
 /**
  * v3.3.24 模块拆分：从 main.js 原样搬出（只做 G. 前缀注入，不改逻辑）。
  * init(G) 注入 main 的共享状态访问器（getter，见 main.js 的 G 定义）。
@@ -133,8 +134,9 @@ function closeLyricWindow() {
 
 module.exports = {
   init,
-  dlyricWin,
-  lastDlyricData,
+  get dlyricWin() { return dlyricWin },
+  get lastDlyricData() { return lastDlyricData },
+  set lastDlyricData(v) { lastDlyricData = v },
   dlyricCfg,
   sendToDlyric,
   replayDlyricState,
