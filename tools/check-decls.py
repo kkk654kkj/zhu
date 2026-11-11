@@ -46,6 +46,11 @@ JS_KEYWORDS = {
 }
 
 REGEX_PREV_OK = set('(,=:[!&|?{};+-*%~^<>')
+# 这些关键字后面出现的 `/` 是正则开头，不是除号（`return /kw/.test(s)`）
+REGEX_KEYWORD_PREV = {
+    'return', 'typeof', 'instanceof', 'case', 'in', 'of', 'new', 'delete',
+    'void', 'do', 'else', 'yield', 'await', 'throw',
+}
 IDENT_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$')
 
 
@@ -60,12 +65,53 @@ def strip_noise(src):
       注释 —— 后面紧跟 / 或 *（注释优先级最高，`a // b` 与中文注释都能正确识别）
       正则 —— 前一个有效字符属于 REGEX_PREV_OK（`=` `(` `,` `:` `return` 之后）
       除号 —— 其余（前面是标识符 / `)` / `]`）
+
+    v3.3.20：模板字符串的 `${ ... }` 插值内部按**代码**扫描，不再整体当字符串擦掉。
+    以前 `` `${SETTING_ARRAY_MAX}` `` 里的引用根本看不见 —— 而「常量搬了引用没搬声明」
+    正是本工具要拦的事故（v2.8.17），工具自己的盲区等于把门留了条缝。
     """
     out = []
     i, n = 0, len(src)
+    # 扫描栈：'code' = 代码区（顶层或 ${} 插值内部），'tpl' = 模板字面量文本区。
+    # 每个 interp 帧带花括号深度，用来判断插值从哪个 `}` 结束。
+    stack = [{'mode': 'code', 'depth': 0, 'interp': False}]
     prev = ''
+    word = ''
+
+    def blank(s):
+        return ''.join('\n' if ch == '\n' else ' ' for ch in s)
+
     while i < n:
+        top = stack[-1]
         c = src[i]
+
+        if top['mode'] == 'tpl':
+            if c == '\\':
+                j = min(i + 2, n)          # 转义序列整体抹掉，换行保留
+                out.append(blank(src[i:j]))
+                i = j
+                continue
+            if c == '`':
+                out.append(' ')
+                stack.pop()
+                prev = '`'
+                word = ''
+                i += 1
+                continue
+            if c == '$' and i + 1 < n and src[i + 1] == '{':
+                # 插值开始：`$` 抹掉、`{` 保留（让下层括号配平仍然可见）
+                out.append(' ')
+                out.append('{')
+                stack.append({'mode': 'code', 'depth': 1, 'interp': True})
+                prev = '{'
+                word = ''
+                i += 2
+                continue
+            out.append(blank(c))
+            i += 1
+            continue
+
+        # ---------------- code 模式 ----------------
         if c == '/' and i + 1 < n and src[i + 1] in '/*':
             if src[i + 1] == '/':
                 j = src.find('\n', i)
@@ -73,10 +119,11 @@ def strip_noise(src):
             else:
                 j = src.find('*/', i + 2)
                 j = n if j < 0 else j + 2
-            out.append(''.join('\n' if ch == '\n' else ' ' for ch in src[i:j]))
+            out.append(blank(src[i:j]))
             i = j
+            word = ''
             continue
-        if c in '\'"`':
+        if c in '\'"':
             q = c
             i += 1
             start = i
@@ -87,11 +134,19 @@ def strip_noise(src):
                 if src[i] == q:
                     break
                 i += 1
-            out.append(''.join('\n' if ch == '\n' else ' ' for ch in src[start:i]))
+            out.append(blank(src[start:min(i, n)]))
             i += 1
             prev = q
+            word = ''
             continue
-        if c == '/' and (prev in REGEX_PREV_OK or prev == ''):
+        if c == '`':
+            out.append(' ')
+            stack.append({'mode': 'tpl'})
+            prev = '`'
+            word = ''
+            i += 1
+            continue
+        if c == '/' and (prev in REGEX_PREV_OK or prev == '' or word in REGEX_KEYWORD_PREV):
             i += 1
             start = i
             in_class = False
@@ -115,10 +170,28 @@ def strip_noise(src):
                 out.append(' ')
                 i += 1
             prev = '/'
+            word = ''
             continue
+        if top['interp']:
+            if c == '{':
+                top['depth'] += 1
+            elif c == '}':
+                top['depth'] -= 1
+                if top['depth'] == 0:
+                    out.append(' ')
+                    stack.pop()
+                    prev = '}'
+                    word = ''
+                    i += 1
+                    continue
         out.append(c)
         if not c.isspace():
             prev = c
+        # 记住上一个标识符单词：`return /re/` 这种正则靠它才认得出来（空格不算分隔）
+        if c.isalnum() or c in '_$':
+            word += c
+        elif not c.isspace():
+            word = ''
         i += 1
     return ''.join(out)
 
@@ -198,9 +271,14 @@ def decls(src):
 
 
 def refs(s):
-    """裸标识符引用：排除属性访问（.x）、对象字面量键（x:）、关键字。"""
+    """裸标识符引用：排除属性访问（.x）、对象字面量键（x:）、关键字。
+
+    v3.3.20：不再要求标识符长度 ≥3。以前 `const fs` / `const kw` / `const wy` /
+    `const qq` / `const kg` / `const UA` / `const $` / `const $$` 这些 1~2 字符的
+    模块级声明**永远不参与扫描** —— 其中任何一个在移植时丢掉，本工具都查不出来。
+    """
     r = set()
-    for m in re.finditer(r'(?<![.\w$])([A-Za-z_$][\w$]{2,})', s):
+    for m in re.finditer(r'(?<![.\w$])([A-Za-z_$][\w$]*)', s):
         name = m.group(1)
         if name in JS_KEYWORDS:
             continue
@@ -210,7 +288,42 @@ def refs(s):
     return r
 
 
+def _diff(base_src, target_src):
+    """在同一份内存源码上做「基准有声明 / 目标无声明 / 目标有引用」的差集。"""
+    s_b, d_b = decls(base_src)
+    s_t, d_t = decls(target_src)
+    return sorted(refs(s_t) & (d_b - d_t))
+
+
+def selftest():
+    """扫描器自身的回归用例：这些盲区一旦复发，发布闸门就形同虚设。"""
+    base = 'const SETTING_ARRAY_MAX = 200\nconst fs = require("fs")\nconst kw = {}\n'
+    cases = [
+        # (说明, 目标源码, 期望命中)
+        ('裸引用', 'function f(){ return SETTING_ARRAY_MAX }\n', ['SETTING_ARRAY_MAX']),
+        ('模板插值内引用', 'function f(){ return `n=${SETTING_ARRAY_MAX}` }\n', ['SETTING_ARRAY_MAX']),
+        ('模板插值嵌套模板', 'function f(){ return `${`a${fs}`}b` }\n', ['fs']),
+        ('短标识符（2 字符）', 'function f(){ return kw }\n', ['kw']),
+        ('短标识符（2 字符·属性不误报）', 'function f(o){ return o.kw }\n', []),
+        ('字符串内引用', 'function f(){ return "SETTING_ARRAY_MAX" }\n', []),
+        ('单行注释内引用', 'function f(){ /* SETTING_ARRAY_MAX */ }\n', []),
+        ('块注释内引用', 'function f(){ return 1 }\n/* kw */\n', []),
+        ('正则字面量内引用', 'function f(s){ return /kw/.test(s) }\n', []),
+    ]
+    bad = 0
+    for name, target, expect in cases:
+        got = _diff(base, target)
+        ok = got == sorted(expect)
+        print(('  ✓ ' if ok else '  ✗ ') + name + ('' if ok else '  期望 %s / 实际 %s' % (expect, got)))
+        if not ok:
+            bad += 1
+    print('\n自检：%d/%d 通过' % (len(cases) - bad, len(cases)))
+    return 0 if not bad else 1
+
+
 def main(argv):
+    if len(argv) >= 2 and argv[1] == '--selftest':
+        return selftest()
     if len(argv) < 3:
         print(__doc__)
         return 2
