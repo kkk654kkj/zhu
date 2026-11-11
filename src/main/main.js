@@ -1408,6 +1408,73 @@ function registerSystemIpc() {
     if (filePath && fs.existsSync(filePath) && PROTO.isAllowedMediaPath(filePath)) shell.showItemInFolder(filePath)
   })
 
+  // —— v2.8.25 UI 美化：封面主色提取（渲染层主题色 =「跟随封面」时用） ——
+  // 渲染层 canvas 取色会被 CSP / 跨域污染卡住，这里用 nativeImage 在主进程做：
+  // 封面缓冲本来就按专辑缓存在 library 里（getCover），命中时零磁盘 IO。
+  const accentCache = new Map()   // trackId -> '#rrggbb'
+  ipcMain.handle('ui:accentForTrack', async (e, trackId) => {
+    try {
+      if (!trackId || typeof trackId !== 'string') return null
+      if (accentCache.has(trackId)) return accentCache.get(trackId)
+      const cov = G.library ? await G.library.getCover(trackId) : null
+      if (!cov || !cov.buf || !cov.buf.length) return null
+      const img = nativeImage.createFromBuffer(cov.buf)
+      if (img.isEmpty()) return null
+      const hex = accentFromImage(img)
+      if (hex) {
+        if (accentCache.size > 500) accentCache.clear()
+        accentCache.set(trackId, hex)
+      }
+      return hex
+    } catch {
+      return null
+    }
+  })
+
+}
+
+/**
+ * v2.8.25 UI 美化：从封面取一个可做主题色的主色。
+ * 缩到 24x24 逐像素打分：饱和度高、亮度居中的像素入选，求平均后做
+ * 亮度 / 饱和度规整（太暗提亮、太亮压暗、太灰拉开），保证做高亮色可读。
+ * 失败一律返回 null，渲染层保持现有主题色（纯装饰，不能影响播放）。
+ */
+function accentFromImage(img) {
+  try {
+    const small = img.resize({ width: 24, height: 24 })
+    const buf = small.toBitmap()   // BGRA
+    let rs = 0, gs = 0, bs = 0, n = 0      // 入选像素
+    let fr = 0, fg = 0, fb = 0, fn = 0     // 全图平均（兜底）
+    for (let i = 0; i + 3 < buf.length; i += 4) {
+      const b = buf[i], g = buf[i + 1], r = buf[i + 2]
+      if (buf[i + 3] < 40) continue
+      const max = Math.max(r, g, b), min = Math.min(r, g, b)
+      const l = (max + min) / 510
+      const sat = max === 0 ? 0 : (max - min) / max
+      fr += r; fg += g; fb += b; fn++
+      if (sat > 0.28 && l > 0.2 && l < 0.78) { rs += r; gs += g; bs += b; n++ }
+    }
+    if (!fn) return null
+    let r, g, b
+    if (n >= 8) { r = rs / n; g = gs / n; b = bs / n }
+    else { r = fr / fn; g = fg / fn; b = fb / fn }
+    const max0 = Math.max(r, g, b), min0 = Math.min(r, g, b)
+    const l0 = (max0 + min0) / 510
+    const sat0 = max0 === 0 ? 0 : (max0 - min0) / max0
+    if (l0 < 0.32) { const k = 0.32 / Math.max(l0, 0.01); r *= k; g *= k; b *= k }
+    if (l0 > 0.72) { const k = 0.72 / l0; r *= k; g *= k; b *= k }
+    if (sat0 < 0.45) {
+      const avg = (r + g + b) / 3
+      const k = 1 + (0.45 - sat0)
+      r = avg + (r - avg) * k
+      g = avg + (g - avg) * k
+      b = avg + (b - avg) * k
+    }
+    const cl = (v) => Math.max(0, Math.min(255, Math.round(v)))
+    return '#' + [r, g, b].map((v) => cl(v).toString(16).padStart(2, '0')).join('')
+  } catch {
+    return null
+  }
 }
 
 /** 窗口控制：最小化 / 最大化 / 关闭 / 迷你模式 */

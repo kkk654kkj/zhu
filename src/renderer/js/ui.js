@@ -29,7 +29,11 @@ const UI = {
       'mvCur', 'mvDur', 'mvBar', 'mvFill', 'mvDot',
       'mvMode', 'mvPrev', 'mvPlay', 'mvNext', 'mvFav',
       'miniRestore', 'miniMin', 'miniClose',
-      'btnHifi', 'hifiBadge'
+      'btnHifi', 'hifiBadge',
+      'logo',
+      'fsView', 'fsClose', 'fsCover', 'fsTitle', 'fsArtist', 'fsQ', 'fsLyric',
+      'fsCur', 'fsDur', 'fsBar', 'fsFill', 'fsDot',
+      'fsMode', 'fsPrev', 'fsPlay', 'fsNext', 'fsFav'
     ]
     for (const id of ids) this.els[id] = document.getElementById(id)
     // v3.3.20：CSP 是 script-src 'self'，内联 onerror 全被拦掉，封面读不出来时
@@ -155,12 +159,17 @@ const UI = {
       const t = tracks[i]
       const isCur = t.id === curId
       const isSel = selected && selected.has(t.id)
+      // v2.8.25 UI 美化：行内小封面（无封面只留渐变占位块）+ 正在播放行的均衡器动画。
+      // 两者都不改变行高（40px 虚拟滚动不变量）；封面 img 失败由 init 里的
+      // error 捕获委托统一摘除，占位块天然兜底。
+      const cv = `<span class="cv-mini">${t.cover ? `<img src="${esc(t.cover)}" loading="lazy" alt="" />` : ''}</span>`
+      const eq = isCur ? '<span class="eq-bars"><i></i><i></i><i></i></span>' : ''
       rows[i - start] = `<div class="tr${isCur ? ' playing' : ''}${isSel ? ' selected' : ''}" data-id="${esc(t.id)}" data-index="${i}">
           <div class="c-idx">
             <span class="num" draggable="true" title="拖到左侧歌单可加入歌单">${i + 1}</span>
             <span class="btn-play-row">${icon('play')}</span>
           </div>
-          <div class="c-title">
+          <div class="c-title">${cv}${eq}
             <span class="tt">${esc(t.title)}</span>
             ${t.hasLyric ? '<span class="tag-lyric">词</span>' : ''}
             ${ctx.showCounts && ctx.playCounts && ctx.playCounts[t.id]
@@ -261,6 +270,8 @@ const UI = {
     this.els.pbCover.innerHTML = html
     this.els.lpCover.innerHTML = html
     this.els.mvCover.innerHTML = html
+    // v2.8.25：全屏播放页第四处镜像
+    if (this.els.fsCover) this.els.fsCover.innerHTML = html
   },
 
   /** 换按钮内的 svg 图标（主播放条与迷你卡片共用，名字需含 i- 前缀） */
@@ -282,6 +293,8 @@ const UI = {
     if (npChanged) {
       this._setCovers(track.cover)
       this.els.tDur.textContent = fmtDuration(track.duration)
+      // v2.8.25：主题色「跟随封面」钩子（theme.js 提供，未加载时静默跳过）
+      if (typeof Theme !== 'undefined') Theme.onTrack(track)
     }
     this.setPlayIcon(playing)
   },
@@ -297,6 +310,16 @@ const UI = {
     this.els.mvTitle.textContent = track.title
     this.els.mvTitle.title = track.title + (track.artist ? ' — ' + track.artist : '')
     this.els.mvArtist.textContent = artist
+    // v2.8.25：全屏播放页镜像文案 + 音质标签
+    if (this.els.fsTitle) {
+      this.els.fsTitle.textContent = track.title
+      this.els.fsArtist.textContent = artist + (track.album ? ' · ' + track.album : '')
+      const bits = []
+      if (track.lossless) bits.push('无损')
+      const q = fmtQuality(track)
+      if (q) bits.push(q)
+      this.els.fsQ.textContent = bits.join(' · ')
+    }
   },
 
   /** 无曲目时的空态：三处一起清干净，避免残留上一首的封面/标题/提示 */
@@ -311,6 +334,12 @@ const UI = {
     this.els.mvArtist.textContent = '—'
     this.els.mvTitle.title = ''
     this.els.mvLyric.textContent = ''
+    if (this.els.fsTitle) {
+      this.els.fsTitle.textContent = '未在播放'
+      this.els.fsArtist.textContent = '—'
+      this.els.fsQ.textContent = ''
+      this.els.fsLyric.textContent = ''
+    }
     this.els.tCur.textContent = '0:00'
     this.els.tDur.textContent = '0:00'
     this._npKey = null
@@ -324,6 +353,13 @@ const UI = {
     this.els.btnPlay.title = title
     this._setIcon(this.els.mvPlay, name)
     this.els.mvPlay.title = title
+    // v2.8.25：全屏播放页镜像 + 行内均衡器动画暂停态
+    if (this.els.fsPlay) {
+      this._setIcon(this.els.fsPlay, name)
+      this.els.fsPlay.title = title
+    }
+    document.querySelectorAll('#tableBody .tr.playing')
+      .forEach((el) => el.classList.toggle('paused', !playing))
   },
 
   setFavorite(isFav) {
@@ -332,6 +368,10 @@ const UI = {
     this.els.btnFav.title = title
     this.els.mvFav.classList.toggle('on', isFav)
     this.els.mvFav.title = title
+    if (this.els.fsFav) {
+      this.els.fsFav.classList.toggle('on', isFav)
+      this.els.fsFav.title = title
+    }
   },
 
   setProgress(cur, dur) {
@@ -345,6 +385,13 @@ const UI = {
     this.els.mvDot.style.left = pct
     this.els.mvCur.textContent = fmtTime(cur)
     this.els.mvDur.textContent = fmtDuration(dur || 0)
+    // v2.8.25：全屏播放页镜像进度
+    if (this.els.fsFill) {
+      this.els.fsFill.style.width = pct
+      this.els.fsDot.style.left = pct
+      this.els.fsCur.textContent = fmtTime(cur)
+      this.els.fsDur.textContent = fmtDuration(dur || 0)
+    }
   },
 
   setVolume(v, muted) {
@@ -358,7 +405,7 @@ const UI = {
   setMode(mode) {
     // 未知模式名直接忽略：拼出 '#undefined' 会把图标清空
     if (!MODE_ICON[mode]) return
-    for (const el of [this.els.btnMode, this.els.mvMode]) {
+    for (const el of [this.els.btnMode, this.els.mvMode, this.els.fsMode]) {
       if (!el) continue
       this._setIcon(el, MODE_ICON[mode])
       el.title = MODE_LABEL[mode]
@@ -371,6 +418,22 @@ const UI = {
     const mini = !!on
     document.body.classList.toggle('mini', mini)
     this.els.miniView.hidden = !mini
+  },
+
+  /* ---------------- 全屏播放页（v2.8.25） ---------------- */
+
+  /** show=true 显示 / false 隐藏 / 省略=切换。返回操作后的可见状态 */
+  setFullscreen(show) {
+    const el = this.els.fsView
+    if (!el) return false
+    const willShow = show == null ? !el.classList.contains('open') : !!show
+    el.classList.toggle('open', willShow)
+    return willShow
+  },
+
+  isFullscreen() {
+    const el = this.els.fsView
+    return !!(el && el.classList.contains('open'))
   },
 
   /* ---------------- 均衡器 ---------------- */
@@ -556,6 +619,8 @@ const UI = {
     // 迷你卡片只显示当前一句（没到第一句时留空，CSS 会隐藏这一行）
     const cur = idx >= 0 && st.lines[idx] ? st.lines[idx].text : ''
     if (this.els.mvLyric.textContent !== cur) this.els.mvLyric.textContent = cur
+    // v2.8.25：全屏播放页同步当前句
+    if (this.els.fsLyric && this.els.fsLyric.textContent !== cur) this.els.fsLyric.textContent = cur
     if (idx >= 0 && nodes[idx]) {
       const node = nodes[idx]
       // 用 rect 差值算，不要用 offsetTop：它相对最近定位祖先，一旦祖先在上方就会大幅偏移

@@ -59,12 +59,48 @@ contextBridge.exposeInMainWorld('api', {
   addHistory: (trackId) => invoke('history:add', trackId),
   getPlayCounts: () => invoke('playcount:get'),
   incPlayCount: (trackId) => invoke('playcount:inc', trackId),
+  /** v2.8.25 UI 美化：取本地内嵌封面主色（主题色=跟随封面）→ '#rrggbb' | null */
+  accentForTrack: (trackId) => invoke('ui:accentForTrack', trackId),
   getSession: () => invoke('session:get'),
   setSession: (s) => invoke('session:set', s),
 
   // 歌词
   readLyric: (trackId) => invoke('lyric:read', trackId),
   onLyricChanged: (cb) => on('lyric:changed', cb),
+
+  /* ---- 联网版（v3.0）：在线音乐 ---- */
+  onlineSources: () => invoke('online:sources'),
+  onlineProxyBase: () => invoke('online:proxyBase'),
+  onlineSearch: (opts) => invoke('online:search', opts),
+  /** 解析播放地址：{ ok, song, fallback, partial, lossless, level, bitrate, ext, error } */
+  onlinePlayable: (song) => invoke('online:playable', song),
+  /** v3.3.18（第四轮 P1 #7）：<audio> 报错时作废该曲直链缓存，返回 { ok, hit } */
+  onlineInvalidate: (song) => invoke('online:invalidate', song),
+  onlineProbe: (song) => invoke('online:probe', song),
+  onlineLyric: (song) => invoke('online:lyric', song),
+  onlineDownload: (song) => invoke('online:download', song),
+  // 第四轮 §4.5.3 #16：onlineCancelDownload 是死接口（映射到 online:dlDelete，全项目无消费方），已移除
+  onlineDlList: () => invoke('online:dlList'),
+  onlineDlPause: (id) => invoke('online:dlPause', id),
+  onlineDlResume: (id) => invoke('online:dlResume', id),
+  onlineDlDelete: (id) => invoke('online:dlDelete', id),
+  onlineDlClearDone: () => invoke('online:dlClearDone'),
+  onlineDlReveal: (id) => invoke('online:dlReveal', id),
+  onlinePickDownloadDir: () => invoke('online:pickDownloadDir'),
+  onlineOpenDownloadDir: () => invoke('online:openDownloadDir'),
+  onlineCacheInfo: () => invoke('online:cacheInfo'),
+  onlineCacheClear: () => invoke('online:cacheClear'),
+  onlinePickCacheDir: () => invoke('online:pickCacheDir'),
+  onlineOpenCacheDir: () => invoke('online:openCacheDir'),
+  onlineExtraKeyGet: () => invoke('online:extraKeyGet'),
+  onlineExtraKeySet: (key) => invoke('online:extraKeySet', key),
+  onlineOpenChksz: () => invoke('online:openChksz'),
+  onlineQingGet: () => invoke('online:qingGet'),
+  onlineQingSet: (enabled) => invoke('online:qingSet', enabled),
+  onlineQingTest: () => invoke('online:qingTest'),
+  onNowPlaying: (cb) => on('online:now-playing', cb),
+  onDlUpdate: (cb) => on('online:dl-update', cb),
+  // 第四轮 §6.4：onDownloadProgress / onDownloadDone 是死接线（主进程从不发这两个频道），已移除
 
   // 系统
   pickDirs: () => invoke('dialog:pickDirs'),

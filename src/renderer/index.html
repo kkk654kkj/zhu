@@ -50,7 +50,7 @@
 <!-- ============ 标题栏 ============ -->
 <header id="titlebar">
   <div class="tb-left">
-    <div class="logo"><img src="../assets/icon-48.png" alt="" /></div>
+    <div class="logo" id="logo" title="主题色（点按切换）"><img src="../assets/icon-48.png" alt="" /></div>
     <span class="app-name">猪专属播放器</span>
   </div>
   <div class="tb-center">
@@ -246,6 +246,37 @@
   </div>
 </div>
 
+<!-- ============ 全屏播放页（v2.8.25：点播放条封面展开） ============ -->
+<div id="fsView">
+  <div class="fs-head">
+    <span>正在播放</span>
+    <button class="mini-btn" id="fsClose" title="收起（Esc）"><svg><use href="#i-close"/></svg></button>
+  </div>
+  <div class="fs-body">
+    <div class="fs-cover" id="fsCover"><svg><use href="#i-music"/></svg></div>
+    <div class="fs-meta">
+      <div class="fs-title" id="fsTitle">未在播放</div>
+      <div class="fs-artist" id="fsArtist">—</div>
+      <span class="fs-q" id="fsQ"></span>
+      <div class="fs-lyric" id="fsLyric"></div>
+    </div>
+  </div>
+  <div class="fs-foot">
+    <div class="fs-prog">
+      <span class="t" id="fsCur">0:00</span>
+      <div class="bar" id="fsBar" style="flex:1"><i class="fill" id="fsFill"></i><i class="dot" id="fsDot"></i></div>
+      <span class="t" id="fsDur">0:00</span>
+    </div>
+    <div class="fs-ctrl">
+      <button class="icon-btn" id="fsMode" title="播放模式"><svg><use href="#i-list"/></svg></button>
+      <button class="icon-btn lg" id="fsPrev" title="上一首"><svg><use href="#i-prev"/></svg></button>
+      <button class="icon-btn play" id="fsPlay" title="播放/暂停"><svg><use href="#i-play"/></svg></button>
+      <button class="icon-btn lg" id="fsNext" title="下一首"><svg><use href="#i-next"/></svg></button>
+      <button class="icon-btn fav" id="fsFav" title="收藏"><svg><use href="#i-heart"/></svg></button>
+    </div>
+  </div>
+</div>
+
 <!-- 睡眠定时面板（v2.2：入口从托盘移到 app 内播放条） -->
 <div id="sleepPanel" hidden>
   <div class="sp-head">
@@ -428,6 +459,8 @@
 <script src="js/mediasession.js"></script>
 <script src="js/power.js"></script>
 <script src="js/shortcuts.js"></script>
+<script src="js/theme.js"></script>
+<script src="js/fullscreen.js"></script>
 <script src="js/mediasession.js"></script>
 </body>
 </html>
