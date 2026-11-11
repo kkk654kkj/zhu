@@ -1,11 +1,11 @@
 'use strict'
+/**
+ * v3.3.24 模块拆分：从 main.js 原样搬出（master 切片版——本地版白名单无缓存/下载目录分支）。
+ * init(G) 注入 main 的共享状态访问器（getter，见 main.js 的 G 定义）。
+ */
 const path = require('path')
 const fs = require('fs')
 const { Readable } = require('stream')
-/**
- * v3.3.24 模块拆分：从 main.js 原样搬出（只做 G. 前缀注入，不改逻辑）。
- * init(G) 注入 main 的共享状态访问器（getter，见 main.js 的 G 定义）。
- */
 const { protocol, shell } = require('electron')
 
 let G = null
@@ -34,12 +34,13 @@ function mimeFor(p) {
 }
 
 /**
- * v3.3.13：媒体路径白名单（模块作用域，协议层与 IPC 共用）。
- * 只允许曲库目录 / 下载目录 / 数据目录 / 在线缓存目录之内的文件，防止渲染层被注入后
- * 通过 lxfile:// 或 mpv:load 读任意本地文件。
+ * 带 TTL + 上限的 realpath 缓存：曲库目录里的 junction/符号链接被重新指向后
+ * 最多 5 秒即重新解析。
+ *
+ * 注意：本地版此前**从未定义过这个函数**，而 isAllowedMediaPath / lxfile 协议
+ * 一直在调用它 —— 每次打开本地文件都会抛 ReferenceError（被协议层的 catch 吞成 500），
+ * 表现为「本地歌全部放不出来」。这里补齐（与联网版同源实现）。
  */
-// realpath 结果缓存：lxfile 每次请求都会走这里，不能反复 stat。
-// 带 TTL + 上限，曲库目录里的 junction/符号链接被重新指向后最多 5 秒即重新解析。
 const REALPATH_TTL = 5000
 
 const REALPATH_MAX = 512
@@ -52,26 +53,26 @@ function realpathCached(p) {
   if (hit && now - hit.at < REALPATH_TTL) return hit.val
   let val = null
   try { val = fs.realpathSync.native(p) } catch (e) { val = null }
-  // v3.3.17：满了就逐条淘汰最早的，而不是整表 clear()。
-  // 曲库上千首时随便拖几次进度条就会触发一次 clear，之后每个 Range 请求
-  // 都要把所有 root 重新 realpathSync 一遍（主进程同步 IO）。
-  // clear 还会把「稳定的 root 结果」和「文件结果」一起丢掉，代价尤其不划算。
+  // 满了就逐条淘汰最早的，而不是整表 clear()：clear 会让每个 Range 请求
+  // 都把所有 root 重新 realpathSync 一遍（主进程同步 IO）
   while (realpathCache.size >= REALPATH_MAX) realpathCache.delete(realpathCache.keys().next().value)
   realpathCache.set(p, { val, at: now })
   return val
 }
 
-// Windows 驱动器相对根「D:」（无斜杠）path.resolve 会落到 cwd，补上分隔符
+// Windows 驱动器相对根「D:」（无斜杠）path.resolve 会落到 cwd，补上分隔符。
+// 本地版此前缺这个函数（白名单一调用就 ReferenceError），这里补齐。
 function fixDriveRoot(s) {
   const t = String(s == null ? '' : s).trim()
   return /^[A-Za-z]:$/.test(t) ? t + path.sep : t
 }
 
+/** v2.8.12：媒体路径白名单（模块作用域，协议层与 IPC 共用） */
 /**
  * 明显不该当媒体根的位置：盘符根、Windows / Program Files / ProgramData。
- * settings.musicDirs、onlineDownloadDir、onlineCacheDir 都能由渲染层 patch 写入，
- * 一旦渲染层被注入（恶意标签/歌词），把这些键改成 'C:////' 就能让 lxfile:// 读到任意文件。
- * 这里只挡「整盘 / 系统目录」，用户把音乐放在 C://Users//me//Music 这类正常路径不受影响。
+ * settings.musicDirs 等键都能由渲染层 patch 写入，一旦渲染层被注入（恶意标签/歌词），
+ * 把它们改成 'C:\\' 就能让 lxfile:// 读到任意文件。
+ * 这里只挡「整盘 / 系统目录」，用户把音乐放在 C:\Users\me\Music 这类正常路径不受影响。
  */
 const DANGEROUS_ROOT = /^[a-z]:[\\/]?$|^[a-z]:[\\/](windows|program files|program files \(x86\)|programdata)([\\/]|$)/i
 
@@ -81,14 +82,13 @@ function isSafeMediaRoot(r) {
   const p = String(r == null ? '' : r).trim()
   if (!p) return false
   // 第四轮 §4.1 #4：DANGEROUS_ROOT 是黑名单，只挡盘符根与 4 个系统目录，
-  // `\\server\share`（UNC）、`\\?\C://...`（设备路径）、`ftp://` 这类都会漏过，
-  // 变成白名单根之后整个共享/设备树都能当媒体目录读。这里显式拒绝。
+  // 共享路径（UNC）、设备路径、带协议的 URL 都会漏过；变成白名单根之后
+  // 整个共享/设备树都能当媒体目录读。这里显式拒绝。
   if (!/[a-zA-Z]:[\\/]|^[\\/]{1,2}[^\\/]/.test(p)) return false
-  if (/^[\\/]{2}(\?|\\.)[\\/]/.test(p)) return false   // \\?\ 与 \\.\ 设备路径
-  if (/^[\\/]{2}/.test(p)) return false                     // UNC：\\server\share
+  if (/^[\\/]{2}(\?|\\.)[\\/]/.test(p)) return false   // 设备路径
+  if (/^[\\/]{2}/.test(p)) return false                     // UNC
   if (/^[a-zA-Z]+:\/\//.test(p)) return false               // 带协议的 URL
-  // C://Users//Public 这类「所有用户可写」的共享目录同样是符号链接攻击面，
-  // DANGEROUS_ROOT 只挡了盘符根与四个系统目录，这里补一层
+  // 所有用户可写的共享目录同样是符号链接攻击面，DANGEROUS_ROOT 没覆盖，这里补一层
   if (EXTRA_FORBIDDEN_ROOT.test(p)) return false
   return !DANGEROUS_ROOT.test(p)
 }
@@ -101,9 +101,8 @@ function isAllowedMediaPath(p) {
   const real = abs.toLowerCase()
   const roots = [
     ...(G.store.get().settings.musicDirs || []),
-    G.downloadDir(),
+    // 本地版没有在线下载/缓存目录（这两个根只在联网版存在）
     G.DATA_DIR,
-    G.cacheDirPath()
   ]
     .filter((r) => r && String(r).trim() && isSafeMediaRoot(r))
     .map((r) => realpathCached(path.resolve(fixDriveRoot(r))))
@@ -136,9 +135,8 @@ function registerFileProtocol() {
       // v3.3.13：协议层也要收口（以前只有 mpv:load / shell:showItem 有）
       if (!isAllowedMediaPath(filePath)) return new Response('forbidden', { status: 403 })
 
-      // v3.3.17：后续 stat 与 createReadStream 一律用 realpath 结果。
-      // 以前校验走 realpath、打开用原始路径 —— 曲库目录里若有 junction 在校验与打开之间
-      // 被改指，校验就失效了（TOCTOU）。
+      // v3.3.17：后续 stat 与 createReadStream 一律用 realpath 结果，
+      // 消除「校验与打开不是同一个文件」的 TOCTOU
       filePath = realpathCached(filePath) || filePath
 
       const stat = await G.fsp.stat(filePath)

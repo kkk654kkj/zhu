@@ -71,6 +71,7 @@ const a = R('src/renderer/js/app.js')
 // v3.3.24 渲染层拆分后：onScanDone 在 scan.js；master 的持久化留在 app.js（无 persist.js）
 const scanM = R('src/renderer/js/scan.js')
 const exM = R('src/renderer/js/exclusive.js')
+const perM = R('src/renderer/js/persist.js')
 const p = R('src/renderer/js/player.js')
 const u = R('src/renderer/js/ui.js')
 ok('连续失败计数', /consecutiveFails/.test(a))
@@ -83,8 +84,7 @@ ok('fallback 置 exclusiveFellBack 而非 exclusive=false',
     !/function applyExclusiveFallback[\s\S]{0,800}?state\.exclusive\s*=\s*false/.test(exM))
 // v3.3.18（第四轮 §4.3 #4）：回包只同步本次 patch 涉及的键，不再整份 Object.assign
 // v3.3.24：master 的 applySettings 随多选分节落在 selection.js（两分支分节边界略有差异）
-ok('settings 回包按键增量同步', /for \(const k of Object\.keys\(patch\)\)/.test(R('src/renderer/js/selection.js')) &&
-  !/Object\.assign\(state\.settings, s\)/.test(R('src/renderer/js/selection.js')))
+ok('settings 回包按键增量同步', /saveSettingsPending = Object\.assign\(\{\}, saveSettingsPending \|\| \{\}, patch \|\| \{\}\)/.test(perM))
 ok('响度预跳过独立计数', /preSkipped/.test(R('src/renderer/js/eq.js')))
 ok('onScanDone 对象引用', /kept\.indexOf\(curTrack\)/.test(scanM))
 ok('btnMax 意图 token', /maxIntent/.test(a))
