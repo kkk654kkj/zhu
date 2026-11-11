@@ -369,14 +369,22 @@ input { font: inherit; color: inherit; }
 .tr.selected .c-title .tt { color: var(--txt); }
 
 .tr .c-idx {
+  position: relative;
   display: grid; place-items: center;
   font-size: 11.5px;
   color: var(--txt-3);
   font-variant-numeric: tabular-nums;
 }
-.tr:hover .c-idx .num { display: none; }
+/* v3.3.20：hover 时不能把 .num 从渲染树里摘掉 —— 它是表格唯一的拖拽源
+   （dragdrop.js 只认 .num[draggable]），display:none 后永远发不出 dragstart，
+   「拖序号到歌单加歌」整条链路是死代码。改成透明保留盒子，图标绝对定位覆盖在上面。 */
+.tr:hover .c-idx .num { opacity: 0; }
 .tr .c-idx .btn-play-row { display: none; color: var(--accent); }
-.tr:hover .c-idx .btn-play-row { display: grid; place-items: center; }
+.tr:hover .c-idx .btn-play-row {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  pointer-events: none;   /* 点击交给整行；指针事件留给下面的 .num 以便拖拽 */
+}
 .tr .c-idx svg { width: 13px; height: 13px; }
 
 .tr .c-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
