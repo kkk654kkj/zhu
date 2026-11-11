@@ -10,14 +10,12 @@ async function toggleMini(on) {
   const next = on == null ? !state.mini : !!on
   if (next === state.mini) return
   // 进迷你/回完整之前把浮层都收掉，免得面板卡在窄窗口里
-  // v3.3.7：以前漏了音频设备/睡眠定时/缓存/下载四个面板
+  // v2.8.7：以前漏了音频设备/睡眠定时两个面板
   UI.toggleQueue(false)
   UI.toggleEq(false)
   UI.hideContextMenu()
   toggleAudioPanel(false)
   toggleSleepPanel(false)
-  toggleCachePanel(false)
-  if (typeof Online !== 'undefined' && Online.toggleDlPanel) Online.toggleDlPanel(false)
   state.mini = next
   UI.setMini(next)
   try {

@@ -16,6 +16,26 @@ function audioFormatLabel(f) {
 }
 
 /** 是否真的处于位完美状态：独占 + 未被回退 + 输出格式已知且与源一致 + 音量 100% */
+/**
+ * 独占失败自动回退共享：把运行时状态与所有派生 UI 一次性同步。
+ *
+ * v3.3.18（第四轮 P1 #8）：**不能**把 state.exclusive 置 false。回退的是 mpv 的
+ * WASAPI 共享模式，audio 仍是 MpvAudio，WebAudio 链从来没建过。以前在这里置 false，
+ * 导致下游 7 处「独占下禁用」判据全部误放行：EQ / 音量均衡 / 响度分析 / 手动增益
+ * 可操作但无效还照旧落盘；DSD 被误拦；keepAliveMediaSession 走错分支导致 SMTC 失效；
+ * player.on('error') 进入共享的失败连跳（设备类错误连跳 3 首）。
+ * 现在只立 exclusiveFellBack 供徽标显示，后端语义保持不变。
+ */
+function applyExclusiveFallback() {
+  state.exclusiveFellBack = true
+  // 回退后**不能**恢复 EQ：WebAudio 链仍不存在，按钮可点只会让用户白折腾
+  UI.setEqDisabled(true)
+  UI.setSpectrumVisible(false)
+  UI.setNorm(false)
+  updateHifiBadge()
+}
+
+
 function isBitPerfect() {
   if (!state.exclusive) return false
   if (!audio || audio.isExclusive === false) return false
@@ -25,26 +45,6 @@ function isBitPerfect() {
   if (!f || !f.samplerate) return false
   const src = player.current && player.current.sampleRate
   return !src || Number(f.samplerate) === Number(src)
-}
-
-/** 独占失败自动回退共享：把运行时状态与所有派生 UI 一次性同步
- *
- * v3.3.18（第四轮 P1 #8）：**不能**把 state.exclusive 置 false。回退的是 mpv 的
- * WASAPI 共享模式，audio 仍是 MpvAudio，WebAudio 链从来没建过。以前在这里置 false，
- * 导致下游 7 处「独占下禁用」判据全部误放行：
- *   · EQ / 音量均衡 / 响度分析 / 手动增益可操作但无效，还照旧落盘污染 settings.json；
- *   · DSD 被误拦（提示「需要独占输出」，实际 mpv 仍能放）；
- *   · keepAliveMediaSession 走错分支 → SMTC / 媒体键失效；
- *   · player.on('error') 进入共享的失败连跳（设备类错误连跳 3 首）。
- * 现在只立 exclusiveFellBack 供徽标显示，后端语义保持不变。
- */
-function applyExclusiveFallback() {
-  state.exclusiveFellBack = true
-  // 回退后**不能**恢复 EQ：见上，WebAudio 链仍不存在，按钮可点只会让用户白折腾
-  UI.setEqDisabled(true)
-  UI.setSpectrumVisible(false)
-  UI.setNorm(false)
-  updateHifiBadge()
 }
 
 function updateHifiBadge() {
@@ -193,5 +193,55 @@ function toggleAudioPanel(show) {
   const panel = document.getElementById('audioPanel')
   const target = show === undefined ? panel.hidden : !!show
   panel.hidden = !target
+}
+
+async function refreshAudioDevices() {
+  if (audioDevicesLoading) return
+  audioDevicesLoading = true
+  const body = document.getElementById('audioDevices')
+  body.innerHTML = '<span class="ap-loading">正在检测输出设备…</span>'
+  const res = await window.api.mpvDevices().catch((err) => ({ ok: false, error: err.message }))
+  audioDevicesLoading = false
+  if (!res || !res.ok) {
+    body.innerHTML = '<span class="ap-loading">检测失败：' + esc((res && res.error) || '未知错误') + '</span>'
+    return
+  }
+  audioDevicesCache = res.devices || []
+  paintAudioPanel()
+}
+
+function paintAudioPanel() {
+  const cur = state.settings.audioDevice || ''
+  const body = document.getElementById('audioDevices')
+  const chip = (label, name) =>
+    '<button class="sp-chip' + (name === cur ? ' on' : '') + '" data-dev="' + esc(name) + '">' +
+    esc(label) + (name === cur ? '（当前）' : '') + '</button>'
+  let html = chip('跟随系统默认设备', '')
+  for (const d of audioDevicesCache) {
+    html += chip(d.description || d.name, d.name)
+  }
+  if (!audioDevicesCache.length) {
+    html += '<span class="ap-loading">没有检测到可用设备</span>'
+  }
+  body.innerHTML = html
+}
+
+/** 选中设备（'' = 跟随系统默认）。保存并即时切（独占没开时只保存，开启后生效）。 */
+async function setAudioDevice(name) {
+  name = name || ''
+  const r = await window.api.mpvSetDevice(name).catch((err) => ({ ok: false, error: err.message }))
+  // v3.3.17：主进程会在新设备起不来时自动退回原设备并回传 reverted。
+  // 以前只看 ok/applied，界面提示「已切换」、面板还把失败设备标成「（当前）」，
+  // 用户以为换了设备其实还在旧的上面。
+  if (r && r.reverted) {
+    state.settings.audioDevice = r.device || ''
+    toast(r.error || '该设备不可用，已退回原设备', 3500)
+  } else if (!r || !r.ok) {
+    toast('切换输出设备失败：' + ((r && r.error) || '未知错误'), 3000)
+  } else {
+    state.settings.audioDevice = name
+    toast(r.applied ? '输出设备已切换' : '输出设备已保存（开启独占后生效）')
+  }
+  paintAudioPanel()
 }
 

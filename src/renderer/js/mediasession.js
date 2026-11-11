@@ -1,58 +1,103 @@
 'use strict'
 /** v3.3.24 渲染层拆分：从 app.js 原样搬出（全局 script 模式，无注入成本）。 */
-/* ================= 持久化 ================= */
+/* ================= Windows 媒体控制（Media Session / SMTC，v2.1） ================= */
 
-// v3.3.7：debounce 是「尾触发、参数整体替换」语义 —— 300ms 内两类设置
-// （比如 mode-change 后马上拖音量）只有最后一类会落盘，前一类永远丢失。
-// 改成先合并再统一发。
-// v3.3.13：关窗/重载前必须把攒着的 pending 立即发出（只 cancel 会丢设置），
-// 所以这里自管定时器 + flush，不依赖 util.debounce 的 cancel；回包也要增量
-// 合并，不能整体替换（全文件多处直接赋值 state.settings.xxx，整体替换会回滚）。
-let saveSettingsPending = null
-let saveSettingsTimer = null
-const SETTINGS_SAVE_MAX_RETRY = 3
-let saveSettingsRetries = 0
+/**
+ * Chromium 会把 navigator.mediaSession 接到 Windows 的 SMTC 上（音量浮层、锁屏、硬件媒体键）。
+ * 这条链路不需要原生模块，但有个前提：必须有一个**正在播放的 <audio>**。
+ * 独占模式下声音走 mpv，页面里没有播放中的 <audio>，所以额外挂一条静音流
+ * （体积 0 的 8bit WAV，音量 0.001 —— 不能设 0，Chromium 认为"静音"就不算 audible）。
+ */
+let mediaKeepAlive = null
+let silentWavCached = ''   // 静音 WAV 的 Blob URL 只建一次，避免每轮重建泄漏
+let mediaPosAt = 0
 
-/** 立即发送 pending（幂等），并取消 debounce 定时器 */
-function flushSaveSettings() {
-  const patch = saveSettingsPending
-  saveSettingsPending = null
-  if (saveSettingsTimer) { clearTimeout(saveSettingsTimer); saveSettingsTimer = null }
-  if (!patch || !Object.keys(patch).length) return Promise.resolve()
-  return window.api.patchSettings(patch).then((s) => {
-    saveSettingsRetries = 0   // v3.3.20：落盘成功后清零，下次失败还能重试满额度
-    // 第四轮 §4.3 #4：回包是主进程的**全量** settings，以前整个 Object.assign 回来，
-    // 会把本次没提交、但渲染层刚直接赋过值的键（applyEq / btnNorm / toggleExclusiveOutputOnce）
-    // 一起覆盖回旧值。只同步本次 patch 涉及的键。
-    if (s && typeof s === 'object') {
-      for (const k of Object.keys(patch)) {
-        if (Object.prototype.hasOwnProperty.call(s, k)) state.settings[k] = s[k]
-      }
-    }
-  }).catch(() => {
-    // 以前 .catch(()=>{}) 把写盘失败吞得干干净净，用户改了设置却毫无提示
-    // v3.3.20：失败不能只弹个 toast 就把 patch 丢掉 —— 界面已是新值、磁盘还是旧值，
-    // 本次会话所有改动到下次启动全部回滚。合并回 pending 并有限次重试。
-    saveSettingsPending = Object.assign({}, patch, saveSettingsPending || {})
-    if (saveSettingsRetries < SETTINGS_SAVE_MAX_RETRY && !saveSettingsTimer) {
-      saveSettingsRetries++
-      saveSettingsTimer = setTimeout(() => { saveSettingsTimer = null; flushSaveSettings() }, 2000)
-    }
-    toast('设置保存失败（磁盘只读或被占用？）', 3000)
-  })
+function silentWavUrl(seconds = 0.2, rate = 8000) {
+  const n = Math.floor(seconds * rate)
+  const buf = new ArrayBuffer(44 + n)
+  const dv = new DataView(buf)
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)) }
+  w(0, 'RIFF'); dv.setUint32(4, 36 + n, true); w(8, 'WAVE'); w(12, 'fmt ')
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true)
+  dv.setUint32(24, rate, true); dv.setUint32(28, rate, true)
+  dv.setUint16(32, 1, true); dv.setUint16(34, 8, true)
+  w(36, 'data'); dv.setUint32(40, n, true)
+  for (let i = 0; i < n; i++) dv.setUint8(44 + i, 128)
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }))
 }
 
-function saveSettings(patch) {
-  saveSettingsPending = Object.assign({}, saveSettingsPending || {}, patch || {})
-  if (saveSettingsTimer) clearTimeout(saveSettingsTimer)
-  saveSettingsTimer = setTimeout(() => { saveSettingsTimer = null; flushSaveSettings() }, 300)
+function initMediaSession() {
+  if (!('mediaSession' in navigator)) return
+  const ms = navigator.mediaSession
+  const set = (name, fn) => { try { ms.setActionHandler(name, fn) } catch {} }
+  set('play', () => player.play())
+  set('pause', () => player.pause())
+  set('previoustrack', () => player.prev())
+  set('nexttrack', () => player.next())
+  set('stop', () => { player.pause(); player.seek(0) })
+  set('seekto', (d) => { if (d && d.seekTime != null) player.seek(d.seekTime) })
+  set('seekbackward', (d) => player.seek(Math.max(0, (audio.currentTime || 0) - ((d && d.seekOffset) || 10))))
+  set('seekforward', (d) => player.seek((audio.currentTime || 0) + ((d && d.seekOffset) || 10)))
 }
 
-/** 重载/关窗前：最多等一小会儿，IPC 卡住也不至于永远不 reload */
-async function flushSaveSettingsForExit() {
-  await Promise.race([
-    flushSaveSettings(),
-    new Promise((r) => setTimeout(r, 250))
-  ]).catch(() => {})
+function updateMediaSession(track) {
+  if (!('mediaSession' in navigator) || !track) return
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: track.title || track.fileName || '未知曲目',
+      artist: track.artist || '',
+      album: track.album || '',
+      artwork: track.cover ? [{ src: track.cover, sizes: '512x512', type: 'image/jpeg' }] : []
+    })
+  } catch {}
+}
+
+function syncMediaSessionState(playing) {
+  if (!('mediaSession' in navigator)) return
+  try { navigator.mediaSession.playbackState = playing ? 'playing' : 'paused' } catch {}
+}
+
+/** 进度位置：Windows 浮层的进度条靠它；1 秒一次足够，别每帧都调 */
+function updateMediaPosition(cur, dur) {
+  if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState) return
+  const now = Date.now()
+  if (now - mediaPosAt < 1000) return
+  mediaPosAt = now
+  if (!(dur > 0) || !isFinite(dur)) return
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: dur,
+      position: Math.min(Math.max(0, cur || 0), dur),
+      playbackRate: 1
+    })
+  } catch {}
+}
+
+function keepAliveMediaSession(playing) {
+  if (!('mediaSession' in navigator)) return
+  // 普通输出下 <audio> 本身就是一场活跃会话，不需要这条假流
+  if (!state.exclusive) {
+    if (mediaKeepAlive && !mediaKeepAlive.paused) mediaKeepAlive.pause()
+    return
+  }
+  try {
+    if (!mediaKeepAlive) {
+      // 第四轮 §4.6：每次重建都新建一个 Blob URL，旧的不 revoke 也不 pause ——
+      // 长会话里 error 一次就漏一份。这里复用同一个 URL，旧元素先 pause + 清 src。
+      if (!silentWavCached) silentWavCached = silentWavUrl()
+      mediaKeepAlive = new Audio(silentWavCached)
+      mediaKeepAlive.loop = true
+      mediaKeepAlive.volume = 0.001
+      mediaKeepAlive.addEventListener('error', () => {
+        try { mediaKeepAlive.pause() } catch (e) { /* 忽略 */ }
+        mediaKeepAlive = null
+      })
+    }
+    if (playing) {
+      if (mediaKeepAlive.paused) mediaKeepAlive.play().catch(() => {})
+    } else if (!mediaKeepAlive.paused) {
+      mediaKeepAlive.pause()
+    }
+  } catch {}
 }
 

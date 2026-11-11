@@ -467,25 +467,25 @@ class MpvEngine {
         const reason = msg.reason || ''
         // mpv 在 AO 初始化失败时也会走 end-file/error，这里上报给上层决定是否回退共享
         if (reason === 'error') {
-        // v3.3.20：把「AO 打不开」与「这个文件坏了」分开上报。
-        // 以前上层只看「有 file-error 就回退共享」，于是一个 404 / 不支持的编码
-        // 文件就能把整个会话永久降到共享输出（audit-main 第 7 条）。
-        // 判据用**序号**而不是 stderr 文本：_stderr 是滚动的 800 字符尾缓冲，
-        // 按下标切片会算错；序号只增不减，跨 load 的比较才是可靠的。
-        // detail 只用于给人看（日志 / toast）。判性质一律用序号，不解析文本。
-        const detail = [msg.error, this._lastAoLog, this._lastLog]
-          .filter(Boolean)
-          .filter((s, i, a) => a.indexOf(s) === i)   // 同一条文案别重复拼
-          .join(' | ')
-          || String(this._stderr || '').trim().slice(-300) || 'mpv 无法播放该文件'
-        const fresh = this._errSeqAtLoad || 0
-        const aoFailed = !this._aoParams && (
-          this._aoEverOpened ||                 // 曾经开出过 AO，现在开不出来 = 设备被抢/挂了
-          this._aoErrSeq > fresh ||             // 本次 load 之后出现过 AO 类 stderr
-          this._aoLogSeq > fresh ||             // 本次 load 之后出现过 AO 类 mpv 日志
-          AO_ERROR_RE.test(String(msg.error || ''))
-        )
-        this.onEvent({ type: 'file-error', message: detail, aoFailed })
+          // v3.3.20：把「AO 打不开」与「这个文件坏了」分开上报。
+          // 以前上层只看「有 file-error 就回退共享」，于是一个 404 / 不支持的编码
+          // 文件就能把整个会话永久降到共享输出（audit-main 第 7 条）。
+          // 判据用**序号**而不是 stderr 文本：_stderr 是滚动的 800 字符尾缓冲，
+          // 按下标切片会算错；序号只增不减，跨 load 的比较才是可靠的。
+          // detail 只用于给人看（日志 / toast）。判性质一律用序号，不解析文本。
+          const detail = [msg.error, this._lastAoLog, this._lastLog]
+            .filter(Boolean)
+            .filter((s, i, a) => a.indexOf(s) === i)   // 同一条文案别重复拼
+            .join(' | ')
+            || String(this._stderr || '').trim().slice(-300) || 'mpv 无法播放该文件'
+          const fresh = this._errSeqAtLoad || 0
+          const aoFailed = !this._aoParams && (
+            this._aoEverOpened ||                 // 曾经开出过 AO，现在开不出来 = 设备被抢/挂了
+            this._aoErrSeq > fresh ||             // 本次 load 之后出现过 AO 类 stderr
+            this._aoLogSeq > fresh ||             // 本次 load 之后出现过 AO 类 mpv 日志
+            AO_ERROR_RE.test(String(msg.error || ''))
+          )
+          this.onEvent({ type: 'file-error', message: detail, aoFailed })
         } else if (reason === 'eof') {
           // 与刚刚上报的 eof-reached 属于同一对（含切歌后才迟到的情况）→ 吞掉，
           // 只让渲染层收到一次曲末事件，避免一次曲末跳两首。
