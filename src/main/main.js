@@ -2674,7 +2674,7 @@ let dlSaveTimer = null
 
 function dlFile() { return path.join(userData, 'downloads.json') }
 
-function dlDto(t) {
+function toDownloadDto(t) {
   return {
     id: t.id,
     key: t.key,
@@ -2719,13 +2719,13 @@ function dlBroadcast(save) {
   const changed = []
   for (const t of all) {
     const sig = [t.status, t.received, t.total, t.speed, t.error, t.path].join('|')
-    if (full || dlSentSig.get(t.id) !== sig) { dlSentSig.set(t.id, sig); changed.push(dlDto(t)) }
+    if (full || dlSentSig.get(t.id) !== sig) { dlSentSig.set(t.id, sig); changed.push(toDownloadDto(t)) }
   }
   for (const id of Array.from(dlSentSig.keys())) {
     if (!dlTasks.has(id)) dlSentSig.delete(id)
   }
   if (changed.length || full) {
-    const payload = { full, items: full ? all.map(dlDto) : changed }
+    const payload = { full, items: full ? all.map(toDownloadDto) : changed }
     for (const w of BrowserWindow.getAllWindows()) {
       if (!w.isDestroyed()) w.webContents.send('online:dl-update', payload)
     }
@@ -3054,6 +3054,8 @@ const PROBE_TTL = 10 * 60 * 1000
 let probeRunning = 0
 const probeWaiting = []
 
+/** 并发闸门包装：音质探测最多 3 个同时跑（见上方 PROBE_TTL/probeCache），
+ *  多余的调用排队等前面完成。返回值透传 fn 的 Promise。 */
 function probeLimit(fn) {
   return new Promise((resolve, reject) => {
     const run = () => {
@@ -3684,7 +3686,7 @@ function registerOnlineIpc() {
     return { ok: true, id: task.id, dir: downloadDir() }
   })
 
-  ipcMain.handle('online:dlList', () => Array.from(dlTasks.values()).map(dlDto))
+  ipcMain.handle('online:dlList', () => Array.from(dlTasks.values()).map(toDownloadDto))
 
   ipcMain.handle('online:dlPause', (e, id) => {
     const t = dlTasks.get(String(id))
