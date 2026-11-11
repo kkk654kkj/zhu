@@ -247,7 +247,10 @@ function registerCoverProtocol() {
         headers: {
           'Content-Type': cov.mime,
           'Content-Length': String(cov.buf.length),
-          'Cache-Control': 'no-store'
+          // v2.8.27：以前是 no-store，曲目列表每滚一屏就把可见行的封面全部
+          // 重新请求 + 重新解码一遍，视觉上就是整屏封面闪。封面在 trackId
+          // 变化前不会变，给长缓存让 Chromium 直接命中图像缓存。
+          'Cache-Control': 'public, max-age=604800, immutable'
         }
       })
     } catch (err) {
