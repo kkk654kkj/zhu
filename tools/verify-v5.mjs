@@ -131,18 +131,22 @@ try {
       !/function dlPruneFinished[\s\S]{0,600}?unlink/.test(dl))
 } catch (e) { ok('main.js 单测组', false, e.message.slice(0, 200)) }
 
-// (e) app.js：连续失败计数 / flush / state.exclusive
+// (e) app.js 模块组：连续失败计数 / flush / state.exclusive
+// v3.3.24 渲染层拆分后：回退在 exclusive.js、回包增量在 persist.js、onScanDone 在 scan.js
 try {
   const a = fs.readFileSync(path.join(REPO, 'src/renderer/js/app.js'), 'utf8')
+  const ex = fs.readFileSync(path.join(REPO, 'src/renderer/js/exclusive.js'), 'utf8')
+  const per = fs.readFileSync(path.join(REPO, 'src/renderer/js/persist.js'), 'utf8')
+  const sc = fs.readFileSync(path.join(REPO, 'src/renderer/js/scan.js'), 'utf8')
   ok('失败自动跳曲调用 skipToNext', /skipToNext\s*\(/.test(a))
-  ok('有 flushSaveSettings', /flushSaveSettings/.test(a))
+  ok('有 flushSaveSettings', /flushSaveSettings/.test(per) || /flushSaveSettings/.test(a))
   ok('fallback 置 exclusiveFellBack 而非 exclusive=false',
-      /state\.exclusiveFellBack\s*=\s*true/.test(a) &&
-      !/function applyExclusiveFallback[\s\S]{0,800}?state\.exclusive\s*=\s*false/.test(a))
+      /state\.exclusiveFellBack\s*=\s*true/.test(ex) &&
+      !/function applyExclusiveFallback[\s\S]{0,800}?state\.exclusive\s*=\s*false/.test(ex))
   // v3.3.18（第四轮 §4.3 #4）：回包只同步本次 patch 涉及的键，不再整份 Object.assign
-  ok('settings 回包按键增量同步', /for \(const k of Object\.keys\(patch\)\)/.test(a) &&
-    !/Object\.assign\(state\.settings, s\)/.test(a))
-  ok('onScanDone 用对象引用定位', /const curTrack = player\.current[\s\S]{0,400}kept\.indexOf\(curTrack\)/.test(a))
+  ok('settings 回包按键增量同步', /for \(const k of Object\.keys\(patch\)\)/.test(per) &&
+    !/Object\.assign\(state\.settings, s\)/.test(per))
+  ok('onScanDone 用对象引用定位', /const curTrack = player\.current[\s\S]{0,400}kept\.indexOf\(curTrack\)/.test(sc))
 } catch (e) { ok('app.js 单测组', false, e.message.slice(0, 200)) }
 
 // (f) online.js：probeStream unverified / getUrl release / safeExt
