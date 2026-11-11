@@ -1710,6 +1710,10 @@ const SETTING_RANGES = {
 }
 /** 数值 map（lyricOffsetById / trackGains / manualGains / resumePos）的条数上限 */
 const SETTING_MAP_MAX = 5000
+// v2.8.18：数组型设置的长度上限。超长 musicDirs 会让 startWatching() 无限 fs.watch，
+// 句柄耗尽后整个曲库增删都失效。v2.8.17 移植时只搬了引用没搬这行声明，
+// 'use strict' 下每次写数组型设置（如添加音乐文件夹）都抛 ReferenceError
+const SETTING_ARRAY_MAX = 200
 
 function clampSetting(key, v) {
   const r = SETTING_RANGES[key]

@@ -130,6 +130,15 @@ function main() {
       ok('sanitizeSettingsPatch 可调用', false, err.message)
     }
     try {
+      // 数组上限：这条会真的执行到 `v.length > SETTING_ARRAY_MAX`，
+      // 常量没声明就会抛 ReferenceError —— 比字符串哨兵更硬
+      const big = new Array(500).fill('D:/Music')
+      const out2 = ctx.sanitizeSettingsPatch({ musicDirs: big }, { musicDirs: [] })
+      ok('musicDirs 超长数组被拒（SETTING_ARRAY_MAX 有声明）', !('musicDirs' in out2))
+    } catch (err) {
+      ok('musicDirs 超长数组被拒（SETTING_ARRAY_MAX 有声明）', false, err.message)
+    }
+    try {
       ok('未知键被拒', !('evilKey' in ctx.sanitizeSettingsPatch({ evilKey: 1 }, { volume: 0 })))
       // 注意不能用 `'__proto__' in out` 判断 —— 原型链上永远为真
       const polluted = ctx.sanitizeSettingsPatch(JSON.parse('{"__proto__":{"x":1}}'), { volume: 0 })
@@ -149,8 +158,9 @@ function main() {
 
   console.log('\n=== 3) 「曾漏声明」标识符哨兵 ===')
   // 这 5 个在 v2.8.16 的 master 上只有引用没有声明，4 条 P1 的根因
+  // v2.8.18：SETTING_ARRAY_MAX 就是「引用搬过来了、声明没搬」的复发 —— 加进哨兵
   const mustDeclare = ['cleanupStarted', 'systemShutdownPending', 'systemShutdownTimer',
-    'FORBIDDEN_SETTING_KEYS', 'lastOpenFiles']
+    'FORBIDDEN_SETTING_KEYS', 'lastOpenFiles', 'SETTING_ARRAY_MAX', 'SETTING_MAP_MAX']
   for (const n of mustDeclare) {
     const re = new RegExp('^\\s*(?:let|var|const)\\s+' + n + '\\b', 'm')
     ok('有声明：' + n, re.test(mainSrc))
