@@ -269,9 +269,9 @@ def decls(src):
     d |= set(re.findall(r'\bclass\s+([A-Za-z_$][\w$]*)', s))
     # 函数形参 / 箭头函数形参 / catch 参数 → 视为已声明
     for m in re.finditer(r'\bfunction\s*[A-Za-z_$]*\s*\(([^)]*)\)', s):
-        d |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*(?=[,=)]|$)', m.group(1)))
+        d |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*(?=[,=)\s]|$)', m.group(1)))
     for m in re.finditer(r'\(([^()]*)\)\s*=>', s):
-        d |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*(?=[,=)]|$)', m.group(1)))
+        d |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*(?=[,=)\s]|$)', m.group(1)))
     d |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*=>', s))
     d |= set(re.findall(r'\bcatch\s*\(\s*([A-Za-z_$][\w$]*)', s))
     # v3.3.24：for-of / for-in 的循环变量（含解构形式）也是声明。
