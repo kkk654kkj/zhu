@@ -229,6 +229,12 @@ function coverCacheGet(id) {
   return e
 }
 
+/** v3.3.23：封面缓存 key（专辑级共享；散曲退回单曲 key）。
+ *  getCover 与后台预热 startCoverWarmup 必须用同一个函数，保证 key 一致。 */
+function coverKeyOf(t) {
+  return (t.album || t.albumArtist) ? `${t.albumArtist || ''}|${t.album || ''}` : `id:${t.id}`
+}
+
 /** 内嵌图片 → {buf, mime}；music-metadata 的 picture.format 是 image/jpeg 这类 MIME */
 function pictureToBuf(picture) {
   if (!picture || !picture.data) return null
@@ -641,6 +647,9 @@ class Library {
     // v3.3.13：getCover 的 in-flight 去重表，构造函数里就初始化，
     // 避免 run 同步抛错时 finally 的 delete 因 Map 未就绪而失效
     this._coverInFlight = new Map()
+    // v3.3.23：封面后台预热的状态句柄
+    this._coverWarmupAbort = true
+    this._coverWarmupTimer = null
   }
 
   /** 记一条失败（幂等）：同一文件重复失败只刷新时间与原因，保留首次出现时间 */
@@ -780,9 +789,7 @@ class Library {
     if (!t || t.cover !== COVER_EMBEDDED || !t.path) return null
     // 专辑 key：专辑名/专辑歌手任一存在就用组合（同一张专辑的曲目都带同样标签）；
     // 什么都没有的散曲退回单曲 key，行为与旧版一致
-    const key = (t.album || t.albumArtist)
-      ? `${t.albumArtist || ''}|${t.album || ''}`
-      : `id:${id}`
+    const key = coverKeyOf(t)
     const hit = coverCacheGet(key)
     if (hit) return hit
     // v3.3.9：封面墙首屏会并发请求同一 id —— 加 in-flight 去重，
@@ -813,6 +820,41 @@ class Library {
     // 这里补删一次，确保已 resolve(null) 的 run 不会被永久缓存
     if (settled) this._coverInFlight.delete(key)
     return run
+  }
+
+  /** v3.3.23：封面后台预热。扫描完成/启动加载后调用——把有内嵌封面的曲目按专辑 key
+   *  去重，串行 + 节流地走 getCover()（自动命中已有缓存、复用 in-flight 去重），
+   *  让首次打开封面墙/专辑视图基本全命中，不再每专辑现场解析。
+   *  串行 + 每张间隔 DELAY 让出事件循环，不抢扫描/播放的 IO 与 CPU；
+   *  LRU 上限兜底内存；退出链必须调 stopCoverWarmup() 中止循环。 */
+  startCoverWarmup() {
+    this.stopCoverWarmup()
+    const seen = new Set()
+    const ids = []
+    for (const t of this.tracks.values()) {
+      if (t.cover !== COVER_EMBEDDED || !t.path) continue
+      const key = coverKeyOf(t)
+      if (seen.has(key)) continue
+      seen.add(key)
+      ids.push(t.id)
+    }
+    if (!ids.length) return
+    this._coverWarmupAbort = false
+    const DELAY = 200
+    const run = async () => {
+      for (const id of ids) {
+        if (this._coverWarmupAbort) return
+        try { await this.getCover(id) } catch (err) { /* 预热失败不影响使用，真要显示时会再试 */ }
+        if (this._coverWarmupAbort) return
+        await new Promise((r) => { this._coverWarmupTimer = setTimeout(r, DELAY) })
+      }
+    }
+    run()
+  }
+
+  stopCoverWarmup() {
+    this._coverWarmupAbort = true
+    if (this._coverWarmupTimer) { clearTimeout(this._coverWarmupTimer); this._coverWarmupTimer = null }
   }
 
   list() {
