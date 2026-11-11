@@ -271,8 +271,14 @@ async function boot() {
       // 主进程独占失败自动回退共享（载荷带 exclusive:false）：同步运行时状态
       // 并刷新所有派生 UI，否则 state.exclusive 残留 true 会误命中独占分支
       applyExclusiveFallback()
-    } else if (e.type === 'ao-lost') aoToast('ao-lost', '独占输出被系统中断（可能是游戏启动改了音频设备），正在自动恢复…', 5000)
-    else if (e.type === 'ao-recovered') aoToast('ao-recovered', '独占输出已恢复', 2500)
+    }     else if (e.type === 'ao-lost') aoToast('ao-lost', '独占输出被系统中断（可能是游戏启动改了音频设备），正在自动恢复…', 5000)
+    else if (e.type === 'ao-recovered') {
+      // v3.3.20：看门狗夺回独占说明 AO 已经正常工作，回退标记必须复位 ——
+      // 否则一次 ao-lost 之后，后续所有 error 都按「单曲坏了」处理并自动跳曲，
+      // 而真正掉设备时应该停下来提示（app.js 的 error 分支靠这个标记分流）
+      if (state.exclusiveFellBack) { state.exclusiveFellBack = false; updateHifiBadge() }
+      aoToast('ao-recovered', '独占输出已恢复', 2500)
+    }
     else if (e.type === 'exclusive-lost') aoToast('exclusive-lost', e.message || '自动夺回独占失败：设备被其他程序占用', 6000)
   })
   // v3.3.10：第二实例带来的关联文件 —— 曲库按「文件夹」组织，单文件导入
@@ -587,6 +593,11 @@ async function analyzeLibraryLoudness() {
     state.analyzing = false
     state.gainsCleared = false   // 第四轮 §4.4 #1：异常路径也必须复位，否则下一轮正常分析会被整批丢弃
     UI.hideScan('analyze')
+    // v3.3.20：分析期间到达的 scan-done 在这里补渲染（见 onScanDone 的 pending 分支）
+    if (state.scanDonePending) {
+      state.scanDonePending = false
+      onScanDone(null)
+    }
   }
 }
 
@@ -823,7 +834,12 @@ function renderView() {
     document.getElementById('tableBody').hidden = true
     Online.init().then(() => {
       Online.render()
-      if (!Online.list.length) {
+      // v3.3.20：只有「用户没在别处输入」时才把焦点给在线搜索框。
+      // renderView 会在每次渲染后重跑，无条件 focus() 会在用户往顶部全局搜索框
+      // 打字时把光标抢走（后面的字全进 opInput，像是输入法坏了）。
+      const ae = document.activeElement
+      const busy = ae && ae !== document.body && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)
+      if (!Online.list.length && !busy) {
         const inp = document.getElementById('opInput')
         if (inp) inp.focus()
       }
@@ -1117,7 +1133,9 @@ function bindPlayer() {
 
     // 独占模式下多半是声卡/引擎问题，不是文件坏了：绝不自动跳曲。
     // （v3.3.18 起回退共享只置 state.exclusiveFellBack，后端仍是 mpv，判据不变）
-    if (state.exclusive) {
+    // v3.3.20：已经回退共享时，mpv 后端本身能正常出声，这时的 error 就是「这一首坏了」，
+    // 再按独占处理会把队列永久卡在这一首（audit-main 第 7 条）。
+    if (state.exclusive && !state.exclusiveFellBack) {
       toast('音频输出失败：' + ((audio && audio.lastError) || '设备不可用，已暂停'))
       player.pause()
       return
@@ -2503,6 +2521,13 @@ async function doScan() {
       UI.hideScan('scan')
       return
     }
+    // v3.3.20：主进程在目录不可用时返回 ok:false —— 以前被当成正常结果，
+    // 继续走 listTracks + 提示「扫描完成」，用户以为扫过了其实一张没进来。
+    if (res && res.ok === false) {
+      UI.hideScan('scan')
+      toast('扫描未执行：' + (res.error || '音乐目录不可用'), 4000)
+      return
+    }
     const tracks = await window.api.listTracks()
     setTracks(tracks)
     updateNavCounts()
@@ -2547,7 +2572,9 @@ function onScanProgress(p) {
 async function onScanDone(res) {
   if (scanning) return
   // 第四轮 §4.4 #3：分析进行中不能重建表格/覆盖遮罩进度（两者共用一块遮罩）
-  if (state.analyzing) return
+  // v3.3.20：但不能把这次扫描结果直接扔掉 —— 分析结束后要补一次渲染，
+  // 否则分析了 5 分钟期间新增的歌永远不出现（只能手动再扫或重启）。
+  if (state.analyzing) { state.scanDonePending = true; return }
   // 目录不可访问时主进程会跳过清理，这种 scan-done 不能动队列
   if (res && res.skipped) return
   try {
@@ -2811,7 +2838,11 @@ function handleShortcut(action) {
 
 function bindGlobalKeys() {
   window.addEventListener('keydown', (e) => {
-    const inInput = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
+    // v3.3.20：<select> 也算输入控件。以前只认 INPUT/TEXTAREA，
+    // 焦点在「音质偏好」「缓存上限」下拉上时，↓ 被当成音量 -5%、空格被当成播放/暂停，
+    // 两个下拉完全没法用键盘操作。
+    const ae = document.activeElement
+    const inInput = /^(INPUT|TEXTAREA|SELECT|OPTION)$/.test(ae.tagName) || ae.isContentEditable
     if (e.key === 'Escape') {
       // 关机倒计时进行中：Esc 优先取消它（这一刻误触的代价最大）
       if (powerCountdownTimer) { cancelPowerCountdown(); e.preventDefault(); return }
@@ -2881,6 +2912,8 @@ function bindGlobalKeys() {
 // 合并，不能整体替换（全文件多处直接赋值 state.settings.xxx，整体替换会回滚）。
 let saveSettingsPending = null
 let saveSettingsTimer = null
+const SETTINGS_SAVE_MAX_RETRY = 3
+let saveSettingsRetries = 0
 
 /** 立即发送 pending（幂等），并取消 debounce 定时器 */
 function flushSaveSettings() {
@@ -2889,6 +2922,7 @@ function flushSaveSettings() {
   if (saveSettingsTimer) { clearTimeout(saveSettingsTimer); saveSettingsTimer = null }
   if (!patch || !Object.keys(patch).length) return Promise.resolve()
   return window.api.patchSettings(patch).then((s) => {
+    saveSettingsRetries = 0   // v3.3.20：落盘成功后清零，下次失败还能重试满额度
     // 第四轮 §4.3 #4：回包是主进程的**全量** settings，以前整个 Object.assign 回来，
     // 会把本次没提交、但渲染层刚直接赋过值的键（applyEq / btnNorm / toggleExclusiveOutputOnce）
     // 一起覆盖回旧值。只同步本次 patch 涉及的键。
@@ -2899,6 +2933,13 @@ function flushSaveSettings() {
     }
   }).catch(() => {
     // 以前 .catch(()=>{}) 把写盘失败吞得干干净净，用户改了设置却毫无提示
+    // v3.3.20：失败不能只弹个 toast 就把 patch 丢掉 —— 界面已是新值、磁盘还是旧值，
+    // 本次会话所有改动到下次启动全部回滚。合并回 pending 并有限次重试。
+    saveSettingsPending = Object.assign({}, patch, saveSettingsPending || {})
+    if (saveSettingsRetries < SETTINGS_SAVE_MAX_RETRY && !saveSettingsTimer) {
+      saveSettingsRetries++
+      saveSettingsTimer = setTimeout(() => { saveSettingsTimer = null; flushSaveSettings() }, 2000)
+    }
     toast('设置保存失败（磁盘只读或被占用？）', 3000)
   })
 }

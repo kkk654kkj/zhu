@@ -177,13 +177,17 @@ const AudioFx = {
     if (!this._visBound) {
       this._visBound = true
       document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && this._canvas && !this._raf) this._loop()
+        // v3.3.20：_spectrumOn 才拉起。以前只看 canvas 和 raf —— 频谱已 stop 后
+        // 任何一次切窗口都会把 60fps 的循环复活，面板关着也一直空转画
+        if (!document.hidden && this._spectrumOn && this._canvas && !this._raf) this._loop()
       })
     }
+    this._spectrumOn = true
     this._loop()
   },
 
   stopSpectrum() {
+    this._spectrumOn = false   // v3.3.20：见上，visibilitychange 的拉起判据
     if (this._raf) cancelAnimationFrame(this._raf)
     this._raf = 0
     if (this._ro) { this._ro.disconnect(); this._ro = null }
@@ -210,6 +214,8 @@ const AudioFx = {
     // 第四轮 §4.6：窗口隐藏时不再排下一帧 —— 以前只跳过绘制，rAF 仍在 60fps 空转，
     // 笔记本合盖/最小化后仍在烧 CPU。恢复可见时由 visibilitychange 重新拉起。
     if (document.hidden) { this._raf = 0; return }
+    // v3.3.20：已 stop 就不再排帧（visibilitychange 拉起判据的兜底）
+    if (!this._spectrumOn) { this._raf = 0; return }
     this._raf = requestAnimationFrame(() => this._loop())
     const c = this._canvas
     if (!c) return
