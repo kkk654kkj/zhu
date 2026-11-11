@@ -187,9 +187,11 @@ function findLyric(audioPath) {
 const COVER_EMBEDDED = '@embedded'
 
 /**
- * 内嵌封面内存缓存（id → {buf, mime, at}），带字节上限的 LRU。
- * 扫描时就把封面塞进来（那时数据本来就在手上），播放/列表翻页都直接命中；
- * 被淘汰或重启后由 getCover() 重新解析文件。
+ * 内嵌封面内存缓存（key → {buf, mime, at}），带字节上限的 LRU。
+ * v3.3.22：key 从曲目 id 改为「专辑 key」（无专辑信息则退回单曲 key）——
+ * 同一张专辑几十首共用一张封面，按专辑缓存一次解析、一份内存。
+ * v3.3.22：扫描期不再把封面塞进缓存（那时全量入内存会把 160MB LRU 填满）；
+ * 只标记 meta.cover = COVER_EMBEDDED，首次通过 lxcover:// 请求时由 getCover() 现场解析并回填。
  */
 const COVER_CACHE = new Map()
 const COVER_CACHE_MAX_BYTES = 160 * 1024 * 1024
@@ -468,7 +470,7 @@ function resolveNameSegments(nameBase, lrcMeta) {
  *
  * @param {string} filePath
  * @param {object} mm music-metadata 模块
- * @param {string} id 曲目 id（内嵌封面按 id 进内存 LRU）
+ * @param {string} id 曲目 id（v3.3.22 起只用于日志/兜底，封面缓存 key 由 getCover 按专辑生成）
  * @returns {Promise<{meta:object|null, mmError:string|null, embeddedLyric:string|null, rg:object|null}>}
  */
 async function readAudioMeta(filePath, mm, id) {
@@ -497,15 +499,9 @@ async function readAudioMeta(filePath, mm, id) {
       codec: fmt.codec || null,
       lossless: !!fmt.lossless
     }
-    // 内嵌封面（v2.0）：不再落盘，进内存 LRU，页面按需通过 lxcover:// 取
-    const pic = c.picture && c.picture.length ? c.picture[0] : null
-    const pb = pictureToBuf(pic)
-    if (pb) {
-      coverCacheSet(id, pb.buf, pb.mime)
-      meta.cover = COVER_EMBEDDED
-    } else {
-      meta.cover = null
-    }
+    // 内嵌封面（v2.0）：不落盘。v3.3.22 起扫描期也不进内存 LRU（全量入内存会填满
+    // 160MB 上限且扫描峰值高），只标记 COVER_EMBEDDED，首次按需由 getCover() 解析回填。
+    meta.cover = c.picture && c.picture.length ? COVER_EMBEDDED : null
     // 内嵌歌词：没有同名 .lrc 时才用（外置文件优先，方便随时改）
     embeddedLyric = lyricsToLrc(c)
     // ReplayGain 标签（v2.0）：有标签就不用再跑一遍整库响度分析
@@ -776,19 +772,26 @@ class Library {
   }
 
   /** 取内嵌封面（v2.0）：命中内存 LRU 直接返回，否则现场解析文件并回填缓存。
+   *  v3.3.22：缓存 key 改为专辑级（同专辑几十首共用一份解析结果与内存）；
+   *  in-flight 去重同样按专辑 key —— 封面墙首屏并发同专辑请求只解析一次。
    *  返回 {buf, mime} 或 null。 */
   async getCover(id) {
-    const hit = coverCacheGet(id)
-    if (hit) return hit
     const t = this.tracks.get(id)
     if (!t || t.cover !== COVER_EMBEDDED || !t.path) return null
+    // 专辑 key：专辑名/专辑歌手任一存在就用组合（同一张专辑的曲目都带同样标签）；
+    // 什么都没有的散曲退回单曲 key，行为与旧版一致
+    const key = (t.album || t.albumArtist)
+      ? `${t.albumArtist || ''}|${t.album || ''}`
+      : `id:${id}`
+    const hit = coverCacheGet(key)
+    if (hit) return hit
     // v3.3.9：封面墙首屏会并发请求同一 id —— 加 in-flight 去重，
     // 以前每个请求都完整 parseFile 一遍（要读整个音频文件）
     // v3.3.13：_coverInFlight 必须在 run 之前就绪（构造函数里也已初始化），
     // 否则 parseFile 同步抛错时 finally 的 delete 被 undefined 守卫吞掉，
     // 已完成的 run 随后被 set 进 Map 且永不删除，封面再也显示不出来
     if (!this._coverInFlight) this._coverInFlight = new Map()
-    if (this._coverInFlight.has(id)) return this._coverInFlight.get(id)
+    if (this._coverInFlight.has(key)) return this._coverInFlight.get(key)
     let settled = false
     const run = (async () => {
       try {
@@ -796,19 +799,19 @@ class Library {
         const pic = parsed.common && parsed.common.picture && parsed.common.picture[0]
         const pb = pictureToBuf(pic)
         if (!pb) return null
-        coverCacheSet(id, pb.buf, pb.mime)
+        coverCacheSet(key, pb.buf, pb.mime)
         return pb
       } catch (err) {
         return null
       } finally {
         settled = true
-        this._coverInFlight.delete(id)
+        this._coverInFlight.delete(key)
       }
     })()
-    this._coverInFlight.set(id, run)
+    this._coverInFlight.set(key, run)
     // parseFile 同步抛错时 IIFE 会同步走完，finally 的 delete 跑在 set 之前（删空），
     // 这里补删一次，确保已 resolve(null) 的 run 不会被永久缓存
-    if (settled) this._coverInFlight.delete(id)
+    if (settled) this._coverInFlight.delete(key)
     return run
   }
 

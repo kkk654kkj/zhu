@@ -159,5 +159,23 @@ try {
       /qingTicketWaiters\.size === 0 && qingTicketCtrl/.test(qseg))
 } catch (e) { ok('online.js 单测组', false, e.message.slice(0, 200)) }
 
+// (g) v3.3.22：虚拟滚动 + 封面按需加载
+try {
+  const u = fs.readFileSync(path.join(REPO, 'src/renderer/js/ui.js'), 'utf8')
+  ok('renderTable 走虚拟窗口（spacer + 缓冲）',
+      /_renderTableWindow/.test(u) && /TABLE_ROW_H = 40/.test(u) && /TABLE_VBUF/.test(u))
+  ok('可视窗口重画带 playing/selected 态',
+      /isSel \? ' selected'/.test(u) && /_tCurrentId/.test(u))
+  ok('滚动用 rAF 节流', /addEventListener\('scroll'[\s\S]{0,200}requestAnimationFrame/.test(u))
+  ok('行数断言已改虚拟化语义', /spacers/.test(fs.readFileSync(path.join(REPO, 'test/smoke.mjs'), 'utf8')))
+
+  const lib = fs.readFileSync(path.join(REPO, 'src/main/library.js'), 'utf8')
+  const rm = lib.slice(lib.indexOf('async function readAudioMeta'), lib.indexOf('function resolveTitleArtist'))
+  ok('扫描期不再把封面写进内存 LRU', !/coverCacheSet/.test(rm) && /COVER_EMBEDDED/.test(rm))
+  const gc = lib.slice(lib.indexOf('async getCover('), lib.indexOf('  list() {'))
+  ok('封面缓存 key 按专辑共享',
+      /albumArtist/.test(gc) && /coverCacheSet\(key/.test(gc) && /_coverInFlight\.has\(key\)/.test(gc))
+} catch (e) { ok('虚拟滚动/封面单测组', false, e.message.slice(0, 200)) }
+
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
 process.exit(fail ? 1 : 0)
