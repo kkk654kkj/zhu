@@ -561,9 +561,6 @@ body.win-dragging * { backdrop-filter: none !important; }
 /* v3.4.0：格式列与音质列合并成一列「规格」——[FLAC] 24/96。
    旧版两列语义重叠（格式 + 位深/采样率），却各占 74/88px，
    在 1440 宽下标题列被挤到只剩 150px。合并后省一列 + 一个 gap = 82px 还给标题。 */
-/* 徽标与码率各自定宽：每行总宽一致，居中后起点才固定。
-   否则「MP3 320」比「FLAC 16/44.1」窄，整组各自居中 → 各行 FLAC 左右漂移 12px
-   （实测 674 / 675 / 678 / 686）。 */
 .tr .c-spec {
   display: flex;
   align-items: center;
@@ -575,8 +572,7 @@ body.win-dragging * { backdrop-filter: none !important; }
   white-space: nowrap;
   min-width: 0;
 }
-.tr .c-spec .badge { width: 36px; text-align: center; }
-.tr .c-spec .q { width: 46px; text-align: left; overflow: hidden; text-overflow: ellipsis; }
+.tr .c-spec .q { overflow: hidden; text-overflow: ellipsis; }
 .tr .c-spec.hires { color: var(--txt-2); }
 /* 时长列 80px：时间靠右停在 56px 处，正好给 hover 浮现的两个快捷钮让位
    （24+24+4=52）—— 这样时间不用像旧版那样 hover 就消失。 */
