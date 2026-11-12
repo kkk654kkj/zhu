@@ -7,7 +7,9 @@ const http = require('http')
  * init(G) 注入 main 的共享状态访问器（getter，见 main.js 的 G 定义）。
  */
 const DC = require('./dircache')
-const { protocol } = require('electron')
+// v3.3.32：serveLocalFile 用 PROTO.mimeFor 取 Content-Type；v3.3.24 拆分时漏搬这个
+// require（错留了 electron 的 protocol），缓存命中播放必抛 ReferenceError → 500。
+const PROTO = require('./protocols')
 
 let G = null
 function init(g) { G = g }
@@ -578,12 +580,30 @@ function removePartFile(p, ps) {
   } catch (e) { del() }
 }
 
+/**
+ * v3.3.32：退出链主动关掉本地代理。close() 只停止接受新连接，<audio> 的
+ * keep-alive 旧连接会一直挂到 socket 超时，表现为「关了窗口进程不退」。
+ * 同时清空 base/ready，避免退出瞬间还有请求拿旧端口重新起一个 server。
+ */
+function closeStreamServer() {
+  const s = streamServer
+  streamServer = null
+  streamBase = ''
+  streamReady = null
+  if (!s) return
+  try {
+    if (typeof s.closeAllConnections === 'function') s.closeAllConnections()
+    s.close()
+  } catch (e) { /* 忽略 */ }
+}
+
 module.exports = {
   init,
   get streamServer() { return streamServer },
   get streamBase() { return streamBase },
   get streamReady() { return streamReady },
   ensureStreamBase,
+  closeStreamServer,
   parseRangeHeader,
   serveLocalFile,
   startStreamServer,

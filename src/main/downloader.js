@@ -79,7 +79,7 @@ function dlPruneFinished() {
   let removed = 0
   for (const t of fin.slice(0, fin.length - DL_FINISHED_MAX)) {
     if (t.rescanTimer) { clearTimeout(t.rescanTimer); t.rescanTimer = null }
-    dlTasks.delete(t.id); removed++
+    dlTasks.delete(t.id); dlTargetCache.delete(t.id); removed++
   }
   // error 任务会落盘，摘了要触发保存，否则重启后又复活
   if (removed) dlSaveSoon()
@@ -212,12 +212,14 @@ async function dlRun(task) {
   let endTimer = null   // 写盘收尾的 10 秒超时句柄，finally 里兜底清理
   try {
     let info = null
-    try { info = await G.online.getPlayable(task.song, qualityPref(), { signal: ctrl.signal }) } catch (err) { info = null }
+    let parseErr = null
+    try { info = await G.online.getPlayable(task.song, qualityPref(), { signal: ctrl.signal }) } catch (err) { parseErr = err }
     // 暂停/删除可能发生在解析期间（最长十几秒），解析回来必须立刻收手
     if (ctrl.signal.aborted || task.deleted) {
       throw Object.assign(new Error('download aborted'), { name: 'AbortError' })
     }
-    if (!info || !info.url) throw new Error('没有可用地址（可能版权限制）')
+    // v3.3.32：解析链真异常别伪装成「版权限制」，把原始错误透给用户看
+    if (!info || !info.url) throw parseErr || new Error('没有可用地址（可能版权限制）')
 
     if (!task.path) {
       const ext = info.ext === 'm4a' ? 'm4a' : info.ext === 'flac' ? 'flac' : 'mp3'
@@ -378,6 +380,7 @@ async function dlRun(task) {
     if (ws) { try { ws.destroy() } catch (e) { /* 忽略 */ } }
     if (task.deleted) {
       dlTasks.delete(task.id)
+      dlTargetCache.delete(task.id)
       dlUnlinkRetry(task.path ? task.path + '.part' : '')
       dlUnlinkRetry(task.path || '')
     } else if (task.abort !== ctrl) {
@@ -464,6 +467,14 @@ module.exports = {
   dlPickPath,
   dlRun,
   qualityPref,
+  // v3.3.32：main.js 的 online:dl* handler 直接读写 DL.dlTasks / DL.dlSeq /
+  // DL.dlTargetCache。v3.3.24 拆分时只搬定义没导出，下载管理全线 0ms 抛 TypeError
+  // （与 v3.3.31 的 probeCache 同一类回归）。dlSeq 是可变 let，必须用读写器导出，
+  // 否则 ++DL.dlSeq 只改导出快照、内部值永远不变。
+  dlTasks,
+  dlTargetCache,
+  get dlSeq() { return dlSeq },
+  set dlSeq(v) { dlSeq = v },
   // v3.3.31：main.js 的 online:probe 直接读写 DL.probeCache。
   // v3.3.24 拆分时只搬走定义、漏了导出 → DL.probeCache 为 undefined，
   // 每次音质探测 0ms 抛 TypeError，列表只剩平台标称码率（看不到无损/高解析）。

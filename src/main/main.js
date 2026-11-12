@@ -1788,6 +1788,7 @@ function registerOnlineIpc() {
       return { ok: true }
     }
     DL.dlTasks.delete(t.id)
+    DL.dlTargetCache.delete(t.id)
     if (t.rescanTimer) { clearTimeout(t.rescanTimer); t.rescanTimer = null }
     // 已完成的文件是用户的音乐，不删；没完成的残片才清（带重试，见 dlUnlinkRetry）
     if (t.status !== 'done' && t.path) DL.dlUnlinkRetry(t.path + '.part')
@@ -1802,7 +1803,7 @@ function registerOnlineIpc() {
         // v3.3.13：error/未完成任务的 .part 残片别留着
         if (t.status !== 'done' && t.path) DL.dlUnlinkRetry(t.path + '.part')
         if (t.rescanTimer) { clearTimeout(t.rescanTimer); t.rescanTimer = null }
-        DL.dlTasks.delete(id); n++
+        DL.dlTasks.delete(id); DL.dlTargetCache.delete(id); n++
       }
     }
     DL.dlBroadcast(true)
@@ -1838,7 +1839,9 @@ function registerOnlineIpc() {
   ipcMain.handle('online:cacheClear', () => {
     const r = DC.cacheClear()
     logLine('[cache] 用户清理缓存，删除', r.removed, '首')
-    return { ...cacheStats(), removed: r.removed }
+    // v3.3.32：这里写的是裸 cacheStats()，main.js 无此函数 → 缓存已删但 IPC reject，
+    // 渲染层 .catch(()=>null) 吞掉后界面统计不刷新、也无成功反馈。
+    return { ...DC.cacheStats(), removed: r.removed }
   })
 
   ipcMain.handle('online:pickCacheDir', async () => {
@@ -2634,6 +2637,7 @@ if (gotLock) cleanChromiumCache().catch(() => {})
     const finishQuit = () => {
       if (quitCleanupDone) return
       quitCleanupDone = true
+      try { SP.closeStreamServer() } catch (err) { /* 忽略 */ }   // v3.3.32：关掉本地代理的 keep-alive 连接，退出不再被拖住
       try { DL.dlSaveNow() } catch (err) { /* 忽略 */ }   // 任何退出路径都不丢下载任务（幂等）
       try { if (store) store.flush() } catch (err) { /* 忽略 */ }
       try { if (tray) tray.destroy() } catch (err) { /* 忽略 */ }
