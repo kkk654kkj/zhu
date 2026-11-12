@@ -213,6 +213,27 @@ function main() {
   ok('滚动帧不再整块重建 tableBody',
     !/body\.innerHTML\s*=\s*\n?\s*`<div style="height:\$\{start/.test(uiSrc))
 
+  console.log('\n=== 6) 浅色主题列表哨兵（v3.3.30） ===')
+  /* .tr 行底是硬编码 #1a1f27；浅色模式若缺少 html[data-theme="light"] 的行级覆盖，
+     整个列表会变回黑底 + 低对比文字（真机截图复现）。同时严禁把浅色专用变量
+     搬进 :root —— 那会让深色主题一起变色。 */
+  const lightFix = appCss.slice(appCss.indexOf('/* --- v3.3.30'))
+  ok('浅色模式有行级白底覆盖（.tr 深色残留不再外露）',
+    /html\[data-theme="light"\]\s*\.tr\s*\{[^}]*background:\s*var\(--row-bg\)/.test(appCss))
+  ok('浅色专用变量定义在 data-theme="light" 块内',
+    /html\[data-theme="light"\]\s*\{[^}]*--row-ink:/.test(appCss) &&
+    !/^:root\s*\{[^}]*--row-ink:/m.test(appCss))
+  ok('深色主题零变化（.tr 硬编码深色底仍在）',
+    /\.tr\s*\{[^}]*background:\s*#1a1f27/.test(appCss))
+  ok('浅色覆盖延伸到在线列表与队列抽屉',
+    /html\[data-theme="light"\]\s*\.op-body\s*\.op-tr\s*\{/.test(appCss) &&
+    /html\[data-theme="light"\]\s*\.qp-item\.active/.test(appCss))
+  ok('浅色修复块内无硬编码深色底（防止回退）',
+    lightFix.length > 0 &&
+    !/html\[data-theme="light"\][^{}]*\{[^}]*background:\s*#(?:0|1|2)[0-9a-f]{5}/i.test(lightFix))
+  ok('浅色行禁用背景过渡（防隐藏窗口切主题时底色卡在旧值）',
+    /html\[data-theme="light"\]\s*\.tr\s*\{[^}]*transition-property:\s*transform,\s*box-shadow,\s*color/.test(appCss))
+
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
 }

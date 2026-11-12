@@ -2575,6 +2575,104 @@ html[data-theme="light"] .fs-prog .t { color: var(--txt); }
 html[data-theme="light"] #galleryView { background: color-mix(in srgb, #ffffff 86%, transparent); }
 html[data-theme="light"] .bs-card { box-shadow: 0 18px 44px rgba(24,36,56,.14); }
 
+/* --- v3.3.30 浅色主题：列表深色残留修复（追加式，深色主题零变化） ---
+   根因：.tr 行卡片背景是硬编码 #1a1f27，浅色模式只覆盖了 --bg-* 变量，行底仍是深色；
+   配套的行内徽标 / 快捷钮 / 封面占位 / 音质字 / 选中态也都写死深色或亮绿。
+   这里统一收口在 html[data-theme="light"] 下，不改上方任何既有声明、不改 40px 行高。
+   坑：theme.js applyVars 把 --accent / --accent-soft / --accent-dim 写进
+   documentElement.style，优先级高于本块同名声明 —— 浅色专用量一律用新变量名。 */
+html[data-theme="light"] {
+  --row-bg: var(--bg-panel);
+  --row-ink: color-mix(in srgb, var(--accent) 45%, #08131f);
+  --row-tint: color-mix(in srgb, var(--accent) 15%, var(--bg-panel));
+  --row-tint-soft: color-mix(in srgb, var(--accent) 7%, var(--bg-panel));
+  --row-line: color-mix(in srgb, var(--txt-3) 26%, transparent);
+  --badge-bg: #e9edf4;
+  --badge-lossless-bg: #fbf0d7;
+  --badge-lossless-ink: #8a5a00;
+}
+
+/* 主列表：白底深字 + 极细描边；行间靠容器底色（--bg-main）形成层次 */
+html[data-theme="light"] .tr {
+  background: var(--row-bg);
+  color: var(--txt-2);
+  box-shadow: inset 0 0 0 1px var(--row-line);
+  /* 既有 .tr 有 background .12s 过渡；隐藏窗口不产合成帧时过渡不会推进，
+     切主题后计算样式会一直卡在旧底色（实测 dark->light 仍读到 #1a1f27）。
+     浅色下去掉背景过渡，切换即用即白，也避免切主题瞬间残留黑底。 */
+  transition-property: transform, box-shadow, color;
+}
+html[data-theme="light"] .tr:hover {
+  background: var(--bg-hover);
+  box-shadow: 0 3px 10px rgba(24,36,56,.12), inset 0 0 0 1px var(--row-line);
+}
+html[data-theme="light"] .table-head,
+html[data-theme="light"] .tr .c-idx,
+html[data-theme="light"] .tr .c-fmt,
+html[data-theme="light"] .tr .c-dur,
+html[data-theme="light"] .tr .c-q { color: var(--txt-2); }
+html[data-theme="light"] .tr .c-title .tt { color: var(--txt); }
+
+/* 当前播放 / 选中 / 来源行：主题色淡底 + 深色化强调色（保证 4.5:1 以上） */
+html[data-theme="light"] .tr.playing,
+html[data-theme="light"] .op-body .op-tr.playing { background: var(--row-tint); }
+html[data-theme="light"] .tr.playing .c-title .tt,
+html[data-theme="light"] .op-body .op-tr.playing .op-c-title .tt { color: var(--row-ink); }
+html[data-theme="light"] .tr.current-source { background: var(--row-tint-soft); }
+html[data-theme="light"] .tr.selected {
+  background: var(--row-tint);
+  box-shadow: inset 2px 0 0 var(--row-ink), inset 0 0 0 1px var(--row-line);
+}
+html[data-theme="light"] .tr.playing:not(.selected) {
+  box-shadow: inset 2px 0 0 var(--row-ink), inset 0 0 0 1px var(--row-line);
+}
+
+/* 行内元素：徽标、快捷钮、封面占位、均衡器、歌词标记 */
+html[data-theme="light"] .tr .c-fmt .badge {
+  background: var(--badge-bg);
+  color: var(--txt-2);
+  box-shadow: inset 0 0 0 1px var(--row-line);
+}
+html[data-theme="light"] .tr .c-fmt .badge.lossless {
+  background: var(--badge-lossless-bg);
+  color: var(--badge-lossless-ink);
+}
+html[data-theme="light"] .row-act {
+  background: var(--bg-panel);
+  color: var(--txt-2);
+  box-shadow: 0 1px 5px rgba(24,36,56,.18);
+}
+html[data-theme="light"] .row-act:hover { color: var(--row-ink); }
+html[data-theme="light"] .cv-mini { background: linear-gradient(140deg, #e6ebf3, #d3dce9); }
+html[data-theme="light"] .eq-bars i { background: var(--row-ink); }
+html[data-theme="light"] .tr .c-idx .btn-play-row,
+html[data-theme="light"] .tr .c-title .tag-lyric { color: var(--row-ink); }
+html[data-theme="light"] .tr .c-title .tag-lyric {
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  opacity: 1;
+}
+
+/* 在线搜索结果列表 + 队列抽屉：与主列表同口径 */
+html[data-theme="light"] .op-body .op-tr {
+  background: var(--row-bg);
+  box-shadow: inset 0 0 0 1px var(--row-line);
+}
+html[data-theme="light"] .op-body .op-tr:hover { background: var(--bg-hover); }
+html[data-theme="light"] .op-th,
+html[data-theme="light"] .op-tr .c-idx .num,
+html[data-theme="light"] .op-c-dur,
+html[data-theme="light"] .op-q,
+html[data-theme="light"] .qp-item .qi-a { color: var(--txt-2); }
+html[data-theme="light"] .op-q.high,
+html[data-theme="light"] .op-tr .c-idx .btn-play-row,
+html[data-theme="light"] .qp-item.active { color: var(--row-ink); }
+html[data-theme="light"] .qp-item.active { background: var(--row-tint); }
+
+/* 滚动条：浅色底上加深，保持可见 */
+html[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--txt-2) 40%, transparent);
+}
+
 /* --- 全局：尊重系统「减少动态效果」 --- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
