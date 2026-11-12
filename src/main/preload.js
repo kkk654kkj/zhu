@@ -114,6 +114,7 @@ contextBridge.exposeInMainWorld('api', {
   isMaximized: () => invoke('win:isMaximized'),
   /** v2.8.27：标题栏拖动（app-region 在 125% 缩放下系统命中矩阵整体下移，见主进程注释） */
   dragStart: () => ipcRenderer.send('win:drag-start'),
+  dragMove: (dx, dy) => ipcRenderer.send('win:drag-move', dx, dy),
   dragEnd: () => ipcRenderer.send('win:drag-end'),
   /** v2.8.26/3.3.27：最大化状态被主进程事件更新（含外部贴边最大化）时推送 */
   onMaxState: (cb) => on('win:max-state', cb),
