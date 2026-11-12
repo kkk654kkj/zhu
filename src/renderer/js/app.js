@@ -904,7 +904,7 @@ function bindTrackListUi() {
       e.stopPropagation()
       currentMenuTrack = track
       currentMenuTracks = [track]
-      if (actBtn.dataset.act === 'fav') { handleCtxAction('fav'); return }
+      if (actBtn.dataset.act === 'fav') { handleCtxAction('fav').catch((err) => toast('操作失败：' + ((err && err.message) || err))); return }
       if (actBtn.dataset.act === 'addpl') {
         const r = actBtn.getBoundingClientRect()
         UI.showContextMenu(r.left, r.bottom + 6, state.playlists.length
@@ -948,7 +948,7 @@ function bindTrackListUi() {
     // fav / addpl 复用右键菜单的动作管道
     currentMenuTrack = tracks[0]
     currentMenuTracks = tracks
-    if (kind === 'fav') { handleCtxAction('fav'); return }
+    if (kind === 'fav') { handleCtxAction('fav').catch((err) => toast('操作失败：' + ((err && err.message) || err))); return }
     if (kind === 'addpl') {
       const r = btn.getBoundingClientRect()
       UI.showContextMenu(r.left, r.bottom + 6, state.playlists.length

@@ -798,6 +798,11 @@ const UI = {
    */
   _renderCardGrid(cards, dataKey, onClick) {
     const body = this.els.tableBody
+    // v3.3.32：网格视图不走 renderTable，但 tableBody 的 scroll 监听是永久绑定的。
+    // 不清掉虚拟滚动状态，滚动一帧就会拿上一次列表把网格整块重画成歌曲行。
+    this._tTracks = []
+    this._tStart = -1
+    this._tEnd = -1
     const grid = document.createElement('div')
     grid.className = 'album-grid'
     grid.innerHTML = cards.map((c) => `

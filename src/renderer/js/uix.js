@@ -212,7 +212,8 @@ const UIX = (() => {
     b.className = 'uix-badge'
     b.textContent = '0'
     btn.appendChild(b)
-    const upd = () => { b.textContent = String(body.children.length) }
+    // v3.3.32：空队列时 renderQueue 会插一个没有 data-qi 的占位块，按 children 数会显示 1
+    const upd = () => { b.textContent = String(body.querySelectorAll('.qp-item[data-qi]').length) }
     if (typeof MutationObserver === 'function') new MutationObserver(upd).observe(body, { childList: true })
     upd()
   }
@@ -241,6 +242,9 @@ const UIX = (() => {
   }
 
   function openGallery() {
+    // v3.3.32：双击播放条封面 = 两次 click（fullscreen.js 各 toggle 一次全屏）+ dblclick。
+    // 这里统一收起全屏页，画廊才有干净的底层；单击展开仍是即时响应，不加延时。
+    try { UI.setFullscreen(false) } catch (e) { /* 忽略 */ }
     const gv = $('galleryView')
     const track = $('gvTrack')
     if (!gv || !track) return
