@@ -120,10 +120,11 @@ const Online = {
       if (e.key === 'Enter') { e.preventDefault(); go() }
     })
 
-    onEl('opSources', 'click', (e) => {
+    onEl('opSources', 'click', async (e) => {
       const chip = e.target.closest('.op-chip')
       if (!chip) return
       const id = chip.dataset.src
+      const prev = new Set(this.enabled)
       if (this.enabled.has(id)) {
         if (this.enabled.size === 1) { toast('至少保留一个音源'); return }
         this.enabled.delete(id)
@@ -131,15 +132,26 @@ const Online = {
         this.enabled.add(id)
       }
       this.renderSources()
-      window.api.patchSettings({ onlineSources: Array.from(this.enabled) }).catch(() => {})
+      // v3.3.32：写盘失败别乐观生效（重启回退、界面还提示成功），照 cache-panel 口径回滚
+      const ok = await window.api.patchSettings({ onlineSources: Array.from(this.enabled) }).then(() => true, () => false)
+      if (!ok) {
+        this.enabled.clear()
+        for (const s of prev) this.enabled.add(s)
+        this.renderSources()
+        toast('设置保存失败，音源开关未生效', 2500)
+        return
+      }
       if (this.keyword) this.search(true)
     })
 
-    onEl('opQuality', 'change', (e) => {
-      window.api.patchSettings({ onlineQuality: e.target.value }).catch(() => {})
-      state.settings.onlineQuality = e.target.value
+    onEl('opQuality', 'change', async (e) => {
+      const prev = state.settings.onlineQuality
+      const val = e.target.value
+      const ok = await window.api.patchSettings({ onlineQuality: val }).then(() => true, () => false)
+      if (!ok) { e.target.value = String(prev || 'best'); toast('设置保存失败，音质偏好未生效', 2500); return }
+      state.settings.onlineQuality = val
       const label = { master: '母带（体积很大，拿不到自动降级）', lossless: '无损优先（拿不到自动降级）', best: '音质优先（320k）', '128k': '省流量（128k）' }
-      toast('已切换：' + (label[e.target.value] || e.target.value))
+      toast('已切换：' + (label[val] || val))
     })
 
     onEl('opCacheBtn', 'click', () => toggleCachePanel())
