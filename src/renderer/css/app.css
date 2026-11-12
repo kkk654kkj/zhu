@@ -23,7 +23,7 @@
   --lyric-fs: 22px;
   /* v3.4.0 Apple Music 骨架：表头与行共用一份列定义。
      旧版两处分别写（46px + padding 24 vs 38px + margin 14 + padding 12），列起点差 6px。 */
-  --cols: 44px minmax(180px, 1.6fr) minmax(110px, 1fr) minmax(100px, 1fr) 96px 56px;
+  --cols: 44px minmax(180px, 1.6fr) minmax(110px, 1fr) minmax(100px, 1fr) 96px 80px;
   --row-hover: rgba(255, 255, 255, .045);
   --row-active: rgba(255, 255, 255, .075);
   --hair: rgba(255, 255, 255, .06);
@@ -90,17 +90,21 @@ input { font: inherit; color: inherit; }
 /* ================= 标题栏 ================= */
 #titlebar {
   height: var(--tb-h);
-  display: flex;
+  display: grid;
+  /* 三列 1fr/auto/1fr：左右两列严格等宽，搜索框才是真正居中（flex 等分会被 padding 带偏 8px） */
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 16px;
-  padding: 0 0 0 16px;
+  padding: 0;
   background: var(--bg-deep);
   border-bottom: 1px solid var(--line-soft);
   position: relative;
   z-index: 30;
 }
 
-.tb-left { display: flex; align-items: center; gap: 8px; min-width: 190px; }
+/* 左侧留白放进 .tb-left 内部：标题栏本身不留 padding，
+   否则内容区整体右移、搜索框永远差半个内边距（实测偏 8px）。 */
+.tb-left { display: flex; align-items: center; gap: 8px; min-width: 0; padding-left: 16px; }
 
 .logo {
   width: 22px; height: 22px;
@@ -113,7 +117,7 @@ input { font: inherit; color: inherit; }
 
 .app-name { font-size: 12.5px; color: var(--txt-2); letter-spacing: .5px; }
 
-.tb-center { flex: 1; display: flex; justify-content: center; }
+.tb-center { display: flex; justify-content: center; width: min(440px, 42vw); }
 
 /* 拖动窗口（v2.8.27 全部改主进程实现，见 js/dragwin.js）：
  *
@@ -176,7 +180,9 @@ body.win-dragging * { backdrop-filter: none !important; }
 .s-clear:hover { color: var(--txt); background: var(--bg-hover); }
 .s-clear svg { width: 11px; height: 11px; }
 
-.tb-right { display: flex; align-items: center; gap: 2px; }
+/* v3.4.0：左右两侧 1:1 分掉剩余空间，搜索框才真正落在窗口正中
+   （旧版 .tb-left 固定 190px、右侧一排图标更宽，搜索框肉眼偏左）。 */
+.tb-right { display: flex; align-items: center; justify-content: flex-end; gap: 2px; min-width: 0; }
 
 .wbtn {
   width: 32px; height: 30px;
@@ -387,6 +393,9 @@ body.win-dragging * { backdrop-filter: none !important; }
   border-bottom: 1px solid var(--hair);
 }
 .table-head > div { cursor: default; }
+/* 表头「标题」要压在小封面上方的文字起点（40 封面 + 12 间距），
+   否则表头对着封面、正文对着文字，两者永远差半格。 */
+.table-head .col-title { padding-left: 52px; }
 .table-head > div[data-sort] { cursor: pointer; transition: color .12s; }
 .table-head > div[data-sort]:hover { color: var(--txt-2); }
 .col-idx, .col-dur, .col-spec { text-align: center; }
@@ -537,9 +546,9 @@ body.win-dragging * { backdrop-filter: none !important; }
 }
 .tr:hover .row-acts { opacity: 1; pointer-events: auto; }
 .row-act {
-  width: 26px; height: 26px;
+  width: 24px; height: 24px;
   display: grid; place-items: center;
-  border-radius: 7px;
+  border-radius: 6px;
   color: var(--txt-2);
   background: #171b21;
   box-shadow: 0 1px 4px rgba(0,0,0,.4);
@@ -564,7 +573,15 @@ body.win-dragging * { backdrop-filter: none !important; }
 }
 .tr .c-spec .q { overflow: hidden; text-overflow: ellipsis; }
 .tr .c-spec.hires { color: var(--txt-2); }
-.tr .c-dur { text-align: center; font-size: 11.5px; color: var(--txt-3); font-variant-numeric: tabular-nums; }
+/* 时长列 80px：时间靠右停在 56px 处，正好给 hover 浮现的两个快捷钮让位
+   （24+24+4=52）—— 这样时间不用像旧版那样 hover 就消失。 */
+.tr .c-dur {
+  text-align: right;
+  padding-right: 56px;
+  font-size: 11.5px;
+  color: var(--txt-3);
+  font-variant-numeric: tabular-nums;
+}
 .tr .c-spec .badge {
   display: inline-block;
   padding: 1px 5px;
@@ -2775,9 +2792,9 @@ html[data-theme="light"] ::-webkit-scrollbar-thumb {
 }
 html[data-theme="light"] .view-header::before { opacity: .18; }
 
-/* --- 空封面统一：主题色 8% 底 + 音符，不再是纯灰渐变 --- */
+/* --- 空封面统一：主题色 6% 底 + 音符（9% 在深色里已经明显发绿） --- */
 .vh-cover, .lp-cover, .pb-cover, .fs-cover, .mv-cover {
-  background: color-mix(in srgb, var(--accent) 9%, #171b21);
+  background: color-mix(in srgb, var(--accent) 6%, #171b21);
 }
 
 /* --- 图标尺寸收口（P1-3）：16 主 / 14 次 / 12 极小，不许再出现 15、13、11 --- */
@@ -2810,8 +2827,12 @@ html[data-theme="light"] .lp-cover,
 html[data-theme="light"] .pb-cover,
 html[data-theme="light"] .fs-cover,
 html[data-theme="light"] .mv-cover {
-  background: color-mix(in srgb, var(--accent) 10%, #e6ebf3);
+  background: color-mix(in srgb, var(--accent) 7%, #e6ebf3);
 }
+/* 浅色底上 .62 的灰字对比不足，歌词非活动行抬到 .78 */
+html[data-theme="light"] .lyric-line { opacity: .78; }
+html[data-theme="light"] .lyric-line:hover { opacity: .95; }
+html[data-theme="light"] .tr.playing { background: color-mix(in srgb, var(--accent) 10%, var(--bg-panel)); }
 html[data-theme="light"] .tr .c-spec .badge.lossless { background: var(--badge-lossless-bg); }
 
 /* --- 全局：尊重系统「减少动态效果」 --- */
