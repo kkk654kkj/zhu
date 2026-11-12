@@ -1,5 +1,5 @@
 'use strict'
-/* 标题栏拖动（v2.8.27）
+/* 标题栏拖动（v2.8.27 / v2.8.32 性能轮）
  *
  * 为什么不用 -webkit-app-region: drag —— Windows + 125% 缩放下，drag 区域在
  * 系统层的命中矩形会整体下移约 19px（恰好等于 SM_CYCAPTION 标题栏高度）：
@@ -7,9 +7,15 @@
  * 结果右上角按钮的下半截被当成标题栏，点击被系统吞掉 —— 表现就是「按钮点不动，
  * 只有从窗口上边缘往下摸才行」。
  *
- * 改成 mousedown 通知主进程，由主进程按光标位移 setPosition：窗口不再有任何
- * drag 矩形，整条标题栏都是客户区，按钮怎么点都生效。
+ * 改成程序内拖动后窗口不再有 drag 矩形，整条标题栏都是客户区。
  * 拖动源：完整模式标题栏、迷你模式顶部条与卡片主体（原 .mv-head / .mv-body）。
+ *
+ * v2.8.32：v2.8.27 的实现是主进程 setInterval(16) 轮询 cursor + 同步 setBounds，
+ * 可见窗口实测 60 次光标移动只更新 34 次窗口位置（34.6fps、跟上率 55%）。
+ * 改为渲染层 pointermove 事件驱动 + rAF 节流，把「相对按下点的累计位移」送给
+ * 主进程；主进程不再轮询光标，每帧只在收到位移时 setBounds。用 setPointerCapture
+ * 保证鼠标拖出窗口后仍持续收到事件。位移用同一坐标系内的差值，避免 DIP↔物理
+ * 像素换算带来的绝对坐标偏差。
  */
 
 ;(() => {
@@ -19,10 +25,28 @@
   const BLOCK = 'button, input, textarea, select, a, .no-drag, .search-box, .row-act'
 
   let dragging = false
+  let startX = 0
+  let startY = 0
+  let pendingDx = 0
+  let pendingDy = 0
+  let raf = 0
+  let capturedEl = null
+  let capturedId = null
+
+  const flush = () => {
+    raf = 0
+    if (!dragging) return
+    try { window.api.dragMove(pendingDx, pendingDy) } catch { /* 窗口已经在关 */ }
+  }
 
   const stop = () => {
     if (!dragging) return
     dragging = false
+    if (raf) { cancelAnimationFrame(raf); raf = 0 }
+    if (capturedEl) {
+      try { capturedEl.releasePointerCapture(capturedId) } catch { /* 已释放或不支持 */ }
+      capturedEl = null
+    }
     try { window.api.dragEnd() } catch { /* 窗口已经在关 */ }
     document.body.classList.remove('win-dragging')
   }
@@ -30,7 +54,7 @@
   for (const sel of HOLDERS) {
     const el = document.querySelector(sel)
     if (!el) continue
-    el.addEventListener('mousedown', (e) => {
+    el.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return
       if (e.target.closest(BLOCK)) return
       // 双击标题栏最大化/还原，保持系统标题栏的手感
@@ -39,14 +63,30 @@
         return
       }
       dragging = true
+      startX = e.screenX
+      startY = e.screenY
+      pendingDx = 0
+      pendingDy = 0
+      capturedEl = el
+      capturedId = e.pointerId
+      try { el.setPointerCapture(e.pointerId) } catch { /* 不支持则靠 window 事件兜底 */ }
       document.body.classList.add('win-dragging')
-      try { window.api.dragStart() } catch { dragging = false }
+      try { window.api.dragStart() } catch { stop(); return }
       e.preventDefault()
     })
   }
 
-  window.addEventListener('mouseup', stop)
+  // capture=true：指针被标题栏捕获后事件仍会冒泡到 window
+  window.addEventListener('pointermove', (e) => {
+    if (!dragging) return
+    pendingDx = e.screenX - startX
+    pendingDy = e.screenY - startY
+    // 每帧最多一发，避免高采样率鼠标打爆 IPC；与合成器节奏对齐
+    if (!raf) raf = requestAnimationFrame(flush)
+  }, true)
+  window.addEventListener('pointerup', stop)
+  window.addEventListener('pointercancel', stop)
   window.addEventListener('blur', stop)
-  // 拖到窗口外松手时 mouseup 收不到，用 ESC 兜底
+  // 拖到窗口外松手时 pointerup 收不到，用 ESC 兜底
   window.addEventListener('keydown', (e) => { if (e.key === 'Escape') stop() }, true)
 })()

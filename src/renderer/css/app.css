@@ -121,6 +121,12 @@ input { font: inherit; color: inherit; }
 #titlebar img, .mv-cover img, .mv-brand img { -webkit-user-drag: none; }
 /* 拖动中给个抓手光标，和系统标题栏手感一致 */
 body.win-dragging #titlebar, body.win-dragging .mv-head, body.win-dragging .mv-body { cursor: grabbing; }
+/* v2.8.32：窗口每帧移动都会触发整窗重绘，全屏 blur / backdrop-filter 是最贵的一层。
+   拖动态临时关掉，松手立刻恢复，视觉几乎无感但能明显提帧。 */
+body.win-dragging #miniView::before,
+body.win-dragging #fsView::before,
+html[data-theme="light"] body.win-dragging #fsView::before { filter: none; }
+body.win-dragging * { backdrop-filter: none !important; }
 /* 右上角整组：自身 + 所有子孙都显式 no-drag，双保险 */
 .tb-right, .tb-right * { -webkit-app-region: no-drag; }
 #titlebar { -webkit-user-select: none; }
