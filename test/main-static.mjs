@@ -234,6 +234,28 @@ function main() {
   ok('浅色行禁用背景过渡（防隐藏窗口切主题时底色卡在旧值）',
     /html\[data-theme="light"\]\s*\.tr\s*\{[^}]*transition-property:\s*transform,\s*box-shadow,\s*color/.test(appCss))
 
+  console.log('\n=== 7) 拆分与渲染层回归哨兵（v3.3.32） ===')
+  ok('sanitizeSettingsPatch 不再用裸 DEFAULT_SETTINGS 默认参数',
+    !/sanitizeSettingsPatch\(patch,\s*template\s*=\s*DEFAULT_SETTINGS\)/.test(schemaSrc) &&
+    /if \(!template\) template = G && G\.DEFAULT_SETTINGS/.test(schemaSrc))
+  ok('卡片网格先清空虚拟滚动状态（专辑/文件夹滚动不再被旧列表覆盖）',
+    /_renderCardGrid\([\s\S]{0,400}?this\._tTracks\s*=\s*\[\]/.test(uiSrc))
+  const uixSrc = read('src/renderer/js/uix.js')
+  ok('队列徽标只数真实队列项（空队列占位块不算 1）',
+    /querySelectorAll\('\.qp-item\[data-qi\]'\)/.test(uixSrc))
+  ok('打开画廊前先收起全屏页（双击封面两次 click 不再残留）',
+    /function openGallery\(\)[\s\S]{0,400}?UI\.setFullscreen\(false\)/.test(uixSrc))
+  const appJs = read('src/renderer/js/app.js')
+  ok('行内 / 多选收藏快捷钮都接住 Promise 失败',
+    (appJs.match(/handleCtxAction\('fav'\)\.catch\(/g) || []).length === 2)
+  ok('音质列选择器与 DOM 一致（.op-c-q，不是永不命中的 .op-q）',
+    !/\.op-q\b/.test(appCss) && /\.op-c-q\s*\{/.test(appCss))
+  ok('浅色下无损行改用高对比文字色',
+    /html\[data-theme="light"\]\s*\.op-c-q\.lossless\s*\{\s*color:\s*var\(--row-ink\)/.test(appCss))
+  const htmlSrc = read('src/renderer/index.html')
+  ok('mediasession.js 只引入一次（重复加载会抛顶层 let 重复声明）',
+    (htmlSrc.match(/js\/mediasession\.js/g) || []).length === 1)
+
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
 }
