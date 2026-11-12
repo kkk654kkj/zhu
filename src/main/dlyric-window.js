@@ -9,6 +9,22 @@ const { BrowserWindow, screen } = require('electron')
 let G = null
 function init(g) { G = g }
 
+/**
+ * v2.8.31 / v3.3.33：去抖器必须模块自带。
+ * v3.3.24 拆分时把 createLyricWindow 搬出 main.js，去抖调用却改写成依赖 G 注入，
+ * 而 main.js 的 G 上并没有对应 getter。只要用户设置「启动时恢复桌面歌词」
+ * （desktopLyric.enabled=true），启动链走到这里就抛 TypeError，进程 FATAL 退出，
+ * 表现为双击桌面快捷方式毫无反应。默认设置不创建浮窗、后台实测又跳过浮窗，
+ * 所以一直没被发现。这里不再依赖 G 注入。
+ */
+function debounce(fn, ms) {
+  let t = null
+  return (...args) => {
+    clearTimeout(t)
+    t = setTimeout(() => fn(...args), ms)
+  }
+}
+
 /* ---------------- 桌面歌词浮窗 ---------------- */
 
 let dlyricWin = null
@@ -100,7 +116,7 @@ function createLyricWindow() {
 
   // 位置/尺寸持久化（去抖）
   let lastLyricBounds = null
-  const saveBounds = G.debounce(() => {
+  const saveBounds = debounce(() => {
     if (!dlyricWin || dlyricWin.isDestroyed()) return
     lastLyricBounds = dlyricWin.getNormalBounds ? dlyricWin.getNormalBounds() : dlyricWin.getBounds()
     G.store.patch({ settings: { desktopLyric: { bounds: lastLyricBounds } } })
