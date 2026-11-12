@@ -256,6 +256,66 @@ function main() {
   ok('mediasession.js 只引入一次（重复加载会抛顶层 let 重复声明）',
     (htmlSrc.match(/js\/mediasession\.js/g) || []).length === 1)
 
+  console.log('\n=== 8) G 注入完整性 + 桌面歌词启动链（v2.8.31 / v3.3.33） ===')
+  /* v3.3.24 拆分后各模块靠 init(G) 拿共享状态。漏加 getter 时调用点在冷路径上
+     （例如「启动时恢复桌面歌词」），默认设置 + LX_TEST_HIDDEN 实测都碰不到，
+     直到用户双击桌面快捷方式才 FATAL。这里做根因级扫描：所有 G.xxx 引用必须
+     都在 main.js 的 G getters 里。 */
+  const gBlock = (mainSrc.match(/const G = \{([\s\S]*?)\n\}/) || ['', ''])[1]
+  const gGetters = new Set([...gBlock.matchAll(/get\s+(\w+)\s*\(/g)].map((m) => m[1]))
+  const gMissing = new Set()
+  const mainDir = fs.readdirSync(path.join(ROOT, 'src/main')).filter((f) => f.endsWith('.js'))
+  // 注释里讲解反例时可能写出 G.xxx 字面量，不算真实引用
+  const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+  for (const f of mainDir) {
+    const s = stripComments(fs.readFileSync(path.join(ROOT, 'src/main', f), 'utf8'))
+    for (const m of s.matchAll(/\bG\.(\w+)/g)) if (!gGetters.has(m[1])) gMissing.add(m[1] + ' @ ' + f)
+  }
+  ok('所有 G.xxx 引用都在 G getters 里（漏注入会让冷路径启动即崩）',
+    gGetters.size > 0 && gMissing.size === 0, [...gMissing].join(', ') || `${gGetters.size} 个 getter`)
+  const dlyricSrc = stripComments(read('src/main/dlyric-window.js'))
+  ok('桌面歌词浮窗自带 debounce，不依赖 G 注入',
+    /function debounce\(fn, ms\)/.test(dlyricSrc) && !/G\.debounce/.test(dlyricSrc))
+
+  // 运行时冒烟：用「不含 debounce」的 G 真正跑一遍 createLyricWindow。
+  // electron 全部打桩，不创建任何真实窗口；临时摘掉 LX_TEST_HIDDEN 让守卫放行。
+  let lyricBootErr = ''
+  try {
+    const req2 = createRequire(import.meta.url)
+    const Module2 = req2('module')
+    const origLoad2 = Module2._load
+    const fakeWin = new Proxy({}, {
+      get: (_t, k) => {
+        if (k === 'webContents') return new Proxy({}, { get: () => () => {} })
+        if (k === 'isDestroyed') return () => false
+        if (k === 'getNormalBounds' || k === 'getBounds') return () => ({ x: 0, y: 0, width: 900, height: 120 })
+        return () => {}
+      },
+      set: () => true
+    })
+    Module2._load = function (request) {
+      if (request === 'electron') return {
+        BrowserWindow: class { constructor() { return fakeWin } },
+        screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }) },
+        ipcMain: {}, app: {}, protocol: {}, shell: {}
+      }
+      return origLoad2.apply(this, arguments)
+    }
+    const DLYW = req2(path.join(ROOT, 'src/main/dlyric-window.js'))
+    DLYW.init({
+      store: { get: () => ({ settings: { desktopLyric: { enabled: true, bounds: null } } }), patch: () => {} },
+      sendToRenderer: () => {}, logLine: () => {}, quitting: false
+    })
+    const savedHidden = process.env.LX_TEST_HIDDEN
+    delete process.env.LX_TEST_HIDDEN
+    try { DLYW.createLyricWindow() } finally {
+      if (savedHidden === undefined) delete process.env.LX_TEST_HIDDEN
+      else process.env.LX_TEST_HIDDEN = savedHidden
+      Module2._load = origLoad2
+    }
+  } catch (e) { lyricBootErr = e.message }
+  ok('桌面歌词浮窗在「G 无 debounce」下仍能创建（启动链不再崩）', !lyricBootErr, lyricBootErr)
+
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
 }
