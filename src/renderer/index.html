@@ -300,9 +300,19 @@
 
 <!-- ============ 全屏播放页（v2.8.25：点播放条封面展开） ============ -->
 <div id="fsView">
+  <canvas id="fsSpectrum" height="108"></canvas>
   <div class="fs-head">
     <span>正在播放</span>
-    <button class="mini-btn" id="fsClose" title="收起（Esc）"><svg><use href="#i-close"/></svg></button>
+    <div id="fsHeadTools">
+      <button class="uix-btn" id="fsFx" title="封面特效（循环切换）" aria-label="封面特效">◉</button>
+      <button class="uix-btn" id="fsLyricSize" title="歌词字号" aria-label="歌词字号">A</button>
+      <button class="uix-btn" id="fsLyricAlign" title="歌词对齐" aria-label="歌词对齐">≡</button>
+      <button class="uix-btn" id="fsOffsetMinus" title="歌词提前 0.5 秒" aria-label="歌词提前">−</button>
+      <button class="uix-btn" id="fsOffsetPlus" title="歌词延后 0.5 秒" aria-label="歌词延后">+</button>
+      <button class="uix-btn" id="fsFxOff" title="开关频谱光效" aria-label="开关频谱光效">✦</button>
+      <button class="uix-btn" id="fsGallery" title="封面画廊" aria-label="封面画廊">▦</button>
+      <button class="mini-btn" id="fsClose" title="收起（Esc）"><svg><use href="#i-close"/></svg></button>
+    </div>
   </div>
   <div class="fs-body">
     <div class="fs-cover" id="fsCover"><svg><use href="#i-music"/></svg></div>
@@ -311,6 +321,7 @@
       <div class="fs-artist" id="fsArtist">—</div>
       <span class="fs-q" id="fsQ"></span>
       <div class="fs-lyric" id="fsLyric"></div>
+      <div id="fsLyrics"></div>
     </div>
   </div>
   <div class="fs-foot">
@@ -327,6 +338,13 @@
       <button class="icon-btn fav" id="fsFav" title="收藏"><svg><use href="#i-heart"/></svg></button>
     </div>
   </div>
+</div>
+
+<!-- v3.3.29 无限封面画廊（P3 #20）：双击播放条封面或全屏页工具钮打开 -->
+<div id="galleryView">
+  <div class="gv-head">封面画廊 · 悬停暂停滚动 · 点封面播放 · Esc 收起</div>
+  <div class="gv-viewport"><div class="gv-track" id="gvTrack"></div></div>
+  <div class="gv-foot">来源：当前曲库专辑封面（最多 48 张，循环展示）</div>
 </div>
 
 <!-- 睡眠定时面板（v2.2：入口从托盘移到 app 内播放条） -->
@@ -589,6 +607,7 @@
 <script src="js/fullscreen.js"></script>
 <script src="js/persist.js"></script>
 <script src="js/online.js"></script>
+<script src="js/uix.js"></script>
 <script src="js/dragwin.js"></script>
 </body>
 </html>
