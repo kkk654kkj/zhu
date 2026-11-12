@@ -994,6 +994,11 @@ const G = {
   get APP_NAME() { return APP_NAME },
   get DATA_DIR() { return DATA_DIR },
   get DEFAULT_SETTINGS() { return DEFAULT_SETTINGS },
+  // v2.8.31：本地版没有在线直链缓存，但共享的 mpv-manager.js 在 mpv 报 file-error
+  // 时会调 G.invalidateCurrentStream()（online 侧用于作废过期签名直链）。拆分时
+  // 这个 getter 只加在 online 的 G 里，master 走到这条冷路径就抛 TypeError。
+  // 本地版无需作废任何东西，给幂等 noop；不改共享文件以免扩大两侧差异。
+  get invalidateCurrentStream() { return () => {} },
   get miniActive() { return miniActive },
   get isDev() { return isDev },
   get fsp() { return fsp },
