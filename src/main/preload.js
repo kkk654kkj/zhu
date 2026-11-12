@@ -76,7 +76,7 @@ contextBridge.exposeInMainWorld('api', {
   onlinePlayable: (song) => invoke('online:playable', song),
   /** v3.3.18（第四轮 P1 #7）：<audio> 报错时作废该曲直链缓存，返回 { ok, hit } */
   onlineInvalidate: (song) => invoke('online:invalidate', song),
-  onlineProbe: (song) => invoke('online:probe', song),
+  onlineProbe: (song, round) => invoke('online:probe', song, round),
   onlineLyric: (song) => invoke('online:lyric', song),
   onlineDownload: (song) => invoke('online:download', song),
   // 第四轮 §4.5.3 #16：onlineCancelDownload 是死接口（映射到 online:dlDelete，全项目无消费方），已移除

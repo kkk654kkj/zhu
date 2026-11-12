@@ -1556,7 +1556,9 @@ function registerOnlineIpc() {
    * 而不是让 <audio> 或 mpv 直接报一个用户看不懂的错误。
    */
   const playableCtrls = new WeakMap()
-  const probeCtrls = new WeakMap()   // 第四轮 §4.5.2 #4：按 sender 取消旧的音质探测
+  // v3.3.31：按「搜索轮次」分组的探测控制器。第四轮按 sender 一刀切会把渲染层
+  // 同一轮 3 路并发探测互相 abort，只有最后一个能活到出结果。
+  const probeRounds = new WeakMap()   // sender -> { round, ctrls: Set<AbortController> }
 
   ipcMain.handle('online:playable', async (e, song) => {
     if (!song || !song.source || !song.id) return { ok: false, error: '参数不完整' }
@@ -1566,7 +1568,7 @@ function registerOnlineIpc() {
     const ctrl = new AbortController()
     playableCtrls.set(e.sender, ctrl)
     const prefer = DL.qualityPref()
-    // 第四轮 §4.5.2 #3：online:probe 有 8s 总超时，而真正决定「点歌后多久出声」的
+    // 第四轮 §4.5.2 #3：online:probe 有 13s/9s 总超时，而真正决定「点歌后多久出声」的
     // online:playable 反而没有 —— 内部预算再全，也不该让一个 IPC 无限挂着。
     // 无损档要等 7s/12s 的无损窗口，给 16s；其它档 12s。
     const totalMs = (prefer === 'lossless' || prefer === 'master') ? 16000 : 12000
@@ -1627,29 +1629,41 @@ function registerOnlineIpc() {
    * 这里对可见的十几行各问一次解析服务，拿真实文件大小算码率，
    * 顺带把直链塞进缓存：真点播放时就不用再解析了。
    */
-  ipcMain.handle('online:probe', async (e, song) => {
+  ipcMain.handle('online:probe', async (e, song, round) => {
     if (!song || !song.source || !song.id) return { ok: false }
     const prefer = DL.qualityPref()
     if (prefer === '128k') return { ok: false, skipped: true }
+    // v3.3.31：母带档无损窗口 12s，老的 8s 总超时会在网关返回前先判失败；
+    // 其它档窗口 7s，给 9s 余量。与 online.js 的 losslessWait 对齐。
+    const probeBudget = prefer === 'master' ? 13000 : 9000
     const ck = `${song.source}:${song.id}:${prefer}`
     const hit = DL.probeCache.get(ck)
     if (hit && Date.now() - hit.at < DL.PROBE_TTL) return hit.data
-    // 第四轮 §4.5.2 #4：按 sender 取消旧轮 —— 换关键词只递增渲染层的 probeToken，
-    // 已发出的 IPC 不可取消，旧轮会跑满 8s 并继续烧 ChKSz 额度。
-    const prevProbe = probeCtrls.get(e.sender)
-    if (prevProbe) { try { prevProbe.abort() } catch (err) { /* 忽略 */ } }
+    // v3.3.31：换关键词只递增渲染层的 probeToken 并作为 round 传进来。
+    // 同一轮内的并发探测共用一个 Set，互不取消；只有新轮到达才整轮作废，
+    // 既保住「旧轮不再烧解析额度」，也不再让 3 路 worker 互相 abort。
+    const rk = String(round ?? '')
+    const prevRound = probeRounds.get(e.sender)
+    if (prevRound && prevRound.round !== rk) {
+      for (const c of prevRound.ctrls) { try { c.abort() } catch (err) { /* 忽略 */ } }
+      prevRound.ctrls.clear()
+    }
+    const rs = (prevRound && prevRound.round === rk)
+      ? prevRound
+      : { round: rk, ctrls: new Set() }
+    probeRounds.set(e.sender, rs)
     const probeCtrl = new AbortController()
-    probeCtrls.set(e.sender, probeCtrl)
+    rs.ctrls.add(probeCtrl)
     const run = async () => {
       const probeRun = online.getPlayable(song, prefer, { signal: probeCtrl.signal })
       probeRun.catch(() => {})   // v3.3.9：超时后丢弃的那份别变成 unhandledRejection
       let probeTimer = null
-      const timerP = new Promise((r) => { probeTimer = setTimeout(() => r(null), 8000) })
+      const timerP = new Promise((r) => { probeTimer = setTimeout(() => r(null), probeBudget) })
       let info = null
       try {
         info = await Promise.race([probeRun, timerP])
       } finally {
-        clearTimeout(probeTimer)   // v3.3.13：成功也要清，别留 8 秒空定时器
+        clearTimeout(probeTimer)   // v3.3.13：成功也要清，别留空定时器
         // v3.3.18：超时后必须收掉输家，否则无损链仍后台跑完并扣每日额度
         if (!info) probeCtrl.abort()
       }
@@ -1680,7 +1694,8 @@ function registerOnlineIpc() {
     } catch (err) {
       return { ok: false }
     } finally {
-      if (probeCtrls.get(e.sender) === probeCtrl) probeCtrls.delete(e.sender)
+      rs.ctrls.delete(probeCtrl)
+      if (!rs.ctrls.size && probeRounds.get(e.sender) === rs) probeRounds.delete(e.sender)
     }
   })
 

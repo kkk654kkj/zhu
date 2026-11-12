@@ -464,6 +464,10 @@ module.exports = {
   dlPickPath,
   dlRun,
   qualityPref,
+  // v3.3.31：main.js 的 online:probe 直接读写 DL.probeCache。
+  // v3.3.24 拆分时只搬走定义、漏了导出 → DL.probeCache 为 undefined，
+  // 每次音质探测 0ms 抛 TypeError，列表只剩平台标称码率（看不到无损/高解析）。
+  probeCache,
   PROBE_TTL,
   probeLimit,
 }

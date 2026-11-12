@@ -261,7 +261,7 @@ const Online = {
       while (idx < todo.length) {
         if (this.probeToken !== token) return
         const { row, song } = todo[idx++]
-        const r = await window.api.onlineProbe(song).catch(() => null)
+        const r = await window.api.onlineProbe(song, token).catch(() => null)
         if (this.probeToken !== token) return
         if (!r || !r.ok) {
           song._q = { text: song.quality || '—', cls: 'dim' }
