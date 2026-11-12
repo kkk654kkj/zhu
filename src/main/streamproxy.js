@@ -134,6 +134,20 @@ function serveLocalFile(filePath, req, res) {
   }
 
   const range = parseRangeHeader(req.headers.range, total)
+  // HEAD 只回元数据：以前会走 sendFull 把整首 flac 读出来再被 Node 丢掉
+  if (req.method === 'HEAD') {
+    if (range.kind === 'invalid') { sendRangeNotSatisfiable(); return }
+    const len = range.kind === 'range' ? range.end - range.start + 1 : total
+    const head = { ...base, 'Content-Length': String(len) }
+    if (range.kind === 'range') {
+      head['Content-Range'] = `bytes ${range.start}-${range.end}/${total}`
+      res.writeHead(206, head)
+    } else {
+      res.writeHead(200, head)
+    }
+    res.end()
+    return
+  }
   if (range.kind === 'invalid') { sendRangeNotSatisfiable(); return }
   if (range.kind === 'full') { sendFull(); return }
   res.writeHead(206, {
@@ -241,7 +255,7 @@ async function handleStreamRequest(req, res) {
     }
     const upstream = opened.upstream
     if (clientGone) {
-      try { if (upstream.body) upstream.body.cancel() } catch (e) { /* 忽略 */ }
+      try { Promise.resolve(upstream.body && upstream.body.cancel()).catch(() => {}) } catch (e) { /* 忽略 */ }
       return
     }
     if (!upstream.ok && upstream.status !== 206) {
@@ -253,7 +267,7 @@ async function handleStreamRequest(req, res) {
       // v3.3.18：签名直链提前失效时不能让 20 分钟的直链缓存继续命中
       try { G.online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
       // 第四轮 §4.5.2 #1：非 2xx 的响应体不取消会一直占着连接
-      try { if (upstream.body) upstream.body.cancel() } catch (e) { /* 忽略 */ }
+      try { Promise.resolve(upstream.body && upstream.body.cancel()).catch(() => {}) } catch (e) { /* 忽略 */ }
       if (!res.writableEnded) res.writeHead(502).end('upstream ' + upstream.status)
       return
     }
@@ -500,7 +514,7 @@ async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache
     if (res.writableFinished) return
     aborted = true
     try { ctrl.abort() } catch (e) { /* 已结束 */ }
-    try { reader.cancel() } catch (e) { /* 已结束 */ }
+    try { Promise.resolve(reader.cancel()).catch(() => {}) } catch (e) { /* 已结束 */ }
     dropPart()
   }
   res.on('close', onClose)

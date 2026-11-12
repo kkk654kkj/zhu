@@ -401,6 +401,9 @@ async function applyMiniOnce(on) {
       // Windows 上 unmaximize 是异步的，必须先挂监听再触发，否则会漏掉事件（只剩超时兜底）
       const wait = waitWindowEvent(win, 'unmaximize')
       win.unmaximize()
+      // unmaximize 在隐藏窗口上会隐式 show 且不触发 show 事件，
+      // 与 win:toggleMaximize 同口径：操作后立刻压回隐藏（守 §2 不变量 #9）
+      if (TEST_HIDDEN()) win.hide()
       await wait
     }
     const prev = win.getNormalBounds ? win.getNormalBounds() : win.getBounds()
@@ -441,7 +444,10 @@ async function applyMiniOnce(on) {
       x: usable ? fb.x : undefined,
       y: usable ? fb.y : undefined
     }))
-    if (fb.maximized) win.maximize()
+    if (fb.maximized) {
+      win.maximize()
+      if (TEST_HIDDEN()) win.hide()
+    }
     miniActive = false
     store.patch({ settings: { mini: { enabled: false } } })
   }
@@ -1495,9 +1501,10 @@ function registerLyricIpc() {
 
     const lrc = track.lyric || null
     const audio = track.path || null
-    const mtimeOf = (p) => { try { return p ? fs.statSync(p).mtimeMs : 0 } catch (err) { return 0 } }
-    const lrcMtime = mtimeOf(lrc)
-    const audioMtime = mtimeOf(audio)
+    // 切歌热路径：两次 stat 改异步，避免网络盘/冷盘时同步阻塞主进程事件循环
+    const mtimeOf = async (p) => { try { return p ? (await fsp.stat(p)).mtimeMs : 0 } catch (err) { return 0 } }
+    const lrcMtime = await mtimeOf(lrc)
+    const audioMtime = await mtimeOf(audio)
 
     // v3.3.4：外置 .lrc 与内嵌 LYRICS 谁改得新用谁。
     // 只比「文件修改时间」：改 .lrc 会让 lrc 变新，改标签（Mp3tag 等）会让音频文件变新，
@@ -1748,8 +1755,8 @@ function registerOnlineIpc() {
     const t = DL.dlTasks.get(String(id))
     if (!t || t.status !== 'downloading') return { ok: false }
     t.status = 'pausing'
-    // v3.3.20：暂停后继续会重新解析，直链可能换了一条 —— 忘掉旧目标，续传前会比对
-    DL.dlTargetCache.delete(t.id)
+    // 保留本次直链记录：续传前由 downloader 与重新解析结果比对，直链变了才丢残片；
+    // 这里删掉会让「暂停→继续」每次都无条件重下，或绕过一致性校验写出坏文件
     try { if (t.abort) t.abort.abort() } catch (err) { /* 忽略 */ }
     DL.dlBroadcast(true)
     return { ok: true }
@@ -2223,7 +2230,7 @@ function registerMpvIpc() {
       // v3.3.9：但枚举的几百毫秒里用户可能点了播放（引擎被复用加载了文件），
       // 这时不能杀 —— 用「引擎还是同一个且从未加载过文件」作判据。
       // v3.3.13：枚举期间被切成独占的引擎（restart 不换实例也不改 _lastFile）不能误杀
-      if (startedHere && MPVM.mpvEngine === eng && !eng._lastFile && eng.exclusive === false) MPVM.stopMpv()
+      if (startedHere && MPVM.mpvEngine === eng && !eng._lastFile && eng.exclusive === false) MPVM.stopMpv().catch(() => {})
     }
   })
 
@@ -2500,8 +2507,17 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       } catch (e) { /* 排除目录/不存在/UNC 阻塞 */ }
     }
     if (media.length) {
-      lastOpenFiles = { paths: media }
-      sendToRenderer('open-files', lastOpenFiles)
+      const payload = { paths: media }
+      const wc = win && !win.isDestroyed() ? win.webContents : null
+      const ready = wc && !(typeof wc.isDestroyed === 'function' && wc.isDestroyed()) && !wc.isLoading()
+      // 页面已就绪就直接送达并清空缓存；否则留给 did-finish-load 补发。
+      // 以前送达后不清空，页面重载时会重复补发一批旧文件
+      if (ready) {
+        sendToRenderer('open-files', payload)
+        lastOpenFiles = null
+      } else {
+        lastOpenFiles = payload
+      }
     }
   })
 
@@ -2636,6 +2652,8 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       quitCleanupDone = true
       try { SP.closeStreamServer() } catch (err) { /* 忽略 */ }   // v3.3.32：关掉本地代理的 keep-alive 连接，退出不再被拖住
       try { DL.dlSaveNow() } catch (err) { /* 忽略 */ }   // 任何退出路径都不丢下载任务（幂等）
+      // 缓存索引走 1s 去抖 + unref 定时器，退出时会随 app.quit() 被丢弃，必须补一次
+      try { DC.cacheSave() } catch (err) { /* 忽略 */ }
       try { if (store) store.flush() } catch (err) { /* 忽略 */ }
       try { if (tray) tray.destroy() } catch (err) { /* 忽略 */ }
       app.quit()

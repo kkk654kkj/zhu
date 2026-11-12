@@ -237,6 +237,13 @@ async function dlRun(task) {
     dlTargetCache.set(task.id, { url: info.url, ext: curExt })
     let offset = 0
     try { offset = fs.statSync(part).size } catch (err) { offset = 0 }
+    // 恢复任务（重启 / 暂停后继续）没有直链记录时，无法保证 .part 与本次直链同源：
+    // 宁可从头下载，也不能把新直链的字节 append 到旧残片后面写出损坏文件
+    if (!tgt && offset > 0) {
+      G.logLine('[dl] 无直链记录，丢弃残片从头下载')
+      try { fs.unlinkSync(part) } catch (e) { /* 不存在 */ }
+      offset = 0
+    }
 
     const headers = { 'User-Agent': 'Mozilla/5.0' }
     if (info.referer) headers.Referer = info.referer
@@ -275,7 +282,7 @@ async function dlRun(task) {
       const m = cr.match(/bytes\s+(\d+)-/)
       if (!m || Number(m[1]) !== offset) {
         G.logLine('[dl] 续传起点与请求不符，丢弃残片重下', offset, cr || '(no content-range)')
-        try { if (res.body) res.body.cancel() } catch (e) { /* 忽略 */ }
+        try { Promise.resolve(res.body && res.body.cancel()).catch(() => {}) } catch (e) { /* 忽略 */ }
         try { fs.unlinkSync(part) } catch (e) { /* 忽略 */ }
         offset = 0
         res = await openOnce(0)

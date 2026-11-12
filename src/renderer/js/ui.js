@@ -131,6 +131,18 @@ const UI = {
           this._renderTableWindow(false)
         })
       })
+      // 窗口最大化/还原、面板显隐会改 tableBody 高度；不重算可视窗口会露出空白占位
+      if (typeof ResizeObserver === 'function' && !this._tResizeBound) {
+        this._tResizeBound = true
+        let raf2 = 0
+        new ResizeObserver(() => {
+          if (raf2) return
+          raf2 = requestAnimationFrame(() => {
+            raf2 = 0
+            this._renderTableWindow(false)
+          })
+        }).observe(body)
+      }
     }
     // 与旧实现（innerHTML 重建后浏览器自动回顶）行为一致：切视图/排序/搜索回顶部
     if (body.scrollTop) body.scrollTop = 0
@@ -151,7 +163,7 @@ const UI = {
     const oldStart = this._tStart
     const oldEnd = this._tEnd
     // 首帧 / 强制（切视图·排序·搜索·收藏变化）→ 整块重建，上下带占位块
-    if (force || oldStart < 0 || oldEnd <= oldStart || start >= oldEnd || end <= oldStart) {
+    if (force || oldStart < 0 || oldEnd <= oldStart) {
       this._tStart = start
       this._tEnd = end
       const rows = []
@@ -165,6 +177,32 @@ const UI = {
       return
     }
     if (start === oldStart && end === oldEnd) return
+    /* 滚动条大幅跳跃：新旧窗口完全不重叠时，仍然是删旧行 + 补新行，
+       不回退到整块 innerHTML 重建（守 §2 不变量 #5，避免封面 <img> 被销毁） */
+    if (start >= oldEnd || end <= oldStart) {
+      const jumpTop = body.firstElementChild
+      const jumpBot = body.lastElementChild
+      if (!jumpTop || !jumpBot || jumpTop.dataset.sp !== 'top' || jumpBot.dataset.sp !== 'bottom') {
+        this._tStart = -1
+        this._renderTableWindow(true)
+        return
+      }
+      let html = ''
+      for (let i = start; i < end; i++) html += this._rowHtml(i)
+      let row = jumpTop.nextElementSibling
+      while (row && row !== jumpBot) {
+        const next = row.nextElementSibling
+        row.remove()
+        row = next
+      }
+      jumpBot.insertAdjacentHTML('beforebegin', html)
+      jumpTop.style.height = `${start * TABLE_ROW_H}px`
+      jumpBot.style.height = `${(n - end) * TABLE_ROW_H}px`
+      this._tStart = start
+      this._tEnd = end
+      this._markSortHeader(this._tCtx.sortKey, this._tCtx.sortDir)
+      return
+    }
     /* v2.8.27 / v3.3.28：滚动改成「头尾增删」，不再整块 innerHTML 重建。
        以前每滚 40px 就把可视区 20+ 行全销毁重建：行内封面 <img> 要重新请求 +
        重新解码（lxcover 协议原来还是 no-store），表现就是滚动时整屏封面闪。
@@ -672,11 +710,28 @@ const UI = {
     }
   },
 
+  /** 活动行逐字染色：同一句内 curSec 持续推进，行号不变也要刷新词级高亮 */
+  _paintLyricWords(st, idx, curSec) {
+    if (idx < 0) return
+    const node = this.els.lpLyrics.children[idx]
+    if (!node) return
+    const words = st.lines[idx] && st.lines[idx].words
+    if (!words || !words.length) return
+    const kws = node.querySelectorAll('.kw')
+    for (let i = 0; i < kws.length; i++) {
+      if (!words[i]) break
+      kws[i].classList.toggle('done', curSec >= words[i].t)
+    }
+  },
+
   updateLyricIndex(curSec) {
     const st = this.lyricState
     if (st.plain || !st.lines.length) return
     const idx = findLineIndex(st.lines, curSec)
-    if (idx === st.index) return
+    if (idx === st.index) {
+      this._paintLyricWords(st, idx, curSec)
+      return
+    }
     const prevIdx = st.index
     st.index = idx
     const box = this.els.lpLyrics
@@ -685,18 +740,8 @@ const UI = {
     // 这里只改「上一行 + 当前行」两处
     if (prevIdx >= 0 && nodes[prevIdx]) nodes[prevIdx].classList.remove('active')
     if (idx >= 0 && nodes[idx]) nodes[idx].classList.add('active')
-    // v3.3.27（追加清单 #2）：逐字行做词级染色（只在活动行内，词数 ≤ 20，开销可忽略）；
-    // 整句行走原路径。curSec 已含歌词偏移，与行时间轴同源。
-    if (idx >= 0 && nodes[idx]) {
-      const words = st.lines[idx] && st.lines[idx].words
-      if (words && words.length) {
-        const kws = nodes[idx].querySelectorAll('.kw')
-        for (let i = 0; i < kws.length; i++) {
-          if (!words[i]) break
-          kws[i].classList.toggle('done', curSec >= words[i].t)
-        }
-      }
-    }
+    // v3.3.27（追加清单 #2）：逐字行词级染色；curSec 已含歌词偏移，与行时间轴同源
+    this._paintLyricWords(st, idx, curSec)
     // 迷你卡片只显示当前一句（没到第一句时留空，CSS 会隐藏这一行）
     const cur = idx >= 0 && st.lines[idx] ? st.lines[idx].text : ''
     if (this.els.mvLyric.textContent !== cur) this.els.mvLyric.textContent = cur

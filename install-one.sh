@@ -22,7 +22,7 @@ if [ "$rc" -ge 8 ]; then echo "robocopy 失败 rc=$rc（≥8 表示有文件未�
 [ -n "$MANUAL" ] && [ -f "$MANUAL" ] && cp "$MANUAL" "$DST/使用说明.txt" && echo "   使用说明.txt 已更新"
 
 echo "== 2) 体检 =="
-cd "$WS/lx-player" && node tools/check-dist.mjs "$DST"
+cd "$WS/lx-player" && node tools/check-dist.mjs "$DST" "${5:-}"
 
 echo "== 3) 打便携包 =="
 mkdir -p "$ZIPDIR"

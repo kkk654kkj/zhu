@@ -197,7 +197,9 @@ async function main() {
     const head = (await api(`/repos/${REPO}/git/ref/heads/${rel.branch}`)).object.sha
     const tag = await api(`/repos/${REPO}/git/ref/tags/${rel.tag}`)
     const tagSha = tag.object.type === 'commit' ? tag.object.sha : (await api(`/repos/${REPO}/git/tags/${tag.object.sha}`)).object.sha
-    console.log(`tag ${rel.tag} → ${tagSha.slice(0, 8)} | ${rel.branch} HEAD → ${head.slice(0, 8)} | ${tagSha === head ? '一致 ✓' : '不一致 ✗'}`)
+    // 验收项失败必须让脚本非零退出，不能只打印一行「不一致」还返回成功
+    if (tagSha !== head) throw new Error('tag 未指向分支 HEAD: ' + rel.tag)
+    console.log(`tag ${rel.tag} → ${tagSha.slice(0, 8)} | ${rel.branch} HEAD → ${head.slice(0, 8)} | 一致 ✓`)
   }
 }
 main().catch((e) => { console.error('发布失败:', e); process.exit(1) })

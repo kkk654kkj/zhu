@@ -211,7 +211,7 @@ const Online = {
     if (more) more.hidden = !showMore
   },
 
-  render() {
+  render(appendFrom = 0) {
     const body = document.getElementById('opBody')
     if (!body) return
     if (!this.list.length) {
@@ -219,10 +219,14 @@ const Online = {
       return
     }
     const srcName = new Map(this.sources.map((s) => [s.id, s.short || s.name]))
-    body.innerHTML = this.list.map((s, i) => {
+    // 加载更多只追加新行：整页重建会销毁已探测的音质节点并让滚动位置归零
+    const from = appendFrom > 0 && body.children.length ? appendFrom : 0
+    let html = ''
+    for (let i = from; i < this.list.length; i++) {
+      const s = this.list[i]
       const id = `on:${s.source}:${s.id}`
       const cur = this.playingId === id
-      return `<div class="op-tr${cur ? ' playing' : ''}" data-index="${i}" data-id="${esc(id)}">
+      html += `<div class="op-tr${cur ? ' playing' : ''}" data-index="${i}" data-id="${esc(id)}">
         <div class="c-idx">
           <span class="num">${i + 1}</span>
           <span class="btn-play-row">${icon('play')}</span>
@@ -240,8 +244,10 @@ const Online = {
           <button class="op-act-btn" data-act="download" title="下载到本地">${icon('download')}</button>
         </div>
       </div>`
-    }).join('')
-    this.probeQuality()
+    }
+    if (from > 0) body.insertAdjacentHTML('beforeend', html)
+    else body.innerHTML = html
+    if (from === 0) this.probeQuality()
   },
 
   markPlaying(id) {
@@ -321,11 +327,24 @@ const Online = {
         sources: Array.from(this.enabled)
       })
       const list = (r && r.list) || []
-      this.list = reset ? list : this.list.concat(list)
+      const appendFrom = reset ? 0 : this.list.length
+      if (reset) {
+        this.list = list
+      } else {
+        // 翻页边界抖动 / 换关键词后继续加载时各源可能返回重叠条目：
+        // 重复行会让 data-id 同时高亮多条、playAt(i) 索引歧义
+        const seen = new Set(this.list.map((s) => `${s.source}:${s.id}`))
+        this.list = this.list.concat(list.filter((s) => {
+          const k = `${s.source}:${s.id}`
+          if (seen.has(k)) return false
+          seen.add(k)
+          return true
+        }))
+      }
       // v3.3.7：hasMore 跟请求的 limit（30）对齐。以前用 20 判断，
       // 某页返回 20~29 条且后面其实还有结果时，「加载更多」会被错误隐藏
       this.hasMore = list.length >= 30
-      this.render()
+      this.render(appendFrom)
       const ms = Math.round(performance.now() - t0)
       const counts = {}
       for (const s of this.list) counts[s.source] = (counts[s.source] || 0) + 1
@@ -464,6 +483,11 @@ const Online = {
   addQueueAt(i) {
     const song = this.list[i]
     if (!song) return
+    // 与 play() 同口径：代理未就绪时 toTrack 会拼出相对 /stream，播到该曲必然 404
+    if (!this.proxyBase) {
+      toast('本地代理未就绪，在线播放暂不可用。稍后重试或重启应用', 4000)
+      return
+    }
     player.addToQueue(this.toTrack(song, null))
     toast('已加入队列：' + song.title)
   },
@@ -542,21 +566,24 @@ const Online = {
       if (!btn) return
       const key = (row.dataset.id || '').replace(/^on:/, '')
       const t = byKey.get(key)
+      const pct = t && t.total ? Math.min(100, Math.round((t.received / t.total) * 100)) : null
+      // 主进程 250ms 推一次进度：只在显示状态变化时重建按钮节点，
+      // 否则每次都销毁 SVG / 百分比节点并抹掉 hover 态
+      const state = !t ? 'idle' : t.status === 'paused' ? 'paused' : (pct == null ? '…' : pct + '%')
+      btn.title = !t ? '下载到本地'
+        : t.status === 'paused' ? '已暂停：' + this.dlHuman(t)
+        : '下载中 ' + (pct == null ? '' : pct + '%') + ' · ' + this.dlHuman(t)
+      if (btn.dataset.dlSig === state) return
+      btn.dataset.dlSig = state
       if (!t) {
         btn.innerHTML = icon('download')
         btn.classList.remove('busy')
-        btn.title = '下载到本地'
         return
       }
       btn.classList.add('busy')
-      if (t.status === 'paused') {
-        btn.innerHTML = '<span style="font-size:10px;color:var(--txt-3)">暂停</span>'
-        btn.title = '已暂停：' + this.dlHuman(t)
-        return
-      }
-      const pct = t.total ? Math.min(100, Math.round((t.received / t.total) * 100)) : null
-      btn.innerHTML = `<span style="font-size:10px;color:var(--accent)">${pct == null ? '…' : pct + '%'}</span>`
-      btn.title = '下载中 ' + (pct == null ? '' : pct + '%') + ' · ' + this.dlHuman(t)
+      btn.innerHTML = t.status === 'paused'
+        ? '<span style="font-size:10px;color:var(--txt-3)">暂停</span>'
+        : `<span style="font-size:10px;color:var(--accent)">${state}</span>`
     })
   },
 

@@ -41,8 +41,9 @@ ok('streamproxy 导出 closeStreamServer 且强制断开 keep-alive',
 ok('退出链调用 SP.closeStreamServer', /SP\.closeStreamServer\(\)/.test(main))
 ok('online:cacheClear 用 DC.cacheStats()（裸调用会让 IPC reject）',
   /return \{ \.\.\.DC\.cacheStats\(\), removed: r\.removed \}/.test(main))
-ok('dlDelete / dlClearDone 都清 dlTargetCache',
-  (main.match(/DL\.dlTargetCache\.delete\(/g) || []).length >= 3)
+ok('dlDelete / dlClearDone 都清 dlTargetCache；暂停保留记录供续传比对',
+  (main.match(/DL\.dlTargetCache\.delete\(/g) || []).length >= 2 &&
+  !/online:dlPause[\s\S]{0,300}DL\.dlTargetCache\.delete\(/.test(main))
 ok('音源与音质设置先判写盘成败再改内存',
   (online.match(/patchSettings\([^\n]*\)\.then\(\(\) => true, \(\) => false\)/g) || []).length === 2 &&
   /设置保存失败，音源开关未生效/.test(online) &&

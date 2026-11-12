@@ -55,7 +55,14 @@ try {
   if (!e || !(e.size > 0) || e.size > MAX_ASAR_JSON) throw new Error('asar 内 package.json 条目异常')
   const body = Buffer.alloc(e.size)
   fs.readSync(fd, body, 0, e.size, base + Number(e.offset))
-  console.log('版本: ' + JSON.parse(body.toString('utf8')).version)
+  const ver = JSON.parse(body.toString('utf8')).version
+  console.log('版本: ' + ver)
+  // 换装换错旧包要真报错：以前只打印版本号，install-one.sh 的体检照样放行
+  const expect = process.argv[3] || ''
+  if (expect && ver !== expect) {
+    console.error('版本不符：期望 ' + expect + '，实际 ' + ver)
+    bad++
+  }
 } catch (err) {
   console.log('版本: 读取失败 ' + err.message)
   bad++

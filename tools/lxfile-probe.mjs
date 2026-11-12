@@ -1,5 +1,7 @@
 // §5.3 lxfile 实读探测：对第一首的 audio 地址发 Range 请求，期望 206
-const list = await (await fetch('http://127.0.0.1:9272/json/list')).json()
+// 基线用 CDP_PORT=<端口> 起实例，硬编码 9272 会连错实例或连不上
+const PORT = Number(process.env.CDP_PORT || 9272)
+const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json()
 const page = list.find((t) => t.type === 'page' && t.url.includes('index.html')) || list.find((t) => t.type === 'page')
 if (!page) { console.log('NO PAGE'); process.exit(1) }
 const ws = new WebSocket(page.webSocketDebuggerUrl)
