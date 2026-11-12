@@ -62,7 +62,10 @@ function clampSetting(key, v) {
  *  · 递归拒绝 __proto__/constructor/prototype，未知类型一律丢弃。
  * template 传 DEFAULT_SETTINGS.desktopLyric 即可用于 dlyric:cfg 的子对象过滤。
  */
-function sanitizeSettingsPatch(patch, template = DEFAULT_SETTINGS) {
+function sanitizeSettingsPatch(patch, template) {
+  // v3.3.32：默认参数写的是裸标识符 DEFAULT_SETTINGS（定义在 main.js），CommonJS
+  // 模块作用域拿不到 → 单参数调用必抛 ReferenceError。改走 init() 注入的 G getter。
+  if (!template) template = G && G.DEFAULT_SETTINGS
   const out = {}
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return out
   if (!template || typeof template !== 'object') return out
