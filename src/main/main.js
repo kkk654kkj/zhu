@@ -26,6 +26,10 @@ const DC = require('./dircache')
 const SP = require('./streamproxy')
 
 const isDev = process.argv.includes('--dev')
+/** v3.3.29 后台守卫：测试/成品实测实例绝不显示窗口、绝不抢前台焦点。
+ *  所有 show / focus / restore 路径统一走这个判据（ready-to-show、showMainWindow、
+ *  second-instance、activate；桌面歌词浮窗在 dlyric-window.js 里单独判同名变量）。 */
+const TEST_HIDDEN = () => process.env.LX_TEST_HIDDEN === '1'
 const DEFAULT_MUSIC_DIR = 'D:\\音乐'
 // 应用显示名（窗口标题 / 托盘提示）
 const APP_NAME = '猪专属播放器·联网版'
@@ -496,9 +500,11 @@ function createWindow() {
   })
 
   win.once('ready-to-show', () => {
+    // v3.3.22 / v3.3.29：LX_TEST_HIDDEN=1 时窗口不显示（后台冒烟/成品实测），绝不抢前台焦点。
+    // maximize() 在 Windows 上会隐式把窗口 show 出来，必须放在守卫之后；
+    // 再显式 hide() 兜底，防止其它路径提前置了 WS_VISIBLE。
+    if (TEST_HIDDEN()) { win.hide(); return }
     if (bounds.maximized && !miniActive) win.maximize()
-    // v3.3.22：LX_TEST_HIDDEN=1 时窗口不显示（后台冒烟/成品实测），绝不抢前台焦点
-    if (process.env.LX_TEST_HIDDEN === '1') return
     win.show()
   })
 
@@ -781,6 +787,8 @@ async function handleCloseAsk() {
  * "Object has been destroyed"，之后菜单就再也没反应了。
  */
 function showMainWindow() {
+  // v3.3.29：后台实例不把窗口拉到前台（托盘点击 / second-instance 都会走到这里）
+  if (TEST_HIDDEN()) return
   if (win && !win.isDestroyed()) {
     if (win.isMinimized()) win.restore()
     win.show()
@@ -2412,6 +2420,8 @@ function toClientTrack(t) {
 /* ---------------- 启动 ---------------- */
 
 logLine('stage: dataDir=' + DATA_DIR)
+// v3.3.29：后台模式自检日志。排查「窗口弹出」时先看这一行的 testHidden 值。
+logLine('stage: testHidden=' + TEST_HIDDEN() + ' raw=' + String(process.env.LX_TEST_HIDDEN))
 
 // 单实例锁：拿不到锁 = 已有实例在运行（Electron 会向其发送 second-instance 事件，
 // 由那边弹出/聚焦窗口）。此时本进程必须直接退出，否则会开双实例（抢 mpv、抢缓存）。
@@ -2435,12 +2445,16 @@ if (!gotLock) {
 if (gotLock) cleanChromiumCache().catch(() => {})
 {
   app.on('second-instance', async (event, argv) => {
-    if (win && !win.isDestroyed()) {
-      if (!win.isVisible()) win.show()
-      if (win.isMinimized()) win.restore()
-      win.focus()
-    } else {
-      showMainWindow()
+    // v3.3.29：第二实例启动绝不把已有窗口 show/restore/focus —— 这是「窗口弹出 +
+    // 抢前台焦点」的直接来源。argv 文件参数处理保持原样，不因后台模式丢失。
+    if (!TEST_HIDDEN()) {
+      if (win && !win.isDestroyed()) {
+        if (!win.isVisible()) win.show()
+        if (win.isMinimized()) win.restore()
+        win.focus()
+      } else {
+        showMainWindow()
+      }
     }
     // v3.3.10：第二实例带的文件参数以前被完全忽略（双击关联文件/拖到 exe 上毫无反应）。
     // 应用按「文件夹」组织曲库、单文件导入尚未实现，先把路径转给渲染层给出可见反馈
@@ -2547,6 +2561,7 @@ if (gotLock) cleanChromiumCache().catch(() => {})
     }
 
     app.on('activate', () => {
+      if (TEST_HIDDEN()) return
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
       else if (win) win.show()
     })

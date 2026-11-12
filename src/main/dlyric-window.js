@@ -56,6 +56,10 @@ function notifyDlyricState() {
 }
 
 function createLyricWindow() {
+  // v3.3.29：后台实例不创建桌面歌词浮窗。它 skipTaskbar + alwaysOnTop +
+  // ready-to-show 里直接 show()，完全不受主窗口隐藏守卫约束，是「窗口弹出」的
+  // 另一个来源。dlyricCfg / notifyDlyricState / applyDlyricLock 都容忍 null。
+  if (process.env.LX_TEST_HIDDEN === '1') return null
   if (dlyricWin && !dlyricWin.isDestroyed()) return dlyricWin
   const cfg = dlyricCfg()
   const b = cfg.bounds || {}
