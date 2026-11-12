@@ -2329,3 +2329,257 @@ body.mini #fsView { display: none; }
 }
 .fs-ctrl .icon-btn.play { width: 46px; height: 46px; box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 35%, transparent); }
 .fs-ctrl .icon-btn.play svg { width: 20px; height: 20px; }
+
+/* ================= v3.3.29 UI 增强轮 =================
+   全部为追加规则：不修改上方任何既有声明，不改 .tr 40px 行高、
+   不改虚拟滚动占位块、不恢复窗口拖动声明。新增 DOM 由 uix.js 运行时挂载。
+   设计参考：LyciaMusic（mesh 渐变/骨架屏）、XM Music（全屏特效/歌词分栏）、
+   Mulan Music（低饱和配色）、Nora（圆润字体图标）、git-hub-cc/Player（画廊）。 */
+:root {
+  --accent-2: color-mix(in srgb, var(--accent) 55%, #8b7cff);
+  --beat: 0;
+  --fs-lyric-fs: 16px;
+  --fs-lyric-align: center;
+}
+
+/* --- P1 #1 排版基线：数字等宽、字重阶梯 --- */
+.c-dur, .lp-offset, .vol-val, .lib-stat, .fs-prog .t, .pb-progress .t,
+.qp-item .t, .sp-time, .dl-size { font-variant-numeric: tabular-nums; }
+.app-name { font-weight: 500; }
+.nav-title { font-weight: 600; letter-spacing: .4px; }
+.vh-title, .pb-title, .mv-title { font-weight: 600; letter-spacing: .2px; }
+.table-head { font-weight: 500; letter-spacing: .3px; }
+
+/* --- P1 #2 键盘可达 + 焦点环（此前全仓 0 处） --- */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+button:focus:not(:focus-visible), input:focus:not(:focus-visible) { outline: none; }
+::selection { background: var(--accent-soft); color: var(--txt); }
+[title] { -webkit-user-select: none; }
+
+/* --- P1 #3 滚动条细化 + 滚动槽预留（不碰 .table-body 的 overflow-anchor） --- */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--txt-3) 42%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--accent) 55%, transparent); background-clip: padding-box; }
+#playlistNav, .qp-body, .lp-lyrics, #fsLyrics { scrollbar-gutter: stable; }
+
+/* --- P1 #4 主题感知骨架屏：pointer-events none 保证不挡任何点击 --- */
+#bootSkeleton {
+  position: fixed; inset: 0; z-index: 90;
+  pointer-events: none;
+  display: grid; place-items: center;
+  background: var(--bg-deep);
+  transition: opacity .22s ease;
+}
+#bootSkeleton.out { opacity: 0; }
+.bs-card {
+  width: min(520px, 62vw); padding: 22px;
+  border: 1px solid var(--line); border-radius: 14px;
+  background: var(--bg-panel);
+  display: grid; gap: 12px;
+}
+.bs-card i {
+  display: block; height: 11px; border-radius: 6px;
+  background: linear-gradient(90deg, var(--bg-hover) 20%, var(--bg-active) 45%, var(--bg-hover) 70%);
+  background-size: 220% 100%;
+  animation: bsShimmer 1.25s linear infinite;
+}
+.bs-card i:nth-child(2) { width: 68%; }
+.bs-card i:nth-child(3) { width: 84%; }
+.bs-card i:nth-child(4) { width: 46%; }
+@keyframes bsShimmer { to { background-position: -220% 0; } }
+
+/* --- P1 #5 hover 只过渡颜色，禁 scale 抖动（XM Music 踩过的坑） --- */
+.icon-btn, .mini-btn, .wbtn, .btn, .pl-item, .qp-item {
+  transition: background-color .16s ease, color .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+.icon-btn:hover, .mini-btn:hover, .wbtn:hover { transform: none !important; }
+#toast { backdrop-filter: blur(14px); box-shadow: 0 12px 34px rgba(0,0,0,.38); }
+
+/* --- P1 #7 空状态装饰 --- */
+.empty-state::before {
+  content: "\266A";
+  display: grid; place-items: center;
+  width: 52px; height: 52px; margin: 0 auto 14px;
+  border-radius: 50%;
+  font-size: 24px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  background: var(--accent-soft);
+}
+/* --- P1 #8 图标线宽/透明度统一 --- */
+.icon-btn svg, .mini-btn svg, .wbtn svg { opacity: .9; stroke-linecap: round; stroke-linejoin: round; }
+.icon-btn:hover svg, .mini-btn:hover svg, .wbtn:hover svg { opacity: 1; }
+
+/* --- P2 #9 封面取色 mesh 渐变（--accent-2 由 theme.js 写互补色） --- */
+body::before {
+  background:
+    radial-gradient(48% 36% at 18% -8%,  color-mix(in srgb, var(--accent-2) 16%, transparent), transparent 72%),
+    radial-gradient(44% 34% at 84% 108%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 72%),
+    radial-gradient(36% 28% at 64% 46%,  color-mix(in srgb, var(--accent-2) 7%, transparent), transparent 76%);
+  animation: uixMesh 30s ease-in-out infinite alternate;
+}
+@keyframes uixMesh {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(1.4%, -1%, 0) scale(1.045); }
+}
+
+/* --- P2 #10 封面 cross-fade / 播放中轻 pulse（只作用于 4 处主封面，不含列表行） --- */
+@keyframes uixCoverIn { from { opacity: 0; transform: scale(1.035); } to { opacity: 1; transform: none; } }
+@keyframes uixCoverPulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.018); } }
+#pbCover img, #lpCover img, #mvCover img, #fsCover img { animation: uixCoverIn .34s ease both; }
+body.uix-playing #pbCover img {
+  animation: uixCoverIn .34s ease both, uixCoverPulse 5s ease-in-out .34s infinite;
+}
+body:not(.uix-playing) #fsCover[data-fx] img { animation-play-state: paused; }
+
+/* --- P2 #11/#15 运行时新增的小按钮 --- */
+.uix-btn {
+  display: inline-grid; place-items: center;
+  width: 26px; height: 26px; flex: 0 0 auto;
+  border-radius: 7px; color: var(--txt-3);
+  font-size: 12px; line-height: 1;
+  background: transparent;
+}
+.uix-btn:hover { color: var(--accent); background: var(--bg-hover); }
+.uix-btn.on { color: var(--accent); background: var(--accent-soft); }
+.uix-badge {
+  display: inline-block; min-width: 16px; padding: 0 4px;
+  margin-left: 4px; border-radius: 8px;
+  font-size: 10px; line-height: 16px; text-align: center;
+  color: var(--bg-deep); background: var(--accent);
+}
+
+/* --- P3 #17 全屏页：封面 | 歌词 对半分栏 + 多行歌词面板 --- */
+#fsView .fs-body {
+  display: grid;
+  grid-template-columns: minmax(180px, .85fr) minmax(280px, 1.15fr);
+  gap: clamp(24px, 5vw, 72px);
+  align-items: center;
+}
+#fsView .fs-meta { width: 100%; max-width: 560px; }
+#fsView .fs-lyric { height: 34px; font-size: calc(var(--fs-lyric-fs) * .95); margin-top: 4px; }
+#fsLyrics {
+  height: min(44vh, 340px);
+  overflow: hidden;
+  margin-top: 10px;
+  padding: 6px 4px;
+  text-align: var(--fs-lyric-align);
+  font-size: var(--fs-lyric-fs);
+  line-height: 1.75;
+  color: var(--txt-2);
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 18%, #000 82%, transparent);
+  mask-image: linear-gradient(180deg, transparent, #000 18%, #000 82%, transparent);
+}
+#fsLyrics .lyric-line { padding: 2px 8px; border-radius: 6px; transition: color .18s ease, background-color .18s ease; }
+#fsLyrics .lyric-line.active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+#fsLyrics .lyric-empty { color: var(--txt-3); font-size: 13px; padding-top: 24px; }
+#fsHeadTools { display: flex; align-items: center; gap: 4px; }
+#fsHeadTools .uix-btn { font-size: 11px; }
+
+/* --- P3 #18 唱片 / CD / 磁带 封面特效 --- */
+@keyframes uixSpin { to { transform: rotate(360deg); } }
+#fsCover { position: relative; }
+#fsCover[data-fx] img { will-change: transform; }
+#fsCover[data-fx="vinyl"] img { border-radius: 50%; animation: uixSpin 14s linear infinite; }
+#fsCover[data-fx="vinyl"]::after,
+#fsCover[data-fx="cd"]::after {
+  content: ""; position: absolute; top: 50%; left: 50%;
+  width: 15%; height: 15%; transform: translate(-50%, -50%);
+  border-radius: 50%; background: var(--bg-deep);
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--txt-3) 40%, transparent);
+  pointer-events: none;
+}
+#fsCover[data-fx="cd"] img {
+  border-radius: 50%; animation: uixSpin 9s linear infinite;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.22), inset 0 0 32px rgba(255,255,255,.18);
+}
+#fsCover[data-fx="cd"]::after { width: 22%; height: 22%; background: rgba(255,255,255,.14); }
+#fsCover[data-fx="tape"] img {
+  height: 62%; width: 86%; border-radius: 6px; object-fit: cover;
+  box-shadow: 0 8px 18px rgba(0,0,0,.45);
+}
+#fsCover[data-fx="tape"] { background: linear-gradient(160deg, #2a303a, #12161b); }
+#fsCover[data-fx="tape"]::after {
+  content: ""; position: absolute; bottom: 12%; left: 14%; right: 14%;
+  height: 10%; border-radius: 4px;
+  border: 2px solid color-mix(in srgb, var(--txt-3) 55%, transparent);
+  pointer-events: none;
+}
+
+/* --- P3 #19 霓虹频谱：真实 Analyser 数据驱动的第二画布 + 节拍光晕 --- */
+#fsSpectrum {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  width: 100%; height: 108px;
+  z-index: 0; pointer-events: none;
+  opacity: .55;
+}
+#fsView::after {
+  content: "";
+  position: absolute; inset: auto 0 0 0; height: 60%;
+  z-index: 0; pointer-events: none;
+  background: radial-gradient(70% 100% at 50% 100%, color-mix(in srgb, var(--accent) 24%, transparent), transparent 72%);
+  opacity: calc(.18 + var(--beat) * .62);
+  transition: opacity .12s linear;
+}
+#fsView[data-fxoff="1"] #fsSpectrum, #fsView[data-fxoff="1"]::after { display: none; }
+
+/* --- P3 #20 无限画廊 --- */
+#galleryView {
+  position: fixed; inset: 0; z-index: 51;
+  display: grid; align-content: center; gap: 22px;
+  background: color-mix(in srgb, var(--bg-deep) 88%, transparent);
+  backdrop-filter: blur(18px);
+  opacity: 0; pointer-events: none;
+  transition: opacity .22s ease;
+}
+#galleryView.open { opacity: 1; pointer-events: auto; }
+.gv-head { text-align: center; color: var(--txt-2); font-size: 12px; padding: 0 24px; }
+.gv-viewport { overflow: hidden; }
+.gv-track { display: flex; gap: 16px; width: max-content; animation: uixGallery 68s linear infinite; }
+.gv-viewport:hover .gv-track { animation-play-state: paused; }
+.gv-item { flex: 0 0 auto; width: 118px; height: 118px; border-radius: 14px; overflow: hidden; background: var(--bg-panel); box-shadow: 0 12px 28px rgba(0,0,0,.35); }
+.gv-item img { width: 100%; height: 100%; object-fit: cover; }
+.gv-foot { text-align: center; color: var(--txt-3); font-size: 11px; }
+@keyframes uixGallery { to { transform: translateX(-50%); } }
+
+/* --- P3 #22 亮色 / 跟随系统主题（settings.theme 已存在，白名单天然放行） --- */
+html[data-theme="light"] {
+  --bg-deep: #eceff5;
+  --bg-main: #f7f9fc;
+  --bg-panel: #ffffff;
+  --bg-hover: #e8edf5;
+  --bg-active: #dbe3f0;
+  --bg-bar: #ffffff;
+  --line: #d8dfea;
+  --line-soft: #e6ebf3;
+  --txt: #1c2431;
+  --txt-2: #4e5a6d;
+  --txt-3: #7b8798;
+  --danger: #d23b42;
+}
+html[data-theme="light"] body::before { opacity: .5; }
+html[data-theme="light"] #toast,
+html[data-theme="light"] .ctx-menu,
+html[data-theme="light"] .qp-head,
+html[data-theme="light"] .eq-head { box-shadow: 0 12px 32px rgba(24,36,56,.18); }
+html[data-theme="light"] .fs-cover { background: linear-gradient(140deg, #dfe6f2, #c8d3e4); }
+html[data-theme="light"] #fsView::before { filter: blur(52px) saturate(1.15) brightness(1.02); opacity: .45; }
+html[data-theme="light"] #fsView .fs-title,
+html[data-theme="light"] #fsView .fs-artist,
+html[data-theme="light"] .fs-prog .t { color: var(--txt); }
+html[data-theme="light"] #galleryView { background: color-mix(in srgb, #ffffff 86%, transparent); }
+html[data-theme="light"] .bs-card { box-shadow: 0 18px 44px rgba(24,36,56,.14); }
+
+/* --- 全局：尊重系统「减少动态效果」 --- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}

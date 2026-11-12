@@ -388,10 +388,47 @@ function computedList() {
 }
 
 function switchView(view) {
+  // v3.3.29（P2 #12）：视图切换保留滚动位置。renderTable 会把 scrollTop 归零，
+  // 所以恢复放在 renderView 之后，并让虚拟滚动按新位置重算一次窗口。
+  const body = document.getElementById('tableBody')
+  try {
+    if (body && state.view !== view) {
+      if (!state._viewScroll) state._viewScroll = new Map()
+      state._viewScroll.set(state.view, body.scrollTop)
+    }
+  } catch { /* 视图滚动位置是纯体验，失败不影响切换 */ }
   state.view = view
   UI.setActiveNav(view)
   renderView()
+  try {
+    const saved = state._viewScroll && state._viewScroll.get(view)
+    if (body && saved) {
+      body.scrollTop = saved
+      if (typeof UI._renderTableWindow === 'function') UI._renderTableWindow(false)
+    }
+  } catch { /* 同上 */ }
 }
+
+/* v3.3.29（P2 #11）：播放条「定位当前曲」按钮派发的事件。
+   虚拟滚动只渲染窗口行，所以按 index*40 直接算 scrollTop 而不是找 DOM 节点。 */
+window.addEventListener('uix:locate', () => {
+  const body = document.getElementById('tableBody')
+  const gridViews = ['online', 'albums', 'folders']
+  if (!body || gridViews.indexOf(state.view) >= 0 || !document.getElementById('tableBody').offsetParent) {
+    if (typeof toast === 'function') toast('先切到歌曲列表视图')
+    return
+  }
+  const list = typeof computedList === 'function' ? computedList() : (state.visible || [])
+  const i = list.findIndex((t) => t.id === state.currentId)
+  if (i < 0) {
+    if (typeof toast === 'function') toast('当前曲目不在本列表')
+    return
+  }
+  const target = Math.max(0, i * TABLE_ROW_H - Math.max(0, (body.clientHeight - TABLE_ROW_H) / 2))
+  body.scrollTop = target
+  if (typeof UI._renderTableWindow === 'function') UI._renderTableWindow(false)
+  if (typeof toast === 'function') toast('已定位到当前曲目')
+})
 
 function renderView() {
   clearSelection()          // 列表重建后旧选中已失效

@@ -31,7 +31,7 @@ const UI = {
       'miniRestore', 'miniMin', 'miniClose',
       'btnHifi', 'hifiBadge',
       'logo',
-      'fsView', 'fsClose', 'fsCover', 'fsTitle', 'fsArtist', 'fsQ', 'fsLyric',
+      'fsView', 'fsClose', 'fsCover', 'fsTitle', 'fsArtist', 'fsQ', 'fsLyric', 'fsLyrics',
       'fsCur', 'fsDur', 'fsBar', 'fsFill', 'fsDot',
       'fsMode', 'fsPrev', 'fsPlay', 'fsNext', 'fsFav'
     ]
@@ -410,6 +410,8 @@ const UI = {
     }
     document.querySelectorAll('#tableBody .tr.playing')
       .forEach((el) => el.classList.toggle('paused', !playing))
+    // v3.3.29：播放态给 body 一个标记，封面轻 pulse / 唱片旋转都跟着暂停
+    document.body.classList.toggle('uix-playing', !!playing)
   },
 
   setFavorite(isFav) {
@@ -639,12 +641,15 @@ const UI = {
 
   renderLyric(parsed, trackTitle) {
     const box = this.els.lpLyrics
+    const fsBox = this.els.fsLyrics
     this.lyricState.lines = parsed ? parsed.lines : []
     this.lyricState.plain = !!(parsed && parsed.plain)
     this.lyricState.index = -2
+    this.lyricState.fsIndex = -2
     this.els.mvLyric.textContent = ''
     if (!parsed || !parsed.lines.length) {
       box.innerHTML = '<div class="lyric-empty">暂无歌词</div>'
+      if (fsBox) fsBox.innerHTML = '<div class="lyric-empty">暂无歌词</div>'
       return
     }
     // v3.3.27（追加清单 #2）：逐字行渲染成 .kw 词片段（updateLyricIndex 做词级染色）；
@@ -658,6 +663,13 @@ const UI = {
       return `<div class="lyric-line${this.lyricState.plain ? ' plain' : ''}" data-i="${i}">${esc(l.text || '♪')}</div>`
     }).join('')
     box.scrollTop = 0
+    // v3.3.29（P3 #17）：全屏页多行歌词面板。整句渲染即可，词级卡拉OK
+    // 仍由歌词面板独占；这里只做当前行高亮 + 居中滚动，避免两套 .kw 抢状态。
+    if (fsBox) {
+      fsBox.innerHTML = parsed.lines.map((l, i) =>
+        `<div class="lyric-line" data-i="${i}">${esc(l.text || '♪')}</div>`).join('')
+      fsBox.scrollTop = 0
+    }
   },
 
   updateLyricIndex(curSec) {
@@ -690,6 +702,21 @@ const UI = {
     if (this.els.mvLyric.textContent !== cur) this.els.mvLyric.textContent = cur
     // v2.8.25：全屏播放页同步当前句
     if (this.els.fsLyric && this.els.fsLyric.textContent !== cur) this.els.fsLyric.textContent = cur
+    // v3.3.29（P3 #17）：全屏页多行歌词镜像高亮 + 当前行居中（瞬时定位，同 lpLyrics 口径）
+    const fsBox = this.els.fsLyrics
+    if (fsBox && st.fsIndex !== idx) {
+      const fn = fsBox.children
+      if (st.fsIndex >= 0 && fn[st.fsIndex]) fn[st.fsIndex].classList.remove('active')
+      if (idx >= 0 && fn[idx]) {
+        fn[idx].classList.add('active')
+        const bRect = fsBox.getBoundingClientRect()
+        const nRect = fn[idx].getBoundingClientRect()
+        const d = (nRect.top - bRect.top) - (fsBox.clientHeight - nRect.height) / 2
+        fsBox.scrollTop = Math.min(Math.max(0, fsBox.scrollTop + d),
+          Math.max(0, fsBox.scrollHeight - fsBox.clientHeight))
+      }
+      st.fsIndex = idx
+    }
     if (idx >= 0 && nodes[idx]) {
       const node = nodes[idx]
       // 用 rect 差值算，不要用 offsetTop：它相对最近定位祖先，一旦祖先在上方就会大幅偏移
@@ -828,20 +855,30 @@ const UI = {
 
     menu.innerHTML = build(items)
     menu.hidden = false
-    // 防溢出
+    // 防溢出（v3.3.29 加固：原 Math.min 只夹右下，小窗口/贴边点击会算出负 left/top
+    // 把菜单甩出屏幕；现在四边都夹住）
     const rect = menu.getBoundingClientRect()
     const vw = window.innerWidth
     const vh = window.innerHeight
-    menu.style.left = Math.min(x, vw - rect.width - 8) + 'px'
-    menu.style.top = Math.min(y, vh - rect.height - 8) + 'px'
+    const pad = 8
+    const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi))
+    menu.style.left = clamp(x, pad, vw - rect.width - pad) + 'px'
+    menu.style.top = clamp(y, pad, vh - rect.height - pad) + 'px'
 
-    // v2.6：子菜单防溢出——右侧放不下时向左弹
+    // v2.6：子菜单防溢出——右侧放不下时向左弹；v3.3.29 补底部上移
     menu.querySelectorAll('.ctx-sub').forEach((el) => {
       el.addEventListener('mouseenter', () => {
         const sub = el.querySelector('.ctx-submenu')
         if (!sub) return
         sub.classList.remove('flip')
-        if (sub.getBoundingClientRect().right > vw - 8) sub.classList.add('flip')
+        sub.style.transform = ''
+        if (sub.getBoundingClientRect().right > vw - pad) sub.classList.add('flip')
+        const r2 = sub.getBoundingClientRect()
+        const over = r2.bottom - (vh - pad)
+        if (over > 0) {
+          const shift = Math.max(0, Math.min(over, r2.top - pad))
+          if (shift) sub.style.transform = `translateY(${-shift}px)`
+        }
       })
     })
 

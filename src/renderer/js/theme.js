@@ -4,14 +4,18 @@
  *
  * 三种来源统一存进 settings.accent（字符串，主进程 settings-schema 的
  * 字符串白名单本来就放行，无需改 schema）：
- *   - 'green' | 'cyan' | 'purple' | 'orange'  固定预设
- *   - 'auto'                                   跟随当前曲封面主色
- *   - '#rrggbb'                                兼容旧设置里的裸色值
+ *   - 'green' | 'cyan' | 'purple' | 'orange' | 'ocean'  固定预设
+ *   - 'auto'                                           跟随当前曲封面主色
+ *   - '#rrggbb'                                         兼容旧设置里的裸色值
  *
  * 取色走主进程 nativeImage（ui:accentForTrack）：主进程本来就有封面缓冲
  * （专辑级缓存），不经过渲染层 canvas，也就没有 CSP / 跨域污染问题。
  * 在线曲目封面是远程 https 链接，主进程不联网取色 → 保持上一首歌的颜色，
  * 不会闪烁回默认绿。
+ *
+ * v3.3.29：新增第六档低饱和「海洋蓝」、外观模式（深色/浅色/跟随系统）。
+ * 模式沿用 DEFAULT_SETTINGS 里已存在的 theme 键（settings-schema 白名单天然放行），
+ * 同时写一份 localStorage 供启动瞬间立即生效，避免等异步 settings 回来才变色。
  *
  * 入口：标题栏 logo 点按 = 循环切换预设；右键 logo = 弹菜单选择。
  */
@@ -21,12 +25,21 @@ const Theme = (() => {
     { key: 'cyan', label: '青', hex: '#22b8cf' },
     { key: 'purple', label: '紫', hex: '#a78bfa' },
     { key: 'orange', label: '橙', hex: '#f59e42' },
+    { key: 'ocean', label: '海洋蓝（低饱和）', hex: '#4a90d9' },
     { key: 'auto', label: '跟随封面', hex: '' }
   ]
-  const ORDER = ['green', 'cyan', 'purple', 'orange', 'auto']
+  const ORDER = ['green', 'cyan', 'purple', 'orange', 'ocean', 'auto']
+  const MODES = [
+    { key: 'dark', label: '深色' },
+    { key: 'light', label: '浅色' },
+    { key: 'system', label: '跟随系统' }
+  ]
+  const MODE_KEY = 'uix.themeMode'
 
   /** 渲染层侧的取色结果缓存 { trackId: hex }（主进程还有一层进程内缓存） */
   const coverAccent = new Map()
+  let mode = 'dark'
+  let mql = null
 
   function hexToRgb(hex) {
     const m = /^#?([0-9a-f]{6})$/i.exec(hex || '')
@@ -102,7 +115,65 @@ const Theme = (() => {
     }))
   }
 
+  /* ---------------- v3.3.29 外观模式 ---------------- */
+
+  function readMode() {
+    try {
+      const v = localStorage.getItem(MODE_KEY)
+      return MODES.some((m) => m.key === v) ? v : 'dark'
+    } catch { return 'dark' }
+  }
+
+  function effective(m) {
+    if (m !== 'system') return m
+    try { return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark' } catch { return 'dark' }
+  }
+
+  function onSysChange() {
+    if (mode === 'system') document.documentElement.setAttribute('data-theme', effective('system'))
+  }
+
+  function setMode(next, save = true) {
+    if (!MODES.some((m) => m.key === next)) return
+    mode = next
+    try { localStorage.setItem(MODE_KEY, next) } catch { /* 隐私模式下忽略 */ }
+    document.documentElement.setAttribute('data-theme', effective(next))
+    if (mql) {
+      try { mql.removeEventListener('change', onSysChange) } catch { /* 老 API */ }
+      mql = null
+    }
+    if (next === 'system' && window.matchMedia) {
+      try {
+        mql = window.matchMedia('(prefers-color-scheme: light)')
+        if (mql.addEventListener) mql.addEventListener('change', onSysChange)
+        else if (mql.addListener) mql.addListener(onSysChange)
+      } catch { mql = null }
+    }
+    if (save && typeof state !== 'undefined' && state && state.settings) {
+      state.settings.theme = next
+      if (typeof saveSettings === 'function') saveSettings({ theme: next })
+    }
+  }
+
+  function cycleMode() {
+    const i = MODES.findIndex((m) => m.key === mode)
+    const next = MODES[(i + 1) % MODES.length]
+    setMode(next.key)
+    return next.label
+  }
+
+  function modeItems() {
+    return MODES.map((m) => ({
+      label: (m.key === mode ? '● ' : '○ ') + m.label,
+      act: 'theme-mode', arg: m.key
+    }))
+  }
+
+  function currentMode() { return mode }
+
   function init() {
+    // 启动瞬间先按本地缓存落一次，不等 loadInitialData 的异步 settings
+    setMode(readMode(), false)
     const logo = document.getElementById('logo')
     if (logo) {
       logo.addEventListener('click', () => {
@@ -112,23 +183,25 @@ const Theme = (() => {
       })
       logo.addEventListener('contextmenu', (e) => {
         e.preventDefault()
-        const cur = currentKey()
-        UI.showContextMenu(e.clientX, e.clientY, PRESETS.map((p) => ({
-          label: (p.key === cur ? '● ' : '○ ') + p.label,
-          act: 'theme-set', arg: p.key
-        })))
+        UI.showContextMenu(e.clientX, e.clientY, [
+          ...menuItems(),
+          { sep: true },
+          { label: '外观模式', sub: modeItems() }
+        ])
       })
     }
-    // 主题色菜单动作（handleCtxAction 对未知 act 走 default 分支，不会报错）
+    // 主题色 / 外观模式菜单动作（handleCtxAction 对未知 act 走 default 分支，不会报错）
     const ctxMenu = document.getElementById('ctxMenu')
     if (ctxMenu) {
       ctxMenu.addEventListener('ctx-act', (e) => {
-        if (e.detail && e.detail.act === 'theme-set') apply(e.detail.arg)
+        if (!e.detail) return
+        if (e.detail.act === 'theme-set') apply(e.detail.arg)
+        else if (e.detail.act === 'theme-mode') setMode(e.detail.arg)
       })
     }
   }
 
   init()
 
-  return { apply, onTrack, applyVars, menuItems }
+  return { apply, onTrack, applyVars, menuItems, setMode, cycleMode, modeItems, currentMode }
 })()

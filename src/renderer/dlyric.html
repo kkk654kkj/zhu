@@ -89,6 +89,28 @@
   body.paused #line, body.paused #next { opacity: .45; }
   /* 用 visibility 而不是 display：没有下一句时占位仍在，歌词不会上下跳 */
   body.nolyric #next { visibility: hidden; }
+  /* v3.3.29 桌面歌词增强：系统毛玻璃 + 双行描边 + 锁定态区分。
+     背景只在未锁定时出现，alpha 恒定；hover 不整窗改色，避免 Windows 上闪一下。 */
+  #wrap:not(.locked) {
+    -webkit-backdrop-filter: blur(16px) saturate(1.25);
+    backdrop-filter: blur(16px) saturate(1.25);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.10);
+  }
+  #line, #next {
+    text-shadow: 0 2px 6px rgba(0,0,0,.92), 0 0 18px rgba(0,0,0,.55);
+    -webkit-text-stroke: .35px rgba(0,0,0,.45);
+    letter-spacing: .5px;
+  }
+  #next { margin-top: 2px; }
+  #ctrl {
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 4px 14px rgba(0,0,0,.35);
+  }
+  #wrap.locked #line { text-shadow: 0 1px 4px #000, 0 0 12px #000; }
+  @media (prefers-reduced-motion: reduce) {
+    #line, #next, #ctrl { transition: none !important; }
+  }
 </style>
 </head>
 <body>
