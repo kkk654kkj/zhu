@@ -194,19 +194,32 @@ function main() {
         一旦有人把 CSS 的 drag 写回来，问题会原样复发 —— 所以直接哨兵 CSS。
      2) 虚拟滚动以前每滚 40px 就把可视区 20+ 行 innerHTML 重建一次，行内封面
         重新请求 + 重新解码，表现为滚动时整屏封面闪。修法是头尾增删复用节点。 */
-  ok('主进程接管标题栏拖动（win:drag-start / win:drag-end）',
-    /ipcMain\.on\('win:drag-start'/.test(mainSrc) && /ipcMain\.on\('win:drag-end'/.test(mainSrc))
-  ok('拖动用 setBounds 且显式带 width/height（防 125% 缩放下尺寸漂移）',
-    /win:drag-start[\s\S]{0,900}?win\.setBounds\(\{\s*x[^}]*width:\s*b0\.width/.test(mainSrc))
+  ok('主进程接管标题栏拖动（drag-start / drag-move / drag-end）',
+    /ipcMain\.on\('win:drag-start'/.test(mainSrc) &&
+    /ipcMain\.on\('win:drag-move'/.test(mainSrc) &&
+    /ipcMain\.on\('win:drag-end'/.test(mainSrc))
+  ok('拖动改事件驱动，不再用 setInterval 轮询光标（16ms 定时器实测仅 34.6fps）',
+    !/windowDragTimer\s*=\s*setInterval/.test(mainSrc) &&
+    !/win:drag-start[\s\S]{0,1200}?setInterval/.test(mainSrc))
+  ok('drag-move 用 setBounds 且显式带 width/height（防 125% 缩放下尺寸漂移）',
+    /win:drag-move[\s\S]{0,700}?win\.setBounds\(\{\s*x[^}]*width:\s*windowDragOrigin\.width/.test(mainSrc))
   ok('拖动松手把尺寸拨回起始值',
     /win:drag-end[\s\S]{0,600}?windowDragOrigin\.width/.test(mainSrc))
   const preloadSrc = read('src/main/preload.js')
-  ok('preload 暴露 dragStart / dragEnd',
+  ok('preload 暴露 dragStart / dragMove / dragEnd',
     /dragStart:\s*\(\)\s*=>\s*ipcRenderer\.send\('win:drag-start'\)/.test(preloadSrc) &&
+    /dragMove:\s*\(dx,\s*dy\)\s*=>\s*ipcRenderer\.send\('win:drag-move',\s*dx,\s*dy\)/.test(preloadSrc) &&
     /dragEnd:\s*\(\)\s*=>\s*ipcRenderer\.send\('win:drag-end'\)/.test(preloadSrc))
   const appCss = read('src/renderer/css/app.css')
   ok('CSS 不再声明 app-region: drag（回退即复发按钮点不动）',
     !/^\s*-webkit-app-region:\s*drag\s*;/m.test(appCss))
+  const dragSrc = read('src/renderer/js/dragwin.js')
+  ok('渲染层 pointermove + rAF 节流 + 指针捕获驱动拖动',
+    /pointermove/.test(dragSrc) && /requestAnimationFrame\(/.test(dragSrc) &&
+    /setPointerCapture/.test(dragSrc) && /dragMove\(pendingDx, pendingDy\)/.test(dragSrc))
+  ok('拖动态关闭全屏 blur / backdrop-filter（降低移动重绘成本）',
+    /body\.win-dragging[\s\S]{0,400}?filter:\s*none/.test(appCss) &&
+    /body\.win-dragging\s*\*\s*\{[^}]*backdrop-filter:\s*none/.test(appCss))
   const uiSrc = read('src/renderer/js/ui.js')
   ok('虚拟滚动改为头尾增删（保留 _rowHtml 单一模板）',
     /_rowHtml\(i\)/.test(uiSrc) && /data-sp="top"/.test(uiSrc))
