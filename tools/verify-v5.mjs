@@ -174,7 +174,7 @@ try {
 try {
   const u = fs.readFileSync(path.join(REPO, 'src/renderer/js/ui.js'), 'utf8')
   ok('renderTable 走虚拟窗口（spacer + 缓冲）',
-      /_renderTableWindow/.test(u) && /TABLE_ROW_H = 40/.test(u) && /TABLE_VBUF/.test(u))
+      /_renderTableWindow/.test(u) && /TABLE_ROW_H = 52/.test(u) && /TABLE_VBUF/.test(u))
   ok('可视窗口重画带 playing/selected 态',
       /isSel \? ' selected'/.test(u) && /_tCurrentId/.test(u))
   ok('滚动用 rAF 节流', /addEventListener\('scroll'[\s\S]{0,200}requestAnimationFrame/.test(u))

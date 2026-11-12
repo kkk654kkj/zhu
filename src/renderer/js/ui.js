@@ -1,8 +1,8 @@
 'use strict'
 /* 视图渲染层：只负责把状态画到 DOM，不做业务决策 */
 
-/* 虚拟滚动参数：行高必须与 css .tr 的 height 严格一致（40px + 水平 margin 不影响垂直） */
-const TABLE_ROW_H = 40
+/* 虚拟滚动参数：行高必须与 css .tr 的 height 严格一致（52px，v3.4.0 起） */
+const TABLE_ROW_H = 52
 const TABLE_VBUF = 8   // 可视区上下各多渲染 8 行缓冲，滚动时不露白
 
 const UI = {
@@ -263,8 +263,7 @@ const UI = {
           </div>
           <div class="c-artist">${esc(t.artist || '未知歌手')}</div>
           <div class="c-album">${esc(t.album || '—')}</div>
-          <div class="c-fmt"><span class="badge${t.lossless ? ' lossless' : ''}">${esc(t.ext || '')}</span></div>
-          <div class="c-q${isHires(t) ? ' hires' : ''}" title="${esc(qualityTitle(t))}">${esc(fmtQuality(t))}</div>
+          <div class="c-spec${isHires(t) ? ' hires' : ''}" title="${esc(qualityTitle(t))}"><span class="badge${t.lossless ? ' lossless' : ''}">${esc(t.ext || '')}</span><span class="q">${esc(fmtQuality(t))}</span></div>
           <div class="c-dur">${fmtDuration(t.duration)}</div>
           ${acts}
         </div>`
@@ -273,7 +272,7 @@ const UI = {
   _markSortHeader(key, dir) {
     $$('#tableHead [data-sort]').forEach((el) => {
       el.textContent = {
-        artist: '歌手', album: '专辑', ext: '格式', duration: '时长', quality: '音质'
+        artist: '歌手', album: '专辑', quality: '规格', duration: '时长'
       }[el.dataset.sort] || el.dataset.sort
       if (el.dataset.sort === key) {
         el.textContent += dir === 'asc' ? ' ↑' : ' ↓'
@@ -359,6 +358,13 @@ const UI = {
       if (this.els.fsView) this.els.fsView.style.setProperty('--fs-bg', bg)
       const mv = document.getElementById('miniView')
       if (mv) mv.style.setProperty('--mv-bg', bg)
+    }
+    // v3.4.0：视图头顶部同色静态铺底（Apple Music 专辑页手法）。
+    // 只写变量、不做逐帧计算 —— blur 由 CSS 一次性出图，滚动时不重算。
+    if (this.els.viewHeader) {
+      this.els.viewHeader.style.setProperty(
+        '--vh-bg', cover ? `url("${cover.replace(/"/g, '%22')}")` : 'none'
+      )
     }
   },
 

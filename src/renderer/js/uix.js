@@ -91,7 +91,8 @@ const UIX = (() => {
   }
 
   function bindButtons() {
-    const modeBtn = addBtn('.tb-right', 'btnThemeMode', '◐', '外观模式（深色 / 浅色 / 跟随系统）', true)
+    // v3.4.0：标题栏只留高频 5 键，外观模式与画廊跟着扫描/诊断一起收进 ⋯ 菜单
+    const modeBtn = addBtn('#tbFoldMenu', 'btnThemeMode', '◐ 外观模式', '外观模式（深色 / 浅色 / 跟随系统）')
     if (modeBtn) modeBtn.addEventListener('click', () => {
       if (typeof Theme !== 'undefined' && typeof Theme.cycleMode === 'function') toast('外观：' + Theme.cycleMode())
     })
@@ -99,8 +100,31 @@ const UIX = (() => {
     if (locateBtn) locateBtn.addEventListener('click', () => {
       window.dispatchEvent(new CustomEvent('uix:locate'))
     })
-    const galleryBtn = addBtn('.tb-right', 'btnGallery', '▦', '封面画廊', true)
-    if (galleryBtn) galleryBtn.addEventListener('click', openGallery)
+    const galleryBtn = addBtn('#tbFoldMenu', 'btnGallery', '▦ 封面画廊', '封面画廊')
+    if (galleryBtn) galleryBtn.addEventListener('click', () => { closeFold(); openGallery() })
+  }
+
+  /* ---------------- v3.4.0 顶栏折叠菜单 ----------------
+     低频入口（扫描 / 诊断 / 外观 / 画廊）收进 ⋯，避免标题栏 10 个图标连排。
+     关闭时机：点菜单外、Esc、点任一项。全部用 document 级监听，页面重载不需要清理。 */
+  function closeFold() {
+    const f = $('tbFold')
+    if (f) f.classList.remove('open')
+  }
+  function bindFold() {
+    const fold = $('tbFold')
+    const more = $('btnMore')
+    if (!fold || !more) return
+    more.addEventListener('click', (e) => {
+      e.stopPropagation()
+      fold.classList.toggle('open')
+    })
+    document.addEventListener('click', (e) => {
+      if (!fold.contains(e.target)) closeFold()
+    })
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeFold()
+    })
   }
 
   /* ---------------- P3 #18 全屏特效 / 歌词排版工具 ---------------- */
@@ -291,6 +315,7 @@ const UIX = (() => {
   function init() {
     safe(injectTitles)
     safe(bindButtons)
+    safe(bindFold)
     safe(bindFullscreenTools)
     safe(bindSpectrum)
     safe(bindQueueBadge)
