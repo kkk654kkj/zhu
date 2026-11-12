@@ -61,12 +61,18 @@
     </div>
   </div>
   <div class="tb-right no-drag">
-    <button class="wbtn" id="btnScan" title="音乐文件夹与扫描"><svg><use href="#i-folder"/></svg></button>
     <button class="wbtn" id="btnLyricToggle" title="歌词面板"><svg><use href="#i-album"/></svg></button>
     <button class="wbtn" id="btnDLyric" title="桌面歌词（Ctrl+Alt+D）"><svg><use href="#i-dlyric"/></svg></button>
     <button class="wbtn" id="btnHifi" title="独占输出（位完美）"><svg><use href="#i-hifi"/></svg></button>
     <button class="wbtn" id="btnMini" title="迷你模式（Ctrl+Alt+M）"><svg><use href="#i-mini"/></svg></button>
-    <button class="wbtn" id="btnDiag" title="诊断信息（解析失败 / mpv 日志）"><svg><use href="#i-bug"/></svg></button>
+    <!-- v3.4.0：低频图标收进 ⋯，标题栏从 10 个键压到 5 个 -->
+    <div class="tb-fold" id="tbFold">
+      <button class="wbtn" id="btnMore" title="更多"><svg><use href="#i-more"/></svg></button>
+      <div class="tb-fold-menu" id="tbFoldMenu">
+        <button id="btnScan" title="音乐文件夹与扫描"><svg><use href="#i-folder"/></svg><span>音乐文件夹</span></button>
+        <button id="btnDiag" title="诊断信息（解析失败 / mpv 日志）"><svg><use href="#i-bug"/></svg><span>诊断信息</span></button>
+      </div>
+    </div>
     <span class="tb-sep"></span>
     <button class="wbtn" id="btnMin" title="最小化"><svg><use href="#i-min"/></svg></button>
     <button class="wbtn" id="btnMax" title="最大化"><svg><use href="#i-max"/></svg></button>
@@ -121,8 +127,7 @@
       <div class="col-title">标题</div>
       <div class="col-artist" data-sort="artist">歌手</div>
       <div class="col-album" data-sort="album">专辑</div>
-      <div class="col-fmt" data-sort="ext">格式</div>
-      <div class="col-q" data-sort="quality" title="位深 / 采样率，点按按音质排序">音质</div>
+      <div class="col-spec" data-sort="quality" title="格式 / 位深 / 采样率，点按按音质排序">规格</div>
       <div class="col-dur" data-sort="duration">时长</div>
     </div>
 

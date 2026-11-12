@@ -244,14 +244,20 @@ function main() {
   /* .tr 行底是硬编码 #1a1f27；浅色模式若缺少 html[data-theme="light"] 的行级覆盖，
      整个列表会变回黑底 + 低对比文字（真机截图复现）。同时严禁把浅色专用变量
      搬进 :root —— 那会让深色主题一起变色。 */
-  const lightFix = appCss.slice(appCss.indexOf('/* --- v3.3.30'))
+  const lightFix = appCss.slice(appCss.indexOf('/* --- v3.4.0 浅色主题'))
   ok('浅色模式有行级白底覆盖（.tr 深色残留不再外露）',
     /html\[data-theme="light"\]\s*\.tr\s*\{[^}]*background:\s*var\(--row-bg\)/.test(appCss))
   ok('浅色专用变量定义在 data-theme="light" 块内',
     /html\[data-theme="light"\]\s*\{[^}]*--row-ink:/.test(appCss) &&
     !/^:root\s*\{[^}]*--row-ink:/m.test(appCss))
-  ok('深色主题零变化（.tr 硬编码深色底仍在）',
-    /\.tr\s*\{[^}]*background:\s*#1a1f27/.test(appCss))
+  // v3.4.0：列表行去掉卡片底（bg #1a1f27 + 圆角 + 左右内缩），改为透明连续列表。
+  // 旧断言「.tr 硬编码深色底仍在」保护的是卡片设计，设计变了就得跟着改口径 ——
+  // 现在反过来守「不许把卡片底加回来」。
+  ok('列表行已扁平化（无 #1a1f27 卡片底 / 无行内圆角）',
+    !/\.tr\s*\{[^}]*background:\s*#1a1f27/.test(appCss) &&
+    /\.tr\s*\{[^}]*background:\s*transparent/.test(appCss))
+  ok('CSS 行高与 TABLE_ROW_H 严格一致（52px，漂移即整屏错位）',
+    /\.tr\s*\{[^}]*height:\s*52px/.test(appCss) && /TABLE_ROW_H = 52/.test(uiSrc))
   ok('浅色覆盖延伸到在线列表与队列抽屉',
     /html\[data-theme="light"\]\s*\.op-body\s*\.op-tr\s*\{/.test(appCss) &&
     /html\[data-theme="light"\]\s*\.qp-item\.active/.test(appCss))
