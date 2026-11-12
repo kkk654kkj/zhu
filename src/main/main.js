@@ -472,6 +472,8 @@ function createWindow() {
     minHeight: miniActive ? MINI_MIN_H : FULL_MIN_H,
     maximizable: !miniActive,
     show: false,
+    // v3.3.29：后台实例不进任务栏，避免 maximize() 隐式 show 时任务栏闪烁
+    skipTaskbar: TEST_HIDDEN(),
     frame: false,
     // v2.8.27 试验：去掉 WS_THICKFRAME，看能否消除 Windows 把标题栏判成 caption
     thickFrame: process.env.LX_THICK === '0' ? false : true,
@@ -487,6 +489,14 @@ function createWindow() {
       spellcheck: false
     }
   })
+
+  // v3.3.29 最终兜底：Electron 的 maximize() / restore() 会隐式 show 窗口
+  // （放大键两连击实测必触发），这是「窗口弹出」的真正来源。测试态下任何
+  // show 事件立刻压回隐藏，且不进任务栏；isMaximized() 等状态不受影响。
+  if (TEST_HIDDEN()) {
+    win.hide()
+    win.on('show', () => { if (!win.isDestroyed()) win.hide() })
+  }
 
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'))
 
@@ -1986,6 +1996,10 @@ function registerWindowIpc() {
     const wasMax = winMaxState || win.isMaximized()
     if (wasMax) win.unmaximize()
     else win.maximize()
+    // v3.3.29：maximize()/unmaximize() 在隐藏窗口上会隐式 show（放大键两连击
+    // 实测必弹窗，且不触发 Electron 的 show 事件）。操作后立刻压回隐藏；
+    // isMaximized() 状态不受 hide 影响，功能断言仍成立。
+    if (TEST_HIDDEN()) win.hide()
     return !wasMax
   })
   ipcMain.handle('win:close', () => win && win.close())
