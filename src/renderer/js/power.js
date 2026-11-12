@@ -14,7 +14,12 @@ function renderSleepState(st) {
   })
   updateSleepCountdown()
   clearInterval(sleepUi.tick)
-  if (sleepUi.minutes > 0) sleepUi.tick = setInterval(updateSleepCountdown, 1000)
+  sleepUi.tick = null
+  const sleepPanel = document.getElementById('sleepPanel')
+  // 面板收起时倒计时没人看，别留一个每秒空转的定时器
+  if (sleepUi.minutes > 0 && sleepPanel && !sleepPanel.hidden) {
+    sleepUi.tick = setInterval(updateSleepCountdown, 1000)
+  }
 }
 
 function updateSleepCountdown() {
@@ -38,7 +43,13 @@ function toggleSleepPanel(show) {
   const panel = document.getElementById('sleepPanel')
   const target = show === undefined ? panel.hidden : !!show
   panel.hidden = !target
-  if (target) updateSleepCountdown()
+  if (target) {
+    updateSleepCountdown()
+    if (sleepUi.minutes > 0 && !sleepUi.tick) sleepUi.tick = setInterval(updateSleepCountdown, 1000)
+  } else if (sleepUi.tick) {
+    clearInterval(sleepUi.tick)
+    sleepUi.tick = null
+  }
 }
 
 /* ================= 播放结束后关机 / 设备热插拔（v2.1） ================= */

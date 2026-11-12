@@ -59,6 +59,8 @@ function bindGlobalKeys() {
       return
     }
     if (inInput) return
+    // 焦点在按钮上时，空格应激活按钮本身；全局播放/暂停不能抢走这次按键
+    if (e.code === 'Space' && e.target && e.target.closest && e.target.closest('button')) return
     switch (e.code) {
       case 'Space': e.preventDefault(); player.toggle(); break
       case 'ArrowRight':

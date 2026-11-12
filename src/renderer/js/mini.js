@@ -26,6 +26,11 @@ async function toggleMini(on) {
     }
   } catch (err) {
     console.error('[mini]', err)
+    // 主进程没切成时界面不能停在迷你布局：窗口尺寸还是完整模式，卡片会被拉伸
+    state.mini = !next
+    UI.setMini(state.mini)
+    toast('迷你模式切换失败，已还原', 2500)
+    return
   }
   toast(next ? '迷你模式' : '完整模式')
 }

@@ -223,8 +223,22 @@ function main() {
   const uiSrc = read('src/renderer/js/ui.js')
   ok('虚拟滚动改为头尾增删（保留 _rowHtml 单一模板）',
     /_rowHtml\(i\)/.test(uiSrc) && /data-sp="top"/.test(uiSrc))
+  // 旧断言要求 `<div ` 后紧跟 `style="height:${start`，而实际模板是
+  // `<div data-sp="top" style=...`，全库零匹配 → 48/48 里有一项恒真空转。
+  // 改为：跳跃分支必须走增量插入，且整块重建只允许首帧/强制分支那一处。
   ok('滚动帧不再整块重建 tableBody',
-    !/body\.innerHTML\s*=\s*\n?\s*`<div style="height:\$\{start/.test(uiSrc))
+    /jumpBot\.insertAdjacentHTML\('beforebegin', html\)/.test(uiSrc) &&
+    (uiSrc.match(/body\.innerHTML\s*=\s*[\s\S]{0,80}<div data-sp="top"/g) || []).length === 1)
+  const dragSrc2 = read('src/renderer/js/dragwin.js')
+  ok('双击标题栏只由 dblclick 处理（拖动链路不重复 toggleMaximize）',
+    !/toggleMaximize/.test(dragSrc2) && /e\.detail === 2/.test(dragSrc2))
+  const miniMainSrc = read('src/main/main.js')
+  const miniApply = miniMainSrc.slice(miniMainSrc.indexOf('async function applyMiniOnce'), miniMainSrc.indexOf('function createWindow'))
+  ok('进出迷你的 unmaximize/maximize 也压回隐藏（守 §2 #9）',
+    (miniApply.match(/TEST_HIDDEN\(\)\)\s*win\.hide\(\)/g) || []).length >= 2)
+  const appSrc = read('src/renderer/js/app.js')
+  ok('迷你关闭同样串行等待落盘',
+    /miniClose[\s\S]{0,320}await flushSaveSettingsForExit\(\)/.test(appSrc))
 
   console.log('\n=== 6) 浅色主题列表哨兵（v3.3.30） ===')
   /* .tr 行底是硬编码 #1a1f27；浅色模式若缺少 html[data-theme="light"] 的行级覆盖，

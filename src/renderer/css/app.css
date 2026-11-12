@@ -1109,6 +1109,8 @@ body.win-dragging * { backdrop-filter: none !important; }
   border-radius: 18px;
   color: var(--txt);
   font-size: 12.5px;
+  /* 设备断开等提示含 \n，textContent 下需保留换行 */
+  white-space: pre-line;
   z-index: 80;
   opacity: 0;
   transition: opacity .18s, transform .18s;

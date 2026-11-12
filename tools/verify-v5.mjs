@@ -81,15 +81,18 @@ try {
   const { MpvEngine } = await import('file://' + path.join(REPO, 'src/main/mpv.js').replace(/\\/g, '/'))
   const eng = new MpvEngine({ exePath: 'C:/不存在的mpv.exe', onEvent: () => {} })
   ok('MpvEngine 新增 reset()', typeof eng.reset === 'function')
+  const src = fs.readFileSync(path.join(REPO, 'src/main/mpv.js'), 'utf8')
   if (typeof eng.reset === 'function') {
     eng._lastFile = 'D:/music/a.flac'
     eng._idle = false
     eng.reset()
     ok('reset() 不设 _disposed', eng._disposed === false)
     ok('reset() 清 _lastFile', eng._lastFile === null)
-    ok('reset() 后 start() 不被「引擎已释放」拒绝（仅因找不到 exe 失败）', true)
+    // 以前这里直接写 true：53/53 里有一项空转，释放态回归照样全绿
+    ok('reset() 后 start() 不被「引擎已释放」拒绝',
+      typeof eng.start === 'function' && eng._disposed === false &&
+      !/this\._disposed\s*=\s*true/.test(src.slice(src.indexOf('reset('), src.indexOf('reset(') + 500)))
   }
-  const src = fs.readFileSync(path.join(REPO, 'src/main/mpv.js'), 'utf8')
   ok('socket close 有实例守卫', /this\.sock === sock/.test(src))
   ok('_waitLoaded 不再替换 onEvent', !/this\.onEvent\s*=\s*wrapped/.test(src))
 } catch (e) { ok('mpv 单测组', false, e.message.slice(0, 200)) }

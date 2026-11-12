@@ -4,7 +4,12 @@ const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json()
 const t = list.find((x) => x.type === 'page' && /index\.html/.test(x.url))
 if (!t) { console.log('没找到主窗口'); process.exit(1) }
 const ws = new WebSocket(t.webSocketDebuggerUrl)
-await new Promise((r) => { ws.onopen = r })
+// 成品实例没起来 / 端口不对时不能静默挂起
+await new Promise((r, rej) => {
+  const timer = setTimeout(() => rej(new Error('CDP 连接超时')), 5000)
+  ws.onopen = () => { clearTimeout(timer); r() }
+  ws.onerror = () => { clearTimeout(timer); rej(new Error('CDP WebSocket 连接失败')) }
+})
 let seq = 1
 const pending = new Map()
 ws.addEventListener('message', (ev) => {

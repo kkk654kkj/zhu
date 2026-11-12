@@ -57,11 +57,9 @@
     el.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return
       if (e.target.closest(BLOCK)) return
-      // 双击标题栏最大化/还原，保持系统标题栏的手感
-      if (e.detail === 2) {
-        window.api.toggleMaximize().catch(() => {})
-        return
-      }
+      // 双击不启动拖动：完整模式标题栏（btnMax.click）与迷你卡片（退出迷你）
+      // 各自的 dblclick 已负责最大化/还原；这里再 toggle 一次会重复触发、互相抵消
+      if (e.detail === 2) return
       dragging = true
       startX = e.screenX
       startY = e.screenY

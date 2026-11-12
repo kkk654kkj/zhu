@@ -1291,9 +1291,11 @@ function bindWindowUi() {
   document.getElementById('btnMini').addEventListener('click', () => toggleMini(true))
   document.getElementById('miniRestore').addEventListener('click', () => toggleMini(false))
   document.getElementById('miniMin').addEventListener('click', () => window.api.minimize().catch(() => {}))
-  document.getElementById('miniClose').addEventListener('click', () => {
-    saveSession()
-    window.api.closeWindow()
+  document.getElementById('miniClose').addEventListener('click', async () => {
+    // 与 btnClose 同口径：串行等待落盘，否则迷你模式下最后 300ms 的设置/会话会丢
+    try { saveSession() } catch (e) { /* 忽略 */ }
+    await flushSaveSettingsForExit()
+    await window.api.closeWindow().catch(() => {})
   })
   // 双击封面/信息区也能回完整模式（键盘外最顺手的一个手势）
   document.querySelector('.mv-body').addEventListener('dblclick', () => toggleMini(false))

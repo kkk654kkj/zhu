@@ -162,9 +162,18 @@ const AudioFx = {
   /** 注册/注销附加频谱画布。没有 analyser 时也可提前注册，_draw 里自然不会绘制。 */
   addSpectrumTarget(canvas) {
     if (!canvas || !canvas.getContext || this._extra.some((x) => x.canvas === canvas)) return
-    this._extra.push({ canvas, ctx: null })
+    const item = { canvas, ctx: null, w: 0, h: 0, ro: null }
+    this._extra.push(item)
+    // 与主画布同口径：尺寸交给 ResizeObserver，帧内只读缓存，避免 60fps 强制布局
+    if (typeof ResizeObserver === 'function') {
+      const sync = () => { item.w = canvas.clientWidth; item.h = canvas.clientHeight }
+      sync()
+      item.ro = new ResizeObserver(sync)
+      item.ro.observe(canvas)
+    }
   },
   removeSpectrumTarget(canvas) {
+    for (const x of this._extra) if (x.canvas === canvas && x.ro) x.ro.disconnect()
     this._extra = this._extra.filter((x) => x.canvas !== canvas)
   },
 
@@ -349,8 +358,8 @@ const AudioFx = {
     for (const item of this._extra) {
       const c = item.canvas
       if (!c || !c.isConnected) continue
-      const w = c.clientWidth
-      const h = c.clientHeight
+      const w = item.ro ? item.w : c.clientWidth
+      const h = item.ro ? item.h : c.clientHeight
       if (w < 24 || h < 8) { c.style.visibility = 'hidden'; continue }
       c.style.visibility = ''
       const pw = Math.round(w * dpr)
@@ -388,6 +397,8 @@ const AudioFx = {
     let s = 0
     for (let i = 0; i < n; i++) s += bins[i]
     const v = Math.min(1, (s / n) / 200)
-    document.documentElement.style.setProperty('--beat', v.toFixed(2))
+    // 只被 #fsView::after 消费：写在根元素上会让整棵 DOM 的自定义属性继承链失效
+    const fsView = document.getElementById('fsView')
+    if (fsView) fsView.style.setProperty('--beat', v.toFixed(2))
   }
 }

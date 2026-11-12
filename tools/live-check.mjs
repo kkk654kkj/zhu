@@ -17,10 +17,18 @@ class CDP {
     await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej })
     return new CDP(ws)
   }
-  call(method, params = {}) {
+  call(method, params = {}, timeoutMs = 10000) {
     const id = this.id++
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
+      // Runtime.evaluate 挂起（渲染进程卡死）时成品实测必须收敛，不能永等
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error('CDP 调用超时: ' + method))
+      }, timeoutMs)
+      this.pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v) },
+        reject: (e) => { clearTimeout(timer); reject(e) }
+      })
       this.ws.send(JSON.stringify({ id, method, params }))
     })
   }

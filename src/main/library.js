@@ -553,9 +553,10 @@ function resolveTitleArtist(meta, nameBase, lrcMeta) {
  * 解析单个音频文件 → 曲目记录。
  * 只做「读」：封面/歌词的定位、标签缺失时的兜底都在这里完成，写盘由 scan 负责。
  */
-async function parseTrack(filePath, mm, coverDir, lyricDir) {
+async function parseTrack(filePath, mm, coverDir, lyricDir, knownStat) {
   const id = fileId(filePath)
-  const st = await fsp.stat(filePath)
+  // scan 已经在 worker 里 stat 过一次；传进来避免同一文件一次扫描内重复 IO
+  const st = knownStat || await fsp.stat(filePath)
   const { meta, mmError, embeddedLyric, rg } = await readAudioMeta(filePath, mm, id)
 
   const nameBase = path.basename(filePath, path.extname(filePath))
@@ -980,7 +981,7 @@ class Library {
           if (!track.addedAt) track.addedAt = cached.mtime || Date.now()
         } else {
           try {
-            track = await parseTrack(filePath, this.mm, this.coverDir, this.lyricDir)
+            track = await parseTrack(filePath, this.mm, this.coverDir, this.lyricDir, st)
             // 入库时间只认第一次：重新解析（改了标签、换了封面、PARSE_VERSION 升级）
             // 不等于"新添加"，否则整库都会跳到"最近添加"最前面
             track.addedAt = (cached && cached.addedAt) || track.addedAt
