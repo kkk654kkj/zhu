@@ -1992,14 +1992,13 @@ function accentFromImage(img) {
   }
 }
 
-/** v2.8.27：窗口拖动定时器（见 registerWindowIpc 里 win:drag-start 的注释） */
-let windowDragTimer = null
+/** v2.8.32：窗口拖动状态（事件驱动，见 registerWindowIpc 里 win:drag-move 的注释） */
 let windowDragOrigin = null
+let windowDragBase = null
+let windowDragLast = null
 function stopWindowDrag() {
-  if (windowDragTimer) {
-    clearInterval(windowDragTimer)
-    windowDragTimer = null
-  }
+  windowDragBase = null
+  windowDragLast = null
 }
 
 /** 窗口控制：最小化 / 最大化 / 关闭 / 迷你模式 */
@@ -2032,27 +2031,25 @@ function registerWindowIpc() {
   ipcMain.on('win:drag-start', (e) => {
     if (!win || win.isDestroyed() || winMaxState || win.isFullScreen()) return
     if (BrowserWindow.fromWebContents(e.sender) !== win) return
-    const p0 = screen.getCursorScreenPoint()
     const b0 = win.getBounds()
     windowDragOrigin = { width: b0.width, height: b0.height }
-    const dx = p0.x - b0.x
-    const dy = p0.y - b0.y
-    let lastX = null
-    let lastY = null
-    stopWindowDrag()
-    windowDragTimer = setInterval(() => {
-      if (!win || win.isDestroyed()) return stopWindowDrag()
-      const p = screen.getCursorScreenPoint()
-      const x = p.x - dx
-      const y = p.y - dy
-      // 光标没动就不调 setBounds —— 每调一次都要过一遍 DIP↔物理换算，
-      // 125% 缩放下会累积舍入误差（窗口一点点变大）。
-      if (x === lastX && y === lastY) return
-      lastX = x
-      lastY = y
-      // 必须显式带 width/height，理由同上（只传 x/y 时尺寸漂得更快）。
-      win.setBounds({ x, y, width: b0.width, height: b0.height })
-    }, 16)
+    windowDragBase = { x: b0.x, y: b0.y }
+    windowDragLast = null
+  })
+  /* v2.8.32：改事件驱动。v2.8.27 的 16ms 定时器轮询 cursor 实测只有
+     34.6fps（60 次光标移动仅 34 次窗口更新），且每帧 screen.getCursorScreenPoint()
+     + 同步 setBounds 双重开销。渲染层 pointermove（rAF 节流）送相对按下点的
+     累计位移，这里只按位移落一次 setBounds，与合成器节奏对齐。 */
+  ipcMain.on('win:drag-move', (e, dx, dy) => {
+    if (!win || win.isDestroyed() || !windowDragBase || !windowDragOrigin) return
+    if (BrowserWindow.fromWebContents(e.sender) !== win) return
+    const x = windowDragBase.x + dx
+    const y = windowDragBase.y + dy
+    // 位移没变就不调 setBounds —— 每次调用都要过一遍 DIP↔物理换算
+    if (windowDragLast && x === windowDragLast.x && y === windowDragLast.y) return
+    windowDragLast = { x, y }
+    // 必须显式带 width/height：125% 缩放下只传 x/y 会累积尺寸漂移（v2.8.27）
+    win.setBounds({ x, y, width: windowDragOrigin.width, height: windowDragOrigin.height })
   })
   ipcMain.on('win:drag-end', () => {
     stopWindowDrag()
