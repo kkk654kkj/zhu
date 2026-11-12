@@ -23,7 +23,8 @@
   --lyric-fs: 22px;
   /* v3.4.0 Apple Music 骨架：表头与行共用一份列定义。
      旧版两处分别写（46px + padding 24 vs 38px + margin 14 + padding 12），列起点差 6px。 */
-  --cols: 44px minmax(180px, 1.6fr) minmax(110px, 1fr) minmax(100px, 1fr) 96px 80px;
+  /* 1440 下宽裕、1280（含歌词栏）下刚好不溢出：固定列 212 + 弹性最小 300 + 间距 40 + 左右内边距 64 = 616 < 652 */
+  --cols: 40px minmax(140px, 1.6fr) minmax(88px, 1fr) minmax(72px, 1fr) 92px 80px;
   --row-hover: rgba(255, 255, 255, .045);
   --row-active: rgba(255, 255, 255, .075);
   --hair: rgba(255, 255, 255, .06);
