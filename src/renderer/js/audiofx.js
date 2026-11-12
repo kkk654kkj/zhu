@@ -155,6 +155,18 @@ const AudioFx = {
   _freq: null,
   _peaks: null,
   _raf: 0,
+  // v3.3.29：全屏页第二画布（与歌词面板频谱共用同一个 Analyser，不新建音频链）
+  _extra: [],
+  _beatAt: 0,
+
+  /** 注册/注销附加频谱画布。没有 analyser 时也可提前注册，_draw 里自然不会绘制。 */
+  addSpectrumTarget(canvas) {
+    if (!canvas || !canvas.getContext || this._extra.some((x) => x.canvas === canvas)) return
+    this._extra.push({ canvas, ctx: null })
+  },
+  removeSpectrumTarget(canvas) {
+    this._extra = this._extra.filter((x) => x.canvas !== canvas)
+  },
 
   startSpectrum(canvas) {
     if (!this.analyser || !canvas) return
@@ -236,6 +248,7 @@ const AudioFx = {
     this.failed = false
     this._canvas = null
     this._cctx = null
+    this._extra = []
   },
 
   _draw() {
@@ -253,6 +266,10 @@ const AudioFx = {
     const h = this._h
     const bins = this._freq
     this.analyser.getByteFrequencyData(bins)
+    // v3.3.29：附加画布与节拍光晕放在尺寸检查之前 —— 歌词面板收起时主画布虽小，
+    // 全屏页仍应拿到同一份真实频谱数据。无 analyser 时 _loop 根本不会跑。
+    this._drawExtra(bins)
+    this._updateBeat(bins)
 
     // v3.3.16：帧间隔归一化 —— 峰值帽的落速以前写死「每帧 0.008*h」，
     // 120Hz 屏幕上落得比 60Hz 快一倍，窗口高度变化时步长还会跳变
@@ -321,5 +338,56 @@ const AudioFx = {
       ctx2d.globalAlpha = 0.85
     }
     ctx2d.globalAlpha = 1
+  },
+
+  /** v3.3.29（P3 #19）：把同一份 FFT 数据画到全屏页的第二画布。
+   *  低频到高频按幂律分桶；只读 bins，不改主绘制的 peaks/渐变状态。 */
+  _drawExtra(bins) {
+    if (!this._extra.length) return
+    const accent = this._accent || '#31c27c'
+    const dpr = Math.min(2, window.devicePixelRatio || 1)
+    for (const item of this._extra) {
+      const c = item.canvas
+      if (!c || !c.isConnected) continue
+      const w = c.clientWidth
+      const h = c.clientHeight
+      if (w < 24 || h < 8) { c.style.visibility = 'hidden'; continue }
+      c.style.visibility = ''
+      const pw = Math.round(w * dpr)
+      const ph = Math.round(h * dpr)
+      if (c.width !== pw || c.height !== ph) { c.width = pw; c.height = ph }
+      const g = item.ctx || (item.ctx = c.getContext('2d'))
+      if (!g) continue
+      g.setTransform(dpr, 0, 0, dpr, 0, 0)
+      g.clearRect(0, 0, w, h)
+      g.fillStyle = accent
+      g.globalAlpha = 0.5
+      const n = 56
+      const gap = 2
+      const bw = (w - gap * (n - 1)) / n
+      const top = Math.min(bins.length - 1, Math.floor(bins.length * 0.55))
+      for (let i = 0; i < n; i++) {
+        const b0 = Math.floor(Math.pow(i / n, 1.7) * top)
+        const b1 = Math.max(b0 + 1, Math.floor(Math.pow((i + 1) / n, 1.7) * top))
+        let s = 0
+        for (let b = b0; b < b1; b++) s += bins[b]
+        const ratio = (s / (b1 - b0)) / 255
+        const bh = Math.max(1, ratio * ratio * (h - 2))
+        g.fillRect(i * (bw + gap), h - bh, bw, bh)
+      }
+      g.globalAlpha = 1
+    }
+  },
+
+  /** 低频能量 → --beat（0..1），限流 10Hz；CSS 用它调全屏页光晕亮度 */
+  _updateBeat(bins) {
+    const now = performance.now()
+    if (now - this._beatAt < 100) return
+    this._beatAt = now
+    const n = Math.min(24, bins.length)
+    let s = 0
+    for (let i = 0; i < n; i++) s += bins[i]
+    const v = Math.min(1, (s / n) / 200)
+    document.documentElement.style.setProperty('--beat', v.toFixed(2))
   }
 }
