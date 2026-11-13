@@ -317,7 +317,7 @@ try {
   const css = fs.readFileSync(path.join(REPO, 'src/renderer/css/app.css'), 'utf8')
   const playerSrc = fs.readFileSync(path.join(REPO, 'src/renderer/js/player.js'), 'utf8')
 
-  ok('队列工具是 online-only 独立文件、各只引入一次',
+  ok('队列编辑工具两版共享、online 侧各只引入一次',
     (html.match(/css\/queue-tools\.css/g) || []).length === 1 &&
     (html.match(/js\/queue-tools\.js/g) || []).length === 1 &&
     /<script src="js\/app\.js"><\/script>[\s\S]*<script src="js\/queue-tools\.js"><\/script>/.test(html))
@@ -359,11 +359,41 @@ try {
     /if \(index < this\.index\) this\.index--/.test(playerSrc) &&
     /else if \(wasCurrent\) this\.index = Math\.min/.test(playerSrc) &&
     /_buildShufflePool\(\)/.test(playerSrc))
-  ok('样式写在 online-only 文件里：行尾 ×、清空禁用态、浅色可读',
+  ok('队列样式写在独立文件里（两版共享，不塞进 app.css）',
     /\.qp-item \.qi-x \{/.test(qcss) &&
     /\.qp-clear\.mini-btn:disabled/.test(qcss) &&
     /html\[data-theme="light"\]/.test(qcss))
 } catch (e) { ok('队列编辑工具单测组', false, e.message.slice(0, 200)) }
+
+// (k) v2.8.37 / v3.3.45：全屏播放页可拖 + 队列入口（两侧同源）
+try {
+  const html = fs.readFileSync(path.join(REPO, 'src/renderer/index.html'), 'utf8')
+  const drag = fs.readFileSync(path.join(REPO, 'src/renderer/js/dragwin.js'), 'utf8')
+  const uiSrc = fs.readFileSync(path.join(REPO, 'src/renderer/js/ui.js'), 'utf8')
+  const fsjs = fs.readFileSync(path.join(REPO, 'src/renderer/js/fullscreen.js'), 'utf8')
+  const css = fs.readFileSync(path.join(REPO, 'src/renderer/css/app.css'), 'utf8')
+  ok('#fsView 加入拖动源（原来只有 z-index:1 的标题栏，被整屏层盖住）',
+    /const HOLDERS = \[[^\]]*'#fsView'/.test(drag))
+  ok('拖动排除全屏页进度条与歌词区（seek / 点行跳进度不能被吞）',
+    /#fsBar, #fsLyrics, \.lyric-line/.test(drag) &&
+    /e\.target\.closest\(BLOCK\)/.test(drag))
+  ok('setFullscreen 同步 body.fs-open，收起时顺手收掉队列',
+    /document\.body\.classList\.toggle\('fs-open', willShow\)/.test(uiSrc) &&
+    /if \(!willShow\) this\.toggleQueue\(false\)/.test(uiSrc))
+  ok('全屏页底部有独立队列按钮（新 i-queue 图标，不复用播放模式的 i-list）',
+    /id="i-queue"/.test(html) &&
+    /id="fsQueue"[\s\S]{0,180}#i-queue/.test(html) &&
+    /class="icon-btn fs-queue-btn"/.test(html))
+  ok('队列按钮走 UI.toggleQueue 且 stopPropagation（不会被 document「点外部」立刻关掉）',
+    /\$\('fsQueue'\)/.test(fsjs) &&
+    /e\.stopPropagation\(\)/.test(fsjs) &&
+    /UI\.toggleQueue\(\)/.test(fsjs))
+  ok('按钮点亮态跟随抽屉 hidden 属性同步',
+    /attributeFilter: \['hidden'\]/.test(fsjs) && /classList\.toggle\('on', !queuePanel\.hidden\)/.test(fsjs))
+  ok('抽屉在全屏页之上：body.fs-open 抬到 z-index 60 并重定位',
+    /body\.fs-open #queuePanel \{[\s\S]*?z-index: 60;[\s\S]*?right: 32px;/.test(css) &&
+    /html\[data-theme="light"\] body\.fs-open #queuePanel/.test(css))
+} catch (e) { ok('全屏页拖动/队列单测组', false, e.message.slice(0, 200)) }
 
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
 process.exit(fail ? 1 : 0)
