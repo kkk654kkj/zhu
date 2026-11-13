@@ -288,6 +288,13 @@ function main() {
   const htmlSrc = read('src/renderer/index.html')
   ok('mediasession.js 只引入一次（重复加载会抛顶层 let 重复声明）',
     (htmlSrc.match(/js\/mediasession\.js/g) || []).length === 1)
+  // v3.3.37 / v2.8.35：全屏播放页 #fsLyrics 的歌词行以前没有 click 代理，
+  // 只有侧栏 #lpLyrics 能点行跳进度。两个容器必须共用同一个时间轴处理器。
+  ok('全屏页与侧栏歌词行共用点击跳转（点歌词改进度）',
+    /for \(const id of \['lpLyrics', 'fsLyrics'\]\)/.test(appJs) &&
+    /addEventListener\('click', seekByLyricLine\)/.test(appJs) &&
+    /const seekByLyricLine = \(e\) =>/.test(appJs) &&
+    /player\.seek\(item\.t - state\.lyricOffset\)/.test(appJs))
 
   console.log('\n=== 8) G 注入完整性 + 桌面歌词启动链（v2.8.31 / v3.3.33） ===')
   /* v3.3.24 拆分后各模块靠 init(G) 拿共享状态。漏加 getter 时调用点在冷路径上

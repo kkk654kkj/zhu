@@ -199,5 +199,37 @@ try {
       /library\.stopCoverWarmup\(\)/.test(fs.readFileSync(path.join(REPO, 'src/main/main.js'), 'utf8')))
 } catch (e) { ok('虚拟滚动/封面单测组', false, e.message.slice(0, 200)) }
 
+// (h) v3.3.37：每日推荐（仅 online 分支）+ 全屏页歌词点击跳进度
+try {
+  const html = fs.readFileSync(path.join(REPO, 'src/renderer/index.html'), 'utf8')
+  const app = fs.readFileSync(path.join(REPO, 'src/renderer/js/app.js'), 'utf8')
+  const daily = fs.readFileSync(path.join(REPO, 'src/renderer/js/daily.js'), 'utf8')
+  const css = fs.readFileSync(path.join(REPO, 'src/renderer/css/app.css'), 'utf8')
+  ok('每日推荐有侧栏导航项 + 独立面板 + 换一批按钮',
+    /data-view="daily"/.test(html) && /id="dailyPane"/.test(html) &&
+    /id="dailyRefresh"/.test(html) && /id="dailyBody"/.test(html))
+  ok('daily.js 在 app.js 之后引入且只引入一次',
+    html.indexOf('js/daily.js') > html.indexOf('js/app.js') &&
+    (html.match(/js\/daily\.js/g) || []).length === 1)
+  ok('每次进页重算，换一批 / 切页作废旧在线请求',
+    /view === 'daily' && typeof Daily !== 'undefined'\) Daily\.recompute\(\)/.test(app) &&
+    /const token = \+\+this\.token/.test(daily) && /token !== this\.token/.test(daily))
+  ok('本地 24 首口味加权 + 在线按高频歌手补新',
+    /DAILY_LOCAL_TARGET = 24/.test(daily) && /DAILY_TOTAL = 30/.test(daily) &&
+    /playCounts/.test(daily) && /topArtists\(\)/.test(daily) && /onlineSearch\(/.test(daily))
+  ok('在线搜索有超时兜底，失败降级为全本地',
+    /withTimeout\(p, DAILY_ONLINE_TIMEOUT\)/.test(daily) && /fillLocal\(missing\)/.test(daily))
+  ok('本地 / 在线队列分开，播放全部只播本地',
+    /playAll\(\)/.test(daily) && /const queue = this\.localTracks\(\)/.test(daily) &&
+    /x\.song\.source === song\.source/.test(daily) && /Online\.toTrack/.test(daily))
+  ok('每日推荐是独立 pane（隐藏本地视图头与表格）',
+    /const isDaily = state\.view === 'daily'/.test(app) &&
+    /isPane = isOnline \|\| isDaily/.test(app) && /dailyPane'\).hidden = !isDaily/.test(app))
+  ok('dailyPane 布局与在线面板同源（共享 CSS）', /#onlinePane, #dailyPane \{/.test(css))
+  ok('全屏页与侧栏歌词共用点击跳进度处理器',
+    /\['lpLyrics', 'fsLyrics'\]/.test(app) &&
+    /addEventListener\('click', seekByLyricLine\)/.test(app))
+} catch (e) { ok('每日推荐单测组', false, e.message.slice(0, 200)) }
+
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
 process.exit(fail ? 1 : 0)

@@ -402,6 +402,8 @@ function switchView(view) {
   state.view = view
   UI.setActiveNav(view)
   renderView()
+  // v3.3.37：每次进入「每日推荐」都重新抽一批（不按日期缓存）；「换一批」走同一入口
+  if (view === 'daily' && typeof Daily !== 'undefined') Daily.recompute()
   try {
     const saved = state._viewScroll && state._viewScroll.get(view)
     if (body && saved) {
@@ -415,7 +417,7 @@ function switchView(view) {
    虚拟滚动只渲染窗口行，所以按 index*40 直接算 scrollTop 而不是找 DOM 节点。 */
 window.addEventListener('uix:locate', () => {
   const body = document.getElementById('tableBody')
-  const gridViews = ['online', 'albums', 'folders']
+  const gridViews = ['online', 'daily', 'albums', 'folders']
   if (!body || gridViews.indexOf(state.view) >= 0 || !document.getElementById('tableBody').offsetParent) {
     if (typeof toast === 'function') toast('先切到歌曲列表视图')
     return
@@ -434,10 +436,23 @@ window.addEventListener('uix:locate', () => {
 
 function renderView() {
   clearSelection()          // 列表重建后旧选中已失效
-  // 在线搜索是独立面板：不复用本地表格（列不一样，多出「音源 / 下载」）
+  // 在线搜索 / 每日推荐都是独立面板：不复用本地表格（列不一样，多出「音源 / 下载」）
   const isOnline = state.view === 'online'
-  document.getElementById('viewHeader').hidden = isOnline
+  const isDaily = state.view === 'daily'
+  const isPane = isOnline || isDaily
+  document.getElementById('viewHeader').hidden = isPane
   document.getElementById('onlinePane').hidden = !isOnline
+  document.getElementById('dailyPane').hidden = !isDaily
+  if (isDaily) {
+    state.visible = typeof Daily !== 'undefined' ? Daily.localTracks() : []
+    UI.renderTableHeadVisible(false)
+    UI.renderTable([])
+    UI.hideEmpty()
+    // hideEmpty 会把 tableBody 显示出来，所以必须放在它后面（同在线搜索口径）
+    document.getElementById('tableBody').hidden = true
+    if (typeof Daily !== 'undefined') Daily.render()
+    return
+  }
   if (isOnline) {
     // 第四轮 §4.4 #5：以前在线视图提前 return 不清 state.visible，btnPlay 的兜底
     // 会把上一份本地视图的残留列表整队播放
@@ -1098,15 +1113,20 @@ function bindLyricUi() {
   document.getElementById('btnLyricEarlier').addEventListener('click', () => setOffset(-0.5))
   document.getElementById('btnLyricLater').addEventListener('click', () => setOffset(0.5))
 
-  // 歌词行点击跳转
-  document.getElementById('lpLyrics').addEventListener('click', (e) => {
+  // 歌词行点击跳转：侧栏歌词面板与全屏播放页共用同一份时间轴（UI.lyricState.lines）。
+  // v3.3.37 / v2.8.35：全屏页 #fsLyrics 之前没绑，只有侧栏能点行跳进度。
+  const seekByLyricLine = (e) => {
     const line = e.target.closest('.lyric-line')
     if (!line) return
     const i = parseInt(line.dataset.i, 10)
     const st = UI.lyricState
     const item = st.lines[i]
     if (item && item.t != null) player.seek(item.t - state.lyricOffset)
-  })
+  }
+  for (const id of ['lpLyrics', 'fsLyrics']) {
+    const box = document.getElementById(id)
+    if (box) box.addEventListener('click', seekByLyricLine)
+  }
 
 }
 

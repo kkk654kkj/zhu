@@ -90,6 +90,7 @@
   <aside id="sidebar">
     <nav class="nav-group">
       <div class="nav-title">在线音乐</div>
+      <a class="nav-item" data-view="daily"><svg><use href="#i-spark"/></svg><span>每日推荐</span></a>
       <a class="nav-item" data-view="online"><svg><use href="#i-cloud"/></svg><span>在线搜索</span><b id="cntOnline" hidden></b></a>
     </nav>
     <nav class="nav-group">
@@ -140,6 +141,34 @@
     </div>
 
     <div class="table-body" id="tableBody"></div>
+
+    <!-- ===== 每日推荐（联网版 v3.3.37） ===== -->
+    <div id="dailyPane" hidden>
+      <div class="view-header">
+        <div class="vh-cover" id="dailyCover"><svg><use href="#i-spark"/></svg></div>
+        <div class="vh-meta">
+          <div class="vh-title">每日推荐</div>
+          <div class="vh-sub" id="dailySub">正在为你挑选…</div>
+          <div class="vh-actions">
+            <button class="btn primary" id="dailyPlayAll"><svg><use href="#i-play"/></svg><span>播放全部</span></button>
+            <button class="btn" id="dailyRefresh"><svg><use href="#i-shuffle"/></svg><span>换一批</span></button>
+          </div>
+        </div>
+      </div>
+      <div class="op-list">
+        <div class="op-tr op-th">
+          <div class="c-idx">#</div>
+          <div class="op-c-title">歌曲</div>
+          <div class="op-c-artist">歌手</div>
+          <div class="op-c-src">推荐理由</div>
+          <div class="op-c-q">规格 / 音质</div>
+          <div class="op-c-dur">时长</div>
+          <div class="op-c-act">操作</div>
+        </div>
+        <div id="dailyBody" class="op-body"></div>
+      </div>
+      <div class="op-foot"><span id="dailyStatus">每次打开都会重新为你挑一批</span></div>
+    </div>
 
     <!-- ===== 在线搜索（联网版） ===== -->
     <div id="onlinePane" hidden>
@@ -612,6 +641,7 @@
 <script src="js/fullscreen.js"></script>
 <script src="js/persist.js"></script>
 <script src="js/online.js"></script>
+<script src="js/daily.js"></script>
 <script src="js/uix.js"></script>
 <script src="js/dragwin.js"></script>
 </body>
