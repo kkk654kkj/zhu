@@ -524,6 +524,10 @@ const UI = {
     if (!el) return false
     const willShow = show == null ? !el.classList.contains('open') : !!show
     el.classList.toggle('open', willShow)
+    // v2.8.37 / v3.3.45：全屏页盖住标题栏，body.fs-open 让 CSS 把队列抽屉抬到
+    // #fsView(50) 之上并挪到页面右侧；收起时顺手收掉队列，避免它留在错误的位置。
+    document.body.classList.toggle('fs-open', willShow)
+    if (!willShow) this.toggleQueue(false)
     return willShow
   },
 

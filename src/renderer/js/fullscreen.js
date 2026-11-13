@@ -25,6 +25,30 @@
     }
   })
 
+  /* v2.8.37 / v3.3.45：全屏页自己的播放队列入口。
+     复用主界面的 #queuePanel（同一份 UI.renderQueue / 清空 / 行尾 ×），
+     CSS 用 body.fs-open 把它抬到 #fsView 之上并挪到页面右侧。
+     必须 stopPropagation：app.js 的 document click 会把「不在 #queuePanel /
+     #btnQueue 内的点击」当成点外部，立刻把刚打开的抽屉又关掉。 */
+  const fsQueue = $('fsQueue')
+  const queuePanel = $('queuePanel')
+  const syncQueueBtn = () => {
+    if (fsQueue && queuePanel) fsQueue.classList.toggle('on', !queuePanel.hidden)
+  }
+  if (fsQueue) {
+    fsQueue.addEventListener('click', (e) => {
+      e.stopPropagation()
+      UI.toggleQueue()
+      syncQueueBtn()
+    })
+    if (queuePanel && typeof MutationObserver === 'function') {
+      new MutationObserver(syncQueueBtn).observe(queuePanel, {
+        attributes: true, attributeFilter: ['hidden']
+      })
+    }
+    syncQueueBtn()
+  }
+
   // 控制键镜像
   const fwd = (fromId, toId) => {
     const from = $(fromId)
