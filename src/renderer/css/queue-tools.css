@@ -1,0 +1,57 @@
+/* 联网版 v3.3.44 · 播放队列编辑工具（清空队列 / 单曲移除）
+   仅联网版引入。队列抽屉本体是两版共用 UI，共享 app.css 不改动。 */
+#queuePanel .qp-head { gap: 8px; }
+.qp-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.qp-count {
+  font-size: 11px;
+  color: var(--txt-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.qp-clear.mini-btn {
+  font-size: 11px;
+  padding: 3px 8px;
+  color: var(--txt-2);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.qp-clear.mini-btn:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--bg-hover);
+}
+.qp-clear.mini-btn:disabled { opacity: .42; cursor: default; }
+.qp-clear.mini-btn:disabled:hover { background: transparent; color: var(--txt-2); }
+
+/* 行尾移除钮：常驻但很淡，hover 行/聚焦时才点亮，避免 288px 抽屉里挤掉歌名 */
+.qp-item .qi-x {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  margin: 0 0 0 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--txt-3);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: .42;
+  transition: opacity .12s, color .12s, background .12s;
+}
+.qp-item:hover .qi-x,
+.qp-item .qi-x:focus-visible { opacity: 1; }
+.qp-item .qi-x:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+html[data-theme="light"] .qp-count,
+html[data-theme="light"] .qp-item .qi-x { color: var(--txt-2); }
