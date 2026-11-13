@@ -1041,15 +1041,20 @@ function bindLyricUi() {
   document.getElementById('btnLyricEarlier').addEventListener('click', () => setOffset(-0.5))
   document.getElementById('btnLyricLater').addEventListener('click', () => setOffset(0.5))
 
-  // 歌词行点击跳转
-  document.getElementById('lpLyrics').addEventListener('click', (e) => {
+  // 歌词行点击跳转：侧栏歌词面板与全屏播放页共用同一份时间轴（UI.lyricState.lines）。
+  // v3.3.37 / v2.8.35：全屏页 #fsLyrics 之前没绑，只有侧栏能点行跳进度。
+  const seekByLyricLine = (e) => {
     const line = e.target.closest('.lyric-line')
     if (!line) return
     const i = parseInt(line.dataset.i, 10)
     const st = UI.lyricState
     const item = st.lines[i]
     if (item && item.t != null) player.seek(item.t - state.lyricOffset)
-  })
+  }
+  for (const id of ['lpLyrics', 'fsLyrics']) {
+    const box = document.getElementById(id)
+    if (box) box.addEventListener('click', seekByLyricLine)
+  }
 
 }
 
