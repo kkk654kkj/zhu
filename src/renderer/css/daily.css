@@ -64,3 +64,24 @@
   #dailyPane .op-act-btn { width: 24px; height: 24px; }
   #dailyPane .op-c-src .op-badge { max-width: 70px; font-size: 10.5px; }
 }
+
+/* ---- v3.3.41：视图头右侧的小工具组（与在线搜索同款：缓存 / 下载管理 / 下载目录） ----
+ * 图标按钮沿用 shared 的 .mini-btn（和在线搜索一致），这里只补排布：
+ * 与「播放全部 / 换一批」拉开距离、竖线分隔、图标按钮做成 28×28 的方正点按区。
+ * 放 daily.css 而不是 app.css：这两个按钮只有每日推荐有，共享样式文件不加专属规则。 */
+#dailyPane .vh-actions { align-items: center; }
+#dailyPane .vh-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line-soft);
+}
+#dailyPane .vh-tools .mini-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+}
+#dailyPane .vh-tools .mini-btn svg { width: 13px; height: 13px; }

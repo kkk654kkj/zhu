@@ -231,6 +231,21 @@ try {
     /async playAll\(\)/.test(daily) && /const songs = this\.onlineSongs\(\)/.test(daily) &&
     /const queue = songs\.map\(\(s\) => Online\.toTrack\(s, null\)\)/.test(playAllBody) &&
     !/localTracks\(\)/.test(playAllBody))
+  // v3.3.41：每日推荐视图头补上在线搜索同款的小工具（缓存设置 / 下载管理 / 下载目录）
+  ok('每日推荐有缓存 / 下载管理 / 下载目录四个按钮（与在线搜索同款 mini-btn）',
+    /id="dailyCacheBtn"/.test(html) && /id="dailyDlBtn"/.test(html) &&
+    /id="dailyDirBtn"/.test(html) && /id="dailyOpenDir"/.test(html) &&
+    (html.match(/class="mini-btn" id="daily(?:Cache|Dl|Dir|OpenDir)/g) || []).length === 4)
+  ok('这四个按钮复用同一批面板与 IPC（不另写一套）',
+    /on\('dailyCacheBtn', 'click', \(\) => toggleCachePanel\(\)\)/.test(daily) &&
+    /on\('dailyDlBtn', 'click', \(\) => Online\.toggleDlPanel\(\)\)/.test(daily) &&
+    /on\('dailyDirBtn', 'click'/.test(daily) && /onlinePickDownloadDir\(\)/.test(daily) &&
+    /on\('dailyOpenDir', 'click', \(\) => window\.api\.onlineOpenDownloadDir/.test(daily))
+  const dailyCssForTools = fs.readFileSync(path.join(REPO, 'src/renderer/css/daily.css'), 'utf8')
+  ok('工具组排布写在 daily.css（共享 app.css 不加专属规则）',
+    /#dailyPane \.vh-tools \{/.test(dailyCssForTools) &&
+    /#dailyPane \.vh-tools \.mini-btn \{/.test(dailyCssForTools) &&
+    !/\.vh-tools/.test(css))
   ok('每日推荐是独立 pane（隐藏本地视图头与表格）',
     /const isDaily = state\.view === 'daily'/.test(app) &&
     /isPane = isOnline \|\| isDaily/.test(app) && /dailyPane'\).hidden = !isDaily/.test(app))

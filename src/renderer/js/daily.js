@@ -63,6 +63,17 @@ const Daily = {
     }
     on('dailyRefresh', 'click', () => { this.recompute().catch(() => {}) })
     on('dailyPlayAll', 'click', () => { this.playAll() })
+    // v3.3.41：与在线搜索同款的小工具（缓存设置 / 下载管理 / 下载目录），复用同一批面板与 IPC
+    on('dailyCacheBtn', 'click', () => toggleCachePanel())
+    on('dailyDlBtn', 'click', () => Online.toggleDlPanel())
+    on('dailyDirBtn', 'click', async () => {
+      const dir = await window.api.onlinePickDownloadDir().catch((err) => {
+        toast('选择目录失败：' + (err.message || err), 2500)
+        return null
+      })
+      if (dir) toast('下载目录：' + dir, 3000)
+    })
+    on('dailyOpenDir', 'click', () => window.api.onlineOpenDownloadDir().catch(() => {}))
     on('dailyBody', 'dblclick', (e) => {
       const row = e.target.closest('.op-tr[data-index]')
       if (row && !e.target.closest('.op-act-btn')) this.playAt(Number(row.dataset.index))

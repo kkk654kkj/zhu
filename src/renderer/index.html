@@ -153,6 +153,13 @@
           <div class="vh-actions">
             <button class="btn primary" id="dailyPlayAll"><svg><use href="#i-play"/></svg><span>播放全部</span></button>
             <button class="btn" id="dailyRefresh"><svg><use href="#i-shuffle"/></svg><span>换一批</span></button>
+            <!-- v3.3.41：与在线搜索同款的小工具组（缓存 / 下载管理 / 下载目录），复用同一批面板与 IPC -->
+            <div class="vh-tools">
+              <button class="mini-btn" id="dailyCacheBtn" title="缓存设置（在线音乐缓存目录 / 清理）"><svg><use href="#i-cache"/></svg></button>
+              <button class="mini-btn" id="dailyDlBtn" title="下载管理（进度 / 暂停 / 删除）"><svg><use href="#i-download"/></svg></button>
+              <button class="mini-btn" id="dailyDirBtn" title="选择下载目录"><svg><use href="#i-folder"/></svg></button>
+              <button class="mini-btn" id="dailyOpenDir" title="打开下载目录"><svg><use href="#i-folder-open"/></svg></button>
+            </div>
           </div>
         </div>
       </div>
