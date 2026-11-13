@@ -105,5 +105,31 @@ ok('pack-one.sh 有参数校验', /:\s*"\$\{1:\?|exit 1/.test(R('pack-one.sh')))
 ok('check-dist 有 size 校验', /\.size > 0/.test(R('tools/check-dist.mjs')))
 ok('smoke 断言加强', /v\.hit\s*>\s*0|hit > 0/.test(R('test/smoke.mjs')))
 
+console.log('\n=== 6) v2.8.37：全屏页可拖 + 播放队列（与联网版同源） ===')
+const h = R('src/renderer/index.html')
+const dw = R('src/renderer/js/dragwin.js')
+const uis = R('src/renderer/js/ui.js')
+const fsjs = R('src/renderer/js/fullscreen.js')
+const css = R('src/renderer/css/app.css')
+ok('#fsView 加入拖动源（整屏层盖住标题栏，原来拖不动）',
+  /const HOLDERS = \[[^\]]*'#fsView'/.test(dw))
+ok('拖动排除进度条与歌词区', /#fsBar, #fsLyrics, \.lyric-line/.test(dw))
+ok('setFullscreen 同步 body.fs-open 并在收起时收掉队列',
+  /document\.body\.classList\.toggle\('fs-open', willShow\)/.test(uis) &&
+  /if \(!willShow\) this\.toggleQueue\(false\)/.test(uis))
+ok('全屏页底部有独立队列按钮（i-queue）',
+  /id="i-queue"/.test(h) && /id="fsQueue"[\s\S]{0,180}#i-queue/.test(h))
+ok('队列按钮走 UI.toggleQueue 且截断冒泡',
+  /\$\('fsQueue'\)/.test(fsjs) && /e\.stopPropagation\(\)/.test(fsjs) && /UI\.toggleQueue\(\)/.test(fsjs))
+ok('抽屉在全屏页之上（body.fs-open → z-index 60）',
+  /body\.fs-open #queuePanel \{[\s\S]*?z-index: 60;/.test(css))
+ok('队列编辑工具已移植到 master 且各只引入一次',
+  (h.match(/css\/queue-tools\.css/g) || []).length === 1 &&
+  (h.match(/js\/queue-tools\.js/g) || []).length === 1 &&
+  /const QT = \(\(\) =>/.test(R('src/renderer/js/queue-tools.js')) &&
+  /\.qp-item \.qi-x \{/.test(R('src/renderer/css/queue-tools.css')))
+ok('master 没有联网版专属文件（daily / online）',
+  !/css\/daily\.css|js\/daily\.js|js\/online\.js/.test(h))
+
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
 process.exit(fail ? 1 : 0)
