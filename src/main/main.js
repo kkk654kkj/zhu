@@ -294,8 +294,9 @@ const DEFAULT_SETTINGS = {
   // 联网版（v3.0）：在线音乐
   onlineDownloadDir: '',       // 下载目录，'' = 默认「音乐\猪专属下载」
   onlineSources: ['kw', 'qq', 'kg', 'wy'],  // 参与搜索的音源（顺序即合并优先级）
-  onlineQuality: 'lossless',   // master（母带，最大）| lossless | best | 128k
+  onlineQuality: 'master',    // master（母带，最大）| lossless | best | 128k（v3.3.38 默认提到母带：能高则高）
   onlineQualityMigrated: false,// v3.1 一次性迁移标记（老版本默认 best → lossless）
+  onlineQualityMasterMigrated: false, // v3.3.38 一次性迁移标记（默认 → 母带）
   onlineQingOn: true,          // v3.2：青听网关（四家通吃、含母带）；关掉就只走 GDStudio
   onlineCacheOn: true,         // 播放时顺手把音频缓存到本地
   onlineCacheDir: '',          // 缓存目录，'' = 数据目录\music-cache
@@ -2544,6 +2545,17 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       if (!st0.onlineQualityMigrated) {
         const q = st0.onlineQuality === '128k' ? '128k' : 'lossless'
         store.patch({ settings: { ...st0, onlineQuality: q, onlineQualityMigrated: true } })
+        logLine('[settings] 音质迁移到', q)
+      }
+    }
+
+    // v3.3.38 一次性迁移：默认音质提到母带（用户口径：能高则高）。
+    // 选过「省流量」的保留 128k，其余一律抬到 master；之后用户手动改就是最终值。
+    {
+      const st1 = store.get().settings
+      if (!st1.onlineQualityMasterMigrated) {
+        const q = st1.onlineQuality === '128k' ? '128k' : 'master'
+        store.patch({ settings: { ...st1, onlineQuality: q, onlineQualityMasterMigrated: true } })
         logLine('[settings] 音质迁移到', q)
       }
     }

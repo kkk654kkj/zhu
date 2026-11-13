@@ -214,14 +214,23 @@ try {
   ok('每次进页重算，换一批 / 切页作废旧在线请求',
     /view === 'daily' && typeof Daily !== 'undefined'\) Daily\.recompute\(\)/.test(app) &&
     /const token = \+\+this\.token/.test(daily) && /token !== this\.token/.test(daily))
-  ok('本地 24 首口味加权 + 在线按高频歌手补新',
-    /DAILY_LOCAL_TARGET = 24/.test(daily) && /DAILY_TOTAL = 30/.test(daily) &&
-    /playCounts/.test(daily) && /topArtists\(\)/.test(daily) && /onlineSearch\(/.test(daily))
-  ok('在线搜索有超时兜底，失败降级为全本地',
-    /withTimeout\(p, DAILY_ONLINE_TIMEOUT\)/.test(daily) && /fillLocal\(missing\)/.test(daily))
-  ok('本地 / 在线队列分开，播放全部只播本地',
-    /playAll\(\)/.test(daily) && /const queue = this\.localTracks\(\)/.test(daily) &&
-    /x\.song\.source === song\.source/.test(daily) && /Online\.toTrack/.test(daily))
+  ok('全在线口径：不再保留本地 24 首目标，冷启动有内置歌手池',
+    !/DAILY_LOCAL_TARGET/.test(daily) && /DAILY_COLD_SEEDS/.test(daily) &&
+    /onlineSongs\(\)/.test(daily) && /DAILY_TOTAL = 30/.test(daily))
+  ok('多歌手轮搜 + 每路超时兜底 + 一首都没有才本地兜底',
+    /seedArtists\(\)/.test(daily) && /searchArtist\(name, 1, token\)/.test(daily) &&
+    /withTimeout\(p, DAILY_SEARCH_TIMEOUT\)/.test(daily) &&
+    /if \(items\.length\)/.test(daily) && /fillLocal\(DAILY_TOTAL\)/.test(daily))
+  ok('音质优先级：探测 + 档位排序 + 全局默认母带',
+    /async probeAll\(token\)/.test(daily) && /qualityOf\(song, r\)/.test(daily) &&
+    /sortByQuality\(\)/.test(daily) && /onlineProbe\(x\.song, token\)/.test(daily) &&
+    /onlineQuality: 'master'/.test(fs.readFileSync(path.join(REPO, 'src/main/main.js'), 'utf8')) &&
+    /onlineQualityMasterMigrated/.test(fs.readFileSync(path.join(REPO, 'src/main/main.js'), 'utf8')))
+  const playAllBody = daily.slice(daily.indexOf('async playAll()'), daily.indexOf('async downloadAt('))
+  ok('播放全部 = 全 30 首在线入队（不再只播本地）',
+    /async playAll\(\)/.test(daily) && /const songs = this\.onlineSongs\(\)/.test(daily) &&
+    /const queue = songs\.map\(\(s\) => Online\.toTrack\(s, null\)\)/.test(playAllBody) &&
+    !/localTracks\(\)/.test(playAllBody))
   ok('每日推荐是独立 pane（隐藏本地视图头与表格）',
     /const isDaily = state\.view === 'daily'/.test(app) &&
     /isPane = isOnline \|\| isDaily/.test(app) && /dailyPane'\).hidden = !isDaily/.test(app))
