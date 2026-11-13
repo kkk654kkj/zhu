@@ -242,9 +242,10 @@ try {
     /on\('dailyDirBtn', 'click'/.test(daily) && /onlinePickDownloadDir\(\)/.test(daily) &&
     /on\('dailyOpenDir', 'click', \(\) => window\.api\.onlineOpenDownloadDir/.test(daily))
   const dailyCssForTools = fs.readFileSync(path.join(REPO, 'src/renderer/css/daily.css'), 'utf8')
-  ok('工具组排布写在 daily.css（共享 app.css 不加专属规则）',
+  ok('工具组排布写在 daily.css（窄窗口换行、不压标题；共享 app.css 不加专属规则）',
     /#dailyPane \.vh-tools \{/.test(dailyCssForTools) &&
     /#dailyPane \.vh-tools \.mini-btn \{/.test(dailyCssForTools) &&
+    /#dailyPane \.vh-actions \{[^}]*flex-wrap: wrap/.test(dailyCssForTools) &&
     !/\.vh-tools/.test(css))
   ok('每日推荐是独立 pane（隐藏本地视图头与表格）',
     /const isDaily = state\.view === 'daily'/.test(app) &&

@@ -69,14 +69,14 @@
  * 图标按钮沿用 shared 的 .mini-btn（和在线搜索一致），这里只补排布：
  * 与「播放全部 / 换一批」拉开距离、竖线分隔、图标按钮做成 28×28 的方正点按区。
  * 放 daily.css 而不是 app.css：这两个按钮只有每日推荐有，共享样式文件不加专属规则。 */
-#dailyPane .vh-actions { align-items: center; }
+/* 与「播放全部 / 换一批」同一行、靠右；一行放不下时换到第二行（仍然靠右）。
+ * 不钉绝对定位：右上角在面板 452px 时会压住标题（实测 tools 94-122 / title 117-153）。 */
+#dailyPane .vh-actions { align-items: center; flex-wrap: wrap; row-gap: 8px; }
 #dailyPane .vh-tools {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: 6px;
-  padding-left: 10px;
-  border-left: 1px solid var(--line-soft);
+  margin-left: auto;
 }
 #dailyPane .vh-tools .mini-btn {
   width: 28px;
