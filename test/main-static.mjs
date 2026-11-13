@@ -117,6 +117,19 @@ function main() {
   }
   ok('node --check 全量通过', bad === 0, targets.length + ' 个文件')
 
+  // v3.3.42：不依赖基准的「裸引用漏声明」扫描 —— pickMediaDir 在 v3.3.24 拆分时丢的，
+  // 基准里同样没有，`--base` 模式永远查不出来；这里直接跑 --self-strict。
+  // 只扫 main.js：目录模式会把 class 方法名当成裸引用（decls 只认 function / const）
+  const strict = spawnSync('python', [
+    path.join(ROOT, 'tools/check-decls.py'), '--self-strict', path.join(ROOT, 'src/main/main.js')
+  ], { encoding: 'utf8' })
+  if (strict.error && strict.error.code === 'ENOENT') {
+    ok('主进程裸引用扫描（python 缺失，跳过）', true, '未安装 python')
+  } else {
+    ok('主进程没有「引用了但没声明」的裸标识符', strict.status === 0,
+      String(strict.stdout || strict.stderr || '').trim().split('\n').slice(-4).join(' | '))
+  }
+
   console.log('\n=== 2) 关键函数装载（真模块 require，不启动 Electron）===')
   // v3.3.24：设置清洗与白名单已拆到独立模块，直接 require 真模块验证
   const schemaSrc = read('src/main/settings-schema.js')

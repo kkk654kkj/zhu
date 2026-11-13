@@ -1917,6 +1917,45 @@ function registerOnlineIpc() {
 
 }
 
+/**
+ * 选一个「媒体根」目录（在线下载目录 / 在线缓存目录共用）。
+ *
+ * v3.3.42：这个函数在 v3.3.24 的模块拆分里丢了 —— `online:pickDownloadDir` 与
+ * `online:pickCacheDir` 都还在调它，于是「选择下载目录」「选择缓存目录」两个按钮
+ * 点下去只是 invoke 立刻 reject（ReferenceError: pickMediaDir is not defined），
+ * 渲染层 .catch 弹一句 toast，系统目录对话框根本不会出现。
+ *
+ * 为什么不能随便返回：选中的目录会被写成 lxfile 协议的白名单根
+ * （protocols.isAllowedMediaPath 按 musicDirs + onlineDownloadDir + onlineCacheDir 前缀判定），
+ * 盘符根 / 系统目录 / UNC / 设备路径必须挡掉，否则等于给协议开了整盘读权限。
+ *
+ * @returns {Promise<string|null>} 目录绝对路径；用户取消或选了不允许的目录 → null
+ */
+async function pickMediaDir(title) {
+  const parent = win && !win.isDestroyed() ? win : undefined
+  const res = await dialog.showOpenDialog(parent, {
+    title: title || '选择目录',
+    buttonLabel: '选择此目录',
+    properties: ['openDirectory', 'createDirectory']
+  })
+  if (!res || res.canceled || !Array.isArray(res.filePaths) || !res.filePaths.length) return null
+  const picked = String(res.filePaths[0] || '')
+  if (!PROTO.isSafeMediaRoot(picked)) {
+    // 必须让用户看见原因：目录不安全属于「点了没反应」之外的可解释失败
+    await dialog.showMessageBox(parent, {
+      type: 'warning',
+      title: '目录不可用',
+      message: '这个目录不能用作下载 / 缓存目录',
+      detail: '盘符根目录、系统目录、网络共享（\\\\server\\share）与设备路径都不允许，'
+        + '请换一个普通文件夹（例如 D:\\音乐\\猪专属下载）。',
+      buttons: ['知道了'],
+      noLink: true
+    })
+    return null
+  }
+  return picked
+}
+
 /** 对话框与系统集成（选目录、资源管理器定位、版本信息） */
 function registerSystemIpc() {
   // —— 对话框 / 系统集成 ——

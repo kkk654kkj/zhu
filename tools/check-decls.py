@@ -23,6 +23,10 @@ v2.8.16 的 4 条 P1 就是这么漏过全部既有验证的：
   #    需人工排除内置 API / 跨文件全局 / 参数名
   python tools/check-decls.py --self <main.js>
 
+  # 3) 自检严格模式（不依赖基准）：内置 API 与 get/set 存取器自动排除，
+  #    剩下的就是真正的「漏声明」→ 退出码 1。main-static 会调用它。
+  python tools/check-decls.py --self-strict src/main/main.js
+
 取两个分支的文件（不必切分支）：
   git show online:src/main/main.js > /tmp/online_main.js
   git show master:src/main/main.js > /tmp/master_main.js
@@ -356,6 +360,49 @@ def collect_sources(p):
     return read(p)
 
 
+# 内置 API / 全局对象 / 语法关键字：--self-strict 模式下不当作「漏声明」
+BUILTIN_GLOBALS = {
+    'Array', 'ArrayBuffer', 'BigInt', 'Boolean', 'Buffer', 'DataView', 'Date', 'Error',
+    'EvalError', 'Float32Array', 'Float64Array', 'Function', 'Infinity', 'Int8Array',
+    'Int16Array', 'Int32Array', 'Intl', 'JSON', 'Map', 'Math', 'NaN', 'Number', 'Object',
+    'Promise', 'Proxy', 'RangeError', 'ReferenceError', 'Reflect', 'RegExp', 'Set',
+    'String', 'Symbol', 'SyntaxError', 'TypeError', 'URIError', 'Uint8Array',
+    'Uint8ClampedArray', 'Uint16Array', 'Uint32Array', 'WeakMap', 'WeakSet',
+    'AbortController', 'AbortSignal', 'Blob', 'DOMException', 'Event', 'EventTarget',
+    'File', 'FormData', 'Headers', 'Request', 'Response', 'TextDecoder', 'TextEncoder',
+    'URL', 'URLSearchParams', 'atob', 'btoa', 'clearImmediate', 'clearInterval',
+    'clearTimeout', 'console', 'crypto', 'decodeURI', 'decodeURIComponent',
+    'encodeURI', 'encodeURIComponent', 'fetch', 'global', 'globalThis', 'isFinite',
+    'isNaN', 'module', 'exports', 'parseFloat', 'parseInt', 'performance', 'process',
+    'queueMicrotask', 'require', 'setImmediate', 'setInterval', 'setTimeout',
+    'structuredClone', '__dirname', '__filename',
+}
+
+# `get foo()` / `set foo()` 是对象字面量里的存取器名，扫描器会把它当裸引用，这里排除
+ACCESSOR_RE = re.compile(r'\b(?:get|set)\s+([A-Za-z_$][\w$]*)\s*\(')
+
+
+def self_strict(target):
+    """不依赖基准：列出「引用了、全文无声明、也不是内置 / 存取器」的裸标识符。
+
+    v3.3.42 新增。--base 模式只能查「基准有、现在没有」的回归；
+    pickMediaDir 是 v3.3.24 拆分时就丢的，基准里同样没有，永远查不出来 ——
+    这个模式补的就是这类「历史遗留的静默失效」。
+    """
+    src = collect_sources(target)
+    s_t, d_t = decls(src)
+    accessors = set(ACCESSOR_RE.findall(src))
+    # 'get' / 'set' 自身：扫描器会把 `get foo()` 里的 get 也记成一次调用，排除
+    cand = sorted(refs(s_t) - d_t - BUILTIN_GLOBALS - accessors - JS_KEYWORDS - {'get', 'set'})
+    print('== %s: 引用但无声明（已排除内置/存取器）: %d 个 ==' % (target, len(cand)))
+    lines = s_t.split('\n')
+    for c in cand:
+        ln = next((i + 1 for i, L in enumerate(lines)
+                  if re.search(r'(?<![.\\w$])' + re.escape(c) + r'\b', L)), 0)
+        print('  %-30s 首个引用 L%d' % (c, ln))
+    return 0 if not cand else 1
+
+
 def main(argv):
     if len(argv) >= 2 and argv[1] == '--selftest':
         return selftest()
@@ -371,6 +418,8 @@ def main(argv):
         for c in cand:
             print('  ' + c)
         return 0
+    if argv[1] == '--self-strict':
+        return self_strict(argv[2])
     base, target = argv[2], argv[3]
     s_b, d_b = decls(collect_sources(base))
     s_t, d_t = decls(collect_sources(target))
