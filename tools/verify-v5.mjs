@@ -307,5 +307,63 @@ try {
     !/filter\(\(s\) => s\.source === song\.source\)/.test(onlineJs))
 } catch (e) { ok('在线封面/队列单测组', false, e.message.slice(0, 200)) }
 
+// (j) v3.3.44：联网版播放队列「清空 / 单曲移除」（online-only，共享文件零改动）
+try {
+  const html = fs.readFileSync(path.join(REPO, 'src/renderer/index.html'), 'utf8')
+  const qt = fs.readFileSync(path.join(REPO, 'src/renderer/js/queue-tools.js'), 'utf8')
+  const qcss = fs.readFileSync(path.join(REPO, 'src/renderer/css/queue-tools.css'), 'utf8')
+  const ui = fs.readFileSync(path.join(REPO, 'src/renderer/js/ui.js'), 'utf8')
+  const app = fs.readFileSync(path.join(REPO, 'src/renderer/js/app.js'), 'utf8')
+  const css = fs.readFileSync(path.join(REPO, 'src/renderer/css/app.css'), 'utf8')
+  const playerSrc = fs.readFileSync(path.join(REPO, 'src/renderer/js/player.js'), 'utf8')
+
+  ok('队列工具是 online-only 独立文件、各只引入一次',
+    (html.match(/css\/queue-tools\.css/g) || []).length === 1 &&
+    (html.match(/js\/queue-tools\.js/g) || []).length === 1 &&
+    /<script src="js\/app\.js"><\/script>[\s\S]*<script src="js\/queue-tools\.js"><\/script>/.test(html))
+  ok('共享文件零改动（队列本体 / 主控 / app.css 不掺联网版专属规则）',
+    !/qi-x|qp-clear|btnQueueClear/.test(ui) &&
+    !/qi-x|qp-clear|btnQueueClear/.test(app) &&
+    !/\.qi-x|\.qp-clear/.test(css))
+  ok('行尾 × 由捕获期拦截并 stopPropagation（不会顺带把那首歌重新播一遍）',
+    /body\.addEventListener\('click', onBodyClick, true\)/.test(qt) &&
+    /e\.stopPropagation\(\)/.test(qt) &&
+    /e\.target\.closest\('\.qi-x'\)/.test(qt))
+  ok('单曲移除走 player.removeFromQueue(index) 且校验下标',
+    /player\.removeFromQueue\(i\)/.test(qt) &&
+    /i >= player\.tracks\.length/.test(qt) &&
+    /Number\.isInteger\(i\)/.test(qt))
+  ok('清空按钮走 player.clearQueue() 并给出可见反馈',
+    /btnQueueClear/.test(qt) &&
+    /clearBtn\.textContent = '清空'/.test(qt) &&
+    /player\.clearQueue\(\)/.test(qt) &&
+    /已清空播放队列/.test(qt))
+  ok('空队列显式写空会话（clearQueue 的 stop 会先把旧队列写回，重启会复活）',
+    /queueIds: \[\], index: -1, currentId: null, currentTime: 0/.test(qt) &&
+    /if \(!queueLen\(\)\)/.test(qt) &&
+    /window\.api\.setSession/.test(qt))
+  ok('删到空 / 清空后播放条、歌词、行高亮、媒体会话一起归零',
+    /UI\.renderNowPlaying\(null, false\)/.test(qt) &&
+    /UI\.renderLyric\(null, ''\)/.test(qt) &&
+    /UI\._tCurrentId = null/.test(qt) &&
+    /syncMediaSessionState\(false\)/.test(qt))
+  ok('队列重建后靠 MutationObserver 补按钮，且不 observe subtree（不自激）',
+    /new MutationObserver/.test(qt) &&
+    /childList: true, subtree: false/.test(qt) &&
+    /item\.querySelector\('\.qi-x'\)/.test(qt) &&
+    /decorateItem\(n\)/.test(qt))
+  ok('行拖排序不被行尾 × 抢走（dragstart 守卫）',
+    /addEventListener\('dragstart', onBodyDragStart, true\)/.test(qt) &&
+    /e\.preventDefault\(\)/.test(qt))
+  ok('player.removeFromQueue 的 index 语义不变（删前面的歌仍指向同一首）',
+    /if \(index < this\.index\) this\.index--/.test(playerSrc) &&
+    /else if \(wasCurrent\) this\.index = Math\.min/.test(playerSrc) &&
+    /_buildShufflePool\(\)/.test(playerSrc))
+  ok('样式写在 online-only 文件里：行尾 ×、清空禁用态、浅色可读',
+    /\.qp-item \.qi-x \{/.test(qcss) &&
+    /\.qp-clear\.mini-btn:disabled/.test(qcss) &&
+    /html\[data-theme="light"\]/.test(qcss))
+} catch (e) { ok('队列编辑工具单测组', false, e.message.slice(0, 200)) }
+
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
 process.exit(fail ? 1 : 0)
