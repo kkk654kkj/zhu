@@ -85,3 +85,10 @@
   border-radius: 6px;
 }
 #dailyPane .vh-tools .mini-btn svg { width: 13px; height: 13px; }
+
+/* ---- v3.3.43：换一批按钮的 loading 态（换批期间变灰、禁止连点） ---- */
+#dailyPane .btn.is-loading {
+  opacity: .55;
+  pointer-events: none;
+  cursor: default;
+}

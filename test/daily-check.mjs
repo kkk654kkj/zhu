@@ -43,7 +43,8 @@ const el = (id) => {
 
 let searchImpl = null
 let probeImpl = null
-const searchCalls = []
+const searchCalls = []      // 关键词
+const searchPages = []      // 对应的页码（v3.3.43：换一批靠它翻页）
 let playableCalls = 0
 let downloadCalls = 0
 let lastQueue = null
@@ -57,7 +58,11 @@ const state = {
   visible: []
 }
 const windowApi = {
-  onlineSearch: (opts) => { searchCalls.push(opts.keyword); return searchImpl(opts) },
+  onlineSearch: (opts) => {
+    searchCalls.push(opts.keyword)
+    searchPages.push(opts.page || 1)
+    return searchImpl(opts)
+  },
   onlineProbe: (song) => probeImpl(song),
   onlinePlayable: async () => { playableCalls++; return { ok: true, lossless: true, level: 'master', bitrate: 1700 } },
   onlineDownload: async () => { downloadCalls++; return { ok: true } }
@@ -87,16 +92,24 @@ const ctx = vm.createContext({
 vm.runInContext(src, ctx)
 const Daily = vm.runInContext('Daily', ctx)
 
-/** 每个歌手返回一批「该歌手」的歌，source 在 kw/qq 间交替 */
-const songsOf = (artist, n, src = 'kw') => Array.from({ length: n }, (_, i) => ({
-  id: src + '-' + artist + '-' + i, source: src, title: artist + '在线新歌' + i,
+/**
+ * 每个歌手返回一批「该歌手」的歌，source 在 kw/qq 间交替。
+ * v3.3.43：按页码返回不同的歌（模拟真实「翻页拿到另一批」），
+ * 否则换一批的页码轮换在测试里看不出效果。
+ */
+const songsOf = (artist, n, src = 'kw', page = 1) => Array.from({ length: n }, (_, i) => ({
+  id: src + '-' + artist + '-p' + page + '-' + i,
+  source: src,
+  title: artist + '在线新歌' + ((page - 1) * 100 + i),
   artist, duration: 240, quality: '128k'
 }))
-const byArtist = (artist, n = 15) => ({ list: songsOf(artist, n, artist === '周杰伦' ? 'qq' : 'kw') })
+const byArtist = (artist, n = 15, page = 1) => ({
+  list: songsOf(artist, n, artist === '周杰伦' ? 'qq' : 'kw', page)
+})
 const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms))
 
 async function run() {
-  searchImpl = async (opts) => byArtist(opts.keyword)
+  searchImpl = async (opts) => byArtist(opts.keyword, 15, opts.page || 1)
   probeImpl = async () => ({ ok: false })
   await Daily.recompute()
   await tick()
@@ -106,8 +119,10 @@ async function run() {
   ok('一行本地曲库都没有', Daily.localTracks().length === 0,
     '本地 ' + Daily.localTracks().length)
   ok('全部是在线行', Daily.list.every((x) => x.kind === 'online'))
-  ok('多歌手轮搜（口味歌手逐个当关键词）',
-    searchCalls.length >= 2 && searchCalls.every((k) => Daily.topArtists().includes(k)),
+  const coldSeeds = vm.runInContext('DAILY_COLD_SEEDS', ctx)
+  const allowedSeeds = new Set(Daily.topArtists(12).concat(coldSeeds))
+  ok('多歌手轮搜（口味池 / 冷启动池里逐个当关键词）',
+    searchCalls.length >= 2 && searchCalls.every((k) => allowedSeeds.has(k)),
     searchCalls.join(','))
   ok('同一歌手不会占满整页（轮转取歌）',
     new Set(Daily.list.map((x) => x.song.artist)).size >= 2,
@@ -124,10 +139,10 @@ async function run() {
     !Daily.list.some((x) => x.song.title === '本地歌曲1'))
 
   console.log('\n=== 2) 音质探测：母带/无损优先，整批探完只重排一次 ===')
-  searchImpl = async (opts) => byArtist(opts.keyword)
-  // 只有 kw-孙燕姿-3 / kw-孙燕姿-5 / kw-周杰伦-2 三首是母带，其余 128k
-  const hiSet = new Set(['kw-孙燕姿-3', 'kw-孙燕姿-5', 'qq-周杰伦-2'])
-  probeImpl = async (song) => (hiSet.has(song.id)
+  searchImpl = async (opts) => byArtist(opts.keyword, 15, opts.page || 1)
+  // 每个歌手「第 1 首」判为母带（标题以 在线新歌0 结尾），其余 128k。
+  // 不写死 id：换批会翻页，选中的歌每次不同，写死 id 会变成偶发红。
+  probeImpl = async (song) => (/在线新歌0$/.test(song.title)
     ? { ok: true, lossless: true, level: 'master', bitrate: 1700, ext: 'flac', size: 40 * 1048576 }
     : { ok: true, lossless: false, level: '', bitrate: 128, ext: 'mp3' })
   await Daily.recompute()
@@ -136,7 +151,8 @@ async function run() {
   ok('探测结果回写到行（有档位）',
     Daily.list.every((x) => x.q && x.q.text && x.q.text !== '—'), JSON.stringify(Daily.list[0].q))
   ok('按音质档位降序重排', ranks.every((v, i) => i === 0 || ranks[i - 1] >= v), ranks.join(','))
-  ok('母带行排在最前', ranks[0] === 3 && ranks.filter((v) => v === 3).length === 3, ranks.join(','))
+  ok('母带行排在最前（且至少有一首）',
+    ranks[0] === 3 && ranks.filter((v) => v === 3).length >= 1, ranks.join(','))
 
   console.log('\n=== 3) 冷启动：本地曲库为空也能出 30 首在线 ===')
   const savedTracks = state.tracks
@@ -151,8 +167,8 @@ async function run() {
   await Daily.recompute()
   await tick()
   ok('曲库空时用内置歌手池当种子，仍出 30 首',
-    Daily.list.length === 30 && searchCalls.length === 6,
-    '列表 ' + Daily.list.length + ' / 搜索 ' + searchCalls.length)
+    Daily.list.length === 30 && new Set(searchCalls).size === 6,
+    '列表 ' + Daily.list.length + ' / 歌手 ' + new Set(searchCalls).size + ' / 搜索 ' + searchCalls.length)
   ok('冷启动文案不写成「因为你常听」', !/因为你常听/.test(el('dailySub').textContent))
   state.tracks = savedTracks
   state.favorites = savedFavs
@@ -175,7 +191,7 @@ async function run() {
   searchImpl = () => new Promise((resolve) => setTimeout(() => resolve(byArtist('周杰伦')), 40))
   const p1 = Daily.recompute()
   await tick(5)
-  searchImpl = async () => byArtist('孙燕姿')
+  searchImpl = async (opts) => byArtist('孙燕姿', 15, opts.page || 1)
   await Daily.recompute()
   await p1
   await tick()
@@ -184,7 +200,7 @@ async function run() {
     Daily.list.map((x) => x.song.title).slice(0, 3).join(','))
 
   console.log('\n=== 6) 队列：播放全部 = 全 30 首在线（跨源），点播只解析当前这首 ===')
-  searchImpl = async (opts) => byArtist(opts.keyword)
+  searchImpl = async (opts) => byArtist(opts.keyword, 15, opts.page || 1)
   probeImpl = async () => ({ ok: false })
   await Daily.recompute()
   await tick()
@@ -213,6 +229,67 @@ async function run() {
   const html = el('dailyBody').innerHTML
   Daily.list[0] = saved
   ok('标题里的标签被转义', /&lt;script&gt;/.test(html) && !/<script>x/.test(html))
+
+  console.log('\n=== 8) 换一批：两批不能一模一样（v3.3.43）===')
+  probeImpl = async () => ({ ok: false })
+  searchImpl = async (opts) => byArtist(opts.keyword, 30, opts.page || 1)
+  // 真实用户口味通常 >= 6 位歌手；少于 6 位时 seedArtists 会用冷启动池随机补，
+  // 那份随机性会掩盖「种子不轮换」的问题 —— 所以这里先造 8 位口味歌手。
+  const savedT8 = state.tracks
+  const savedF8 = state.favorites
+  const savedC8 = state.playCounts
+  const savedH8 = state.history
+  state.tracks = ['周杰伦', '林俊杰', '陈奕迅', '孙燕姿', '邓紫棋', '李荣浩', '薛之谦', '王菲']
+    .map((a, i) => ({ id: 'T' + i, title: '口味歌' + i, artist: a, album: '', duration: 200, ext: 'mp3', cover: null }))
+  state.favorites = new Set()
+  state.playCounts = state.tracks.reduce((m, t, i) => { m[t.id] = 9 - i; return m }, {})
+  state.history = []
+  Daily.lastKeys = new Set()      // 从干净状态起算，只看这两批
+  await Daily.recompute()
+  await tick()
+  const sigA = Daily.list.map((x) => Daily.key(x.song.title, x.song.artist))
+  const seedsA = (Daily._lastSeeds || []).slice()
+  const pagesA = (Daily._lastPages || []).slice()
+  await Daily.recompute()
+  await tick()
+  const sigB = Daily.list.map((x) => Daily.key(x.song.title, x.song.artist))
+  const seedsB = (Daily._lastSeeds || []).slice()
+  const pagesB = (Daily._lastPages || []).slice()
+  const ov = sigA.filter((k) => sigB.indexOf(k) >= 0).length
+
+  ok('两批都是 30 首', sigA.length === 30 && sigB.length === 30, sigA.length + ' / ' + sigB.length)
+  ok('换一批后内容有变化（不是原样重画）', sigA.join('|') !== sigB.join('|'))
+  ok('两批重合 < 70%（不是只换个顺序）', ov / Math.max(1, sigA.length) < 0.7,
+    '重合 ' + ov + '/' + sigA.length)
+  ok('种子歌手或页码至少一项轮换了',
+    JSON.stringify(seedsA) !== JSON.stringify(seedsB) || JSON.stringify(pagesA) !== JSON.stringify(pagesB),
+    JSON.stringify(seedsA) + JSON.stringify(pagesA))
+  ok('每批都真的翻页了（页码里既有 1 也有 2）',
+    pagesA.includes(1) && pagesA.includes(2) && pagesB.includes(1) && pagesB.includes(2),
+    JSON.stringify(pagesA) + ' / ' + JSON.stringify(pagesB))
+  ok('口味歌手 >= 6 位时种子集合真的换了位置（不是固定 top6）',
+    seedsA.length === 6 && seedsB.length === 6 && seedsA.join(',') !== seedsB.join(','),
+    seedsA.join(',') + ' → ' + seedsB.join(','))
+
+  console.log('\n=== 9) 源不支持翻页时，靠「排除上一批」也要换掉 ===')
+  // 有些音源 page 参数其实无效（始终返回同一批），这时只能靠 prev 排除：
+  // 每歌手 30 首、6 歌手 → 第一批取每桶前 5 首，第二批应取第 6~10 首，重合 0。
+  searchImpl = async (opts) => byArtist(opts.keyword, 30, 1)
+  Daily.lastKeys = new Set()
+  await Daily.recompute()
+  await tick()
+  const pA = Daily.list.map((x) => Daily.key(x.song.title, x.song.artist))
+  await Daily.recompute()
+  await tick()
+  const pB = Daily.list.map((x) => Daily.key(x.song.title, x.song.artist))
+  const ov2 = pA.filter((k) => pB.indexOf(k) >= 0).length
+  ok('翻页无效（两批候选完全相同）时，第二批仍然换掉了',
+    pB.length === 30 && ov2 === 0, '重合 ' + ov2 + '/' + pA.length)
+
+  state.tracks = savedT8
+  state.favorites = savedF8
+  state.playCounts = savedC8
+  state.history = savedH8
 
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)

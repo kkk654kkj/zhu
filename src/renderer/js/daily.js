@@ -20,9 +20,13 @@
  */
 
 const DAILY_TOTAL = 30
-const DAILY_ARTIST_MAX = 6
+const DAILY_ARTIST_MAX = 6        // 每批实际拿几个歌手当种子
+const DAILY_ARTIST_POOL = 12      // 口味池上限：每批从里面轮换抽 6 位
 const DAILY_SEARCH_TIMEOUT = 9000
 const DAILY_PROBE_WORKERS = 3
+/** 换一批：与上一批重合超过这个比例就自动重取一次（最多 DAILY_MAX_RETRY 次） */
+const DAILY_RETRY_OVERLAP = 0.7
+const DAILY_MAX_RETRY = 1
 /** 冷启动歌手池：本地曲库为空 / 没有播放记录时当推荐种子 */
 const DAILY_COLD_SEEDS = [
   '周杰伦', '林俊杰', '陈奕迅', '孙燕姿', '邓紫棋', '李荣浩', '薛之谦', '王菲',
@@ -32,6 +36,8 @@ const DAILY_COLD_SEEDS = [
 const Daily = {
   list: [],                 // [{ kind:'online', song, reason, w, q, qr } | { kind:'local', track, reason }]
   token: 0,                 // 重算轮次：换一批 / 切页会作废旧请求
+  batchRound: 0,            // 第几批（换一批 / 进页各 +1）：种子歌手与页码都按它轮换
+  _batchOverlap: 0,         // 本批与上一批的重合率（用来在状态栏说明「源就这些歌」）
   lastKeys: new Set(),      // 上一批在线曲目 key（降权，保证换一批真的会换）
   reason: '',               // 视图头描述
   status: '',
@@ -61,7 +67,23 @@ const Daily = {
       const el = document.getElementById(id)
       if (el) el.addEventListener(ev, fn)
     }
-    on('dailyRefresh', 'click', () => { this.recompute().catch(() => {}) })
+    // 换一批：按钮进 loading（防连点 + 让用户看到「真的在换」），结束恢复文案
+    on('dailyRefresh', 'click', async () => {
+      const btn = document.getElementById('dailyRefresh')
+      const can = btn && typeof btn.querySelector === 'function'
+      const span = can ? btn.querySelector('span') : null
+      if (btn && btn.classList && btn.classList.contains('is-loading')) return
+      if (btn && btn.classList) btn.classList.add('is-loading')
+      if (span) span.textContent = '换批中…'
+      try {
+        await this.recompute()
+      } catch {
+        /* 失败原因已写进状态栏 */
+      } finally {
+        if (btn && btn.classList) btn.classList.remove('is-loading')
+        if (span) span.textContent = '换一批'
+      }
+    })
     on('dailyPlayAll', 'click', () => { this.playAll() })
     // v3.3.41：与在线搜索同款的小工具（缓存设置 / 下载管理 / 下载目录），复用同一批面板与 IPC
     on('dailyCacheBtn', 'click', () => toggleCachePanel())
@@ -97,6 +119,7 @@ const Daily = {
   /** 每次进页 / 点「换一批」都重算：全在线，断了才本地兜底 */
   async recompute() {
     const token = ++this.token
+    this.batchRound = (this.batchRound || 0) + 1   // 每批换一组歌手与页码
     try {
       this.bind()
       this.list = []
@@ -104,8 +127,10 @@ const Daily = {
       this.probed = 0
       this.probing = 0
       this.lastErr = ''
+      this._batchOverlap = 0
       this.reason = this.tasteText()
-      this.setStatus('正在挑选在线曲目…')
+      // 已经有上一批 → 明确写「换一批」，用户能看出点下去有反应
+      this.setStatus(this.lastKeys.size ? '正在换一批…' : '正在挑选在线曲目…')
       if (state.view === 'daily') {
         this.render()
         state.visible = this.localTracks()
@@ -144,20 +169,52 @@ const Daily = {
     }
   },
 
-  /** 口味种子：优先本地高频歌手，曲库空 / 没记录时用冷启动歌手池 */
-  seedArtists() {
-    const tasted = this.topArtists()
-    if (tasted.length) return tasted.slice(0, DAILY_ARTIST_MAX)
-    const pool = DAILY_COLD_SEEDS.slice()
-    for (let i = pool.length - 1; i > 0; i--) {
+  /** 随机打散（Fisher-Yates），不改原数组 */
+  shuffle(arr) {
+    const a = arr.slice()
+    for (let i = a.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1))
-      const tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp
+      const tmp = a[i]; a[i] = a[j]; a[j] = tmp
     }
-    return pool.slice(0, DAILY_ARTIST_MAX)
+    return a
+  },
+
+  /**
+   * 每批的种子歌手：从口味池里**轮换**取 6 位（按 batchRound 偏移），
+   * 口味不足 6 位时用冷启动池随机补满；完全没口味时全从冷启动池随机抽。
+   *
+   * v3.3.43：以前固定取口味 top6，每批搜索词一字不差 → 结果集自然一模一样，
+   * 用户点「换一批」看到的就是「没作用」。
+   */
+  seedArtists(round) {
+    const need = DAILY_ARTIST_MAX
+    const r = round == null ? (this.batchRound || 0) : round
+    const tasted = this.topArtists(DAILY_ARTIST_POOL)
+    if (tasted.length) {
+      const out = []
+      const start = r % tasted.length
+      for (let i = 0; i < Math.min(need, tasted.length); i++) {
+        out.push(tasted[(start + i) % tasted.length])
+      }
+      if (out.length < need) {
+        for (const name of this.shuffle(DAILY_COLD_SEEDS.filter((n) => out.indexOf(n) < 0))) {
+          if (out.length >= need) break
+          out.push(name)
+        }
+      }
+      return out
+    }
+    return this.shuffle(DAILY_COLD_SEEDS).slice(0, need)
+  },
+
+  /** 每批让一半歌手翻到第 2 页，且随批次反相：同一个歌手的搜索结果也会变 */
+  pageFor(i, round) {
+    const r = round == null ? (this.batchRound || 0) : round
+    return (r + i) % 2 ? 2 : 1
   },
 
   /** 高频歌手：播放次数 + 收藏 + 最近播放加权，供在线推荐当搜索词 */
-  topArtists() {
+  topArtists(limit) {
     const w = new Map()
     const add = (a, n) => {
       const name = String(a || '').trim()
@@ -176,7 +233,10 @@ const Daily = {
       const t = byId.get(h.id)
       if (t) add(t.artist, 1.5)
     }
-    return Array.from(w.entries()).sort((a, b) => b[1] - a[1]).slice(0, DAILY_ARTIST_MAX).map((x) => x[0])
+    return Array.from(w.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit || DAILY_ARTIST_MAX)
+      .map((x) => x[0])
   },
 
   tasteText() {
@@ -213,61 +273,101 @@ const Daily = {
       const k = this.key(s.title, s.artist)
       if (localKeys.has(k) || seen.has(k)) continue
       seen.add(k)
-      if (this.lastKeys.has(k)) weight -= 0.8   // 上一批出现过的沉到后面
-      bucket.push({ song: s, w: weight, reason })
+      // 上一批出现过的：强降权并打标记，roundRobin 会先取完新歌才回收它们
+      const prev = this.lastKeys.has(k)
+      bucket.push({ song: s, w: prev ? weight - 5 : weight, reason, prev })
     }
   },
 
   /**
    * 全在线取数：6 个歌手并行搜 → 去重 → 按歌手轮转取 30 首。
-   * 候选不够 30 时补一次 page 2；一首都没有 → 返回空数组，上层走本地兜底。
+   *
+   * v3.3.43 修「换一批没作用」：以前每批都是「同一个 6 歌手 + 同一个第 1 页」，
+   * 结果集必然一致（实测两批 30/30 全同、连顺序都一样）。现在三重差异：
+   *   ① 种子歌手按 batchRound 在口味池里轮换；
+   *   ② 一半歌手搜第 2 页（随批次反相）；
+   *   ③ 上一批出现过的歌强降权 + 打 prev 标记，roundRobin 先取完新歌才回收。
+   * 仍然重合 ≥70%（口味太窄 / 源就那几首）时自动再取一次，最多一次，
+   * 并在状态栏说明「源这边新歌不多」，避免用户以为是按钮坏了。
    */
-  async fetchOnline(token) {
-    const seeds = this.seedArtists()
-    this.reason = seeds.length && this.topArtists().length
-      ? this.tasteText()
-      : '根据热门歌手为你挑新歌'
+  async fetchOnline(token, depth = 0, round) {
+    const r = round == null ? (this.batchRound || 0) : round
+    const seeds = this.seedArtists(r)
+    this.reason = this.topArtists().length ? this.tasteText() : '根据热门歌手为你挑新歌'
     try { await Online.init() } catch { /* proxyBase 为空时点播会给出明确提示 */ }
     if (token !== this.token) return []
 
     const localKeys = new Set((state.tracks || []).map((t) => this.key(t.title, t.artist)))
     const seen = new Set()
     const buckets = seeds.map(() => [])
-    const first = await Promise.all(seeds.map((name) => this.searchArtist(name, 1, token)))
+    const reason = this.topArtists().length ? '你常听' : '热门新歌'
+    const weightOf = (i, extra = 0) => (seeds.length - i) / seeds.length + extra
+    // 每个歌手这一批搜第几页：一半 p1、一半 p2，批次之间反相
+    const pages = seeds.map((_, i) => this.pageFor(i, r))
+    this._lastSeeds = seeds          // 便于实测/排查：这一批用了哪些歌手、搜的哪一页
+    this._lastPages = pages
+
+    const first = await Promise.all(seeds.map((name, i) => this.searchArtist(name, pages[i], token)))
     if (token !== this.token) return []
-    first.forEach((raw, i) => {
-      const w = (seeds.length - i) / seeds.length      // 越靠前的口味歌手权重越高
-      const reason = this.topArtists().length ? '你常听' : '热门新歌'
-      this.absorb(buckets[i], seen, localKeys, raw, w, reason)
-    })
+    first.forEach((raw, i) => this.absorb(buckets[i], seen, localKeys, raw, weightOf(i), reason))
+
+    // 第 2 页拿到的不多：用全部歌手的第 1 页补齐（主池必须完整）
+    if (this.roundRobin(buckets).length < DAILY_TOTAL) {
+      const base = await Promise.all(seeds.map((name) => this.searchArtist(name, 1, token)))
+      if (token !== this.token) return []
+      base.forEach((raw, i) => this.absorb(buckets[i], seen, localKeys, raw, weightOf(i, -0.1), reason))
+    }
+    // 还差：前 3 个歌手往更深的页再补一轮
+    if (this.roundRobin(buckets).length < DAILY_TOTAL) {
+      const deep = await Promise.all(
+        seeds.slice(0, 3).map((name, i) => this.searchArtist(name, pages[i] + 2, token))
+      )
+      if (token !== this.token) return []
+      deep.forEach((raw, i) => this.absorb(buckets[i], seen, localKeys, raw, weightOf(i, -0.2), reason))
+    }
 
     const out = this.roundRobin(buckets)
-    // 候选不够：拿前 3 个歌手再补一页（这一页通常已经烧不烧额度都无所谓，纯搜索）
-    if (out.length < DAILY_TOTAL) {
-      const more = await Promise.all(seeds.slice(0, 3).map((name) => this.searchArtist(name, 2, token)))
-      if (token !== this.token) return out
-      more.forEach((raw, i) => {
-        const w = (seeds.length - i) / seeds.length - 0.2
-        const reason = this.topArtists().length ? '你常听' : '热门新歌'
-        this.absorb(buckets[i], seen, localKeys, raw, w, reason)
-      })
-      return this.roundRobin(buckets)
+    this._batchOverlap = this.overlapRatio(out)
+    // 换了跟没换一样 → 换一组种子再取一次（最多一次，避免反复打网关）
+    if (depth < DAILY_MAX_RETRY && out.length && this._batchOverlap >= DAILY_RETRY_OVERLAP) {
+      // 只在本次取数内换轮次，不动 this.batchRound —— 否则下一批的页码反相会错位
+      return this.fetchOnline(token, depth + 1, r + 1)
     }
     return out
   },
 
-  /** 按歌手轮转取歌：一轮每个歌手各出 1 首，避免一整页全是同一个人 */
+  /**
+   * 按歌手轮转取歌：一轮每个歌手各出 1 首，避免一整页全是同一个人。
+   * 每个桶先按权重降序（上一批出现过的已被压成负值），并**分两遍**取：
+   * 先只取本批新歌，不够 30 首才回收上一批的 —— 这是「换一批真的换」的关键。
+   */
   roundRobin(buckets) {
+    for (const b of buckets) b.sort((a, c) => (c.w || 0) - (a.w || 0))
     const out = []
-    const depth = Math.max(0, ...buckets.map((b) => b.length))
-    for (let round = 0; round < depth && out.length < DAILY_TOTAL; round++) {
-      for (const b of buckets) {
-        if (out.length >= DAILY_TOTAL) break
-        const item = b[round]
-        if (item) out.push(item)
+    const taken = new Set()
+    const pass = (allowPrev) => {
+      const depth = Math.max(0, ...buckets.map((b) => b.length))
+      for (let round = 0; round < depth && out.length < DAILY_TOTAL; round++) {
+        for (const b of buckets) {
+          if (out.length >= DAILY_TOTAL) break
+          const item = b[round]
+          if (!item || taken.has(item)) continue
+          if (!allowPrev && item.prev) continue
+          taken.add(item)
+          out.push(item)
+        }
       }
     }
+    pass(false)
+    if (out.length < DAILY_TOTAL) pass(true)
     return out
+  },
+
+  /** 与上一批的重合率（0~1）：判断这批是不是「换了跟没换一样」 */
+  overlapRatio(out) {
+    if (!out || !out.length || !this.lastKeys.size) return 0
+    const hit = out.filter((x) => this.lastKeys.has(this.key(x.song.title, x.song.artist))).length
+    return hit / out.length
   },
 
   /** IPC 可能一直挂着（第三方网关不响应），必须自己兜超时，否则「换一批」永远转圈 */
@@ -394,9 +494,11 @@ const Daily = {
   summaryStatus() {
     if (!this.onlineCount) return this.status || '在线推荐暂不可用'
     const hi = this.list.filter((x) => x.qr >= 2).length
+    // 换了两次仍然大量重合：如实说明，别让用户以为按钮没反应
+    const narrow = (this._batchOverlap || 0) >= DAILY_RETRY_OVERLAP
     return `全 ${this.onlineCount} 首在线曲目 · ${this.qualityLabel()}优先` +
       (hi ? ' · 已探到 ' + hi + ' 首无损/母带' : '') +
-      ' · 每次打开重新挑选'
+      (narrow ? ' · 音源这边可换的新歌不多' : ' · 每次打开重新挑选')
   },
 
   srcName(id) {

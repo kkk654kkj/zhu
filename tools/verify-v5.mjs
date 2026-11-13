@@ -218,9 +218,29 @@ try {
     !/DAILY_LOCAL_TARGET/.test(daily) && /DAILY_COLD_SEEDS/.test(daily) &&
     /onlineSongs\(\)/.test(daily) && /DAILY_TOTAL = 30/.test(daily))
   ok('多歌手轮搜 + 每路超时兜底 + 一首都没有才本地兜底',
-    /seedArtists\(\)/.test(daily) && /searchArtist\(name, 1, token\)/.test(daily) &&
-    /withTimeout\(p, DAILY_SEARCH_TIMEOUT\)/.test(daily) &&
+    /seedArtists\(/.test(daily) && /withTimeout\(p, DAILY_SEARCH_TIMEOUT\)/.test(daily) &&
     /if \(items\.length\)/.test(daily) && /fillLocal\(DAILY_TOTAL\)/.test(daily))
+  // v3.3.43：换一批必须真的换（以前固定 top6 + 固定第 1 页 → 两批 30/30 全同）
+  ok('换一批：种子歌手在口味池里轮换（不再固定 top6）',
+    /DAILY_ARTIST_POOL = 12/.test(daily) && /seedArtists\(round\)/.test(daily) &&
+    /const start = r % tasted\.length/.test(daily) &&
+    /tasted\[\(start \+ i\) % tasted\.length\]/.test(daily))
+  ok('换一批：每批一半歌手翻到第 2 页',
+    /pageFor\(i, round\)/.test(daily) && /\(r \+ i\) % 2 \? 2 : 1/.test(daily) &&
+    /this\.pageFor\(i, r\)/.test(daily))
+  ok('换一批：上一批出现过的歌强降权并排到最后（roundRobin 两遍取）',
+    /const prev = this\.lastKeys\.has\(k\)/.test(daily) &&
+    /w: prev \? weight - 5 : weight/.test(daily) &&
+    /if \(!allowPrev && item\.prev\) continue/.test(daily) &&
+    /pass\(false\)[\s\S]{0,120}pass\(true\)/.test(daily))
+  ok('换一批：重合 ≥70% 自动重取一次，且不改下一批轮次',
+    /DAILY_RETRY_OVERLAP = 0\.7/.test(daily) && /DAILY_MAX_RETRY = 1/.test(daily) &&
+    /this\.fetchOnline\(token, depth \+ 1, r \+ 1\)/.test(daily) &&
+    !/this\.batchRound = \(this\.batchRound \|\| 0\) \+ 1\s*\n\s*return this\.fetchOnline/.test(daily))
+  ok('换一批有可见反馈：按钮 loading 态 + 状态栏写「正在换一批」',
+    /classList\.contains\('is-loading'\)/.test(daily) &&
+    /span\.textContent = '换批中…'/.test(daily) &&
+    /'正在换一批…'/.test(daily))
   ok('音质优先级：探测 + 档位排序 + 全局默认母带',
     /async probeAll\(token\)/.test(daily) && /qualityOf\(song, r\)/.test(daily) &&
     /sortByQuality\(\)/.test(daily) && /onlineProbe\(x\.song, token\)/.test(daily) &&
