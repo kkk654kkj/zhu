@@ -108,7 +108,7 @@ const Daily = {
       if (token !== this.token || state.view !== 'daily') return
 
       if (items.length) {
-        this.list = items.slice(0, DAILY_TOTAL).map((x) => ({
+        this.list = items.filter((x) => x && x.song).slice(0, DAILY_TOTAL).map((x) => ({
           kind: 'online', song: x.song, reason: x.reason, w: x.w, q: null, qr: 0
         }))
         this.onlineCount = this.list.length
@@ -395,7 +395,7 @@ const Daily = {
 
   row(x, i) {
     const isLocal = x.kind === 'local'
-    const t = isLocal ? x.track : x.song
+    const t = (isLocal ? x.track : x.song) || {}
     const title = t.title || '未知歌曲'
     const artist = t.artist || '未知歌手'
     const q = isLocal ? (t.ext || '—') : (x.q ? x.q.text : String(t.quality || '—').toUpperCase())
@@ -427,8 +427,9 @@ const Daily = {
         ? `${this.reason || '为你精选'} · 在线推荐暂不可用，本地兜底 ${local} 首 · 可点「换一批」重试`
         : `${this.reason || '为你精选'} · 全是新歌 ${this.onlineCount} 首 · ${this.qualityLabel()}优先 · 每次打开重新挑选`
     }
-    const first = this.list.find((x) => x.kind === 'online' && x.song.cover) ||
-      this.list.find((x) => x.kind === 'local' && x.track.cover)
+    // 推荐项可能来自不完整的数据（在线接口缺字段 / 打桩数据）：这里一律按「有 song/track 才算数」取
+    const first = this.list.find((x) => x.kind === 'online' && x.song && x.song.cover) ||
+      this.list.find((x) => x.kind === 'local' && x.track && x.track.cover)
     const coverSrc = first ? (first.kind === 'online' ? first.song.cover : first.track.cover) : ''
     if (cover) cover.innerHTML = coverSrc ? `<img src="${esc(coverSrc)}" alt="" />` : icon('spark')
     const st = document.getElementById('dailyStatus')
