@@ -1903,12 +1903,16 @@ body.mini .hifi-badge { display: none; }
 
 /* ================= 在线搜索（联网版 v3.0） ================= */
 
-#onlinePane {
+#onlinePane, #dailyPane {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
+
+/* v3.3.37 每日推荐：推荐理由徽标用主题色，不引 hardcoded 绿 */
+#dailyPane .op-badge.daily-badge { background: color-mix(in srgb, var(--accent) 62%, #2a333c); }
+#dailyPane .op-c-src { overflow: hidden; }
 
 .op-head {
   padding: 14px 16px 10px;
