@@ -235,6 +235,23 @@ try {
     /const isDaily = state\.view === 'daily'/.test(app) &&
     /isPane = isOnline \|\| isDaily/.test(app) && /dailyPane'\).hidden = !isDaily/.test(app))
   ok('dailyPane 布局与在线面板同源（共享 CSS）', /#onlinePane, #dailyPane \{/.test(css))
+  // v3.3.39：列宽/对齐单独一个 online-only 样式文件（app.css 是共享文件，不动它）
+  const dcss = fs.readFileSync(path.join(REPO, 'src/renderer/css/daily.css'), 'utf8')
+  ok('每日推荐独立样式表已引入且只引入一次',
+    /css\/daily\.css/.test(html) && (html.match(/css\/daily\.css/g) || []).length === 1)
+  ok('列宽按面板宽度分三档（容器查询，不是按窗口）',
+    /#dailyPane \{ container-type: inline-size; \}/.test(dcss) &&
+    (dcss.match(/@container \(max-width: \d+px\)/g) || []).length === 2 &&
+    /minmax\(0, 1\.6fr\)/.test(dcss) &&
+    !/minmax\(160px/.test(dcss))
+  ok('表头补偿滚动条 + 列体常驻 gutter（表头与行逐列对齐）',
+    /#dailyPane \.op-th \{ padding-right: 33px; \}/.test(dcss) &&
+    /#dailyPane \.op-body \{ scrollbar-gutter: stable; \}/.test(dcss))
+  ok('规格居中 / 时长右对齐 / 理由徽标撑满本列',
+    /#dailyPane \.op-c-q \{ text-align: center; \}/.test(dcss) &&
+    /#dailyPane \.op-c-dur \{ text-align: right; \}/.test(dcss) &&
+    /#dailyPane \.op-c-src \.op-badge \{\s*\n\s*width: 100%;/.test(dcss) &&
+    /#dailyPane \.op-th \.op-c-src \{ display: block; text-align: center; \}/.test(dcss))
   ok('全屏页与侧栏歌词共用点击跳进度处理器',
     /\['lpLyrics', 'fsLyrics'\]/.test(app) &&
     /addEventListener\('click', seekByLyricLine\)/.test(app))

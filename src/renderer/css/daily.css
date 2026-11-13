@@ -1,0 +1,66 @@
+/* ================= 每日推荐：列宽与对齐（联网版 v3.3.39） =================
+ *
+ * 为什么单独一个文件：app.css 是两侧共享文件（master 也要保持一致），
+ * 而每日推荐只有联网版有面板 —— 放这里就不用动共享文件，也不会给本地版带进死规则。
+ *
+ * 解决的问题（1080 宽窗口下实测）：
+ *   · 面板只剩 452px，旧网格最小要 678px → 整表溢出 235px，
+ *     「推荐理由」之后的规格/时长/操作全被裁掉，操作表头只剩半个字；
+ *   · 列表出滚动条时行内容缩 9px，表头不缩 → 表头与内容错位；
+ *   · 规格/音质、时长、操作三列内容各按自己的宽度左对齐，看着参差。
+ *
+ * 做法：
+ *   1) 面板当容器查询单位，按面板宽度切三档列宽（不是按窗口宽度，侧栏/歌词栏展开也管用）；
+ *   2) 表头右内边距补上滚动条宽度（24 + 9），并在列体上常驻 scrollbar-gutter，
+ *      两者内容宽度恒等 → 表头与每一行左边缘逐列对齐；
+ *   3) 规格/音质居中、时长右对齐（等宽数字）、推荐理由徽标撑满本列并居中，
+ *      三列各自成一竖条，不再参差。
+ */
+
+#dailyPane { container-type: inline-size; }
+
+/* 表头与行共用同一份列定义：宽档 7 列全显 */
+#dailyPane .op-tr {
+  grid-template-columns: 34px minmax(0, 1.6fr) minmax(0, 1fr) 72px 58px 46px 74px;
+  gap: 10px;
+}
+
+/* 表头补滚动条宽度：行内容宽度 = 面板 - 9(条) - 24 - 24，表头 = 面板 - 24 - 33，恒等 */
+#dailyPane .op-th { padding-right: 33px; }
+#dailyPane .op-body { scrollbar-gutter: stable; }
+
+/* 三列各自成一竖条 */
+#dailyPane .op-c-q { text-align: center; }
+#dailyPane .op-c-dur { text-align: right; }
+#dailyPane .op-c-src { overflow: hidden; display: flex; }
+/* 表头「推荐理由」跟徽标居中对齐，别一个左一个中 */
+#dailyPane .op-th .op-c-src { display: block; text-align: center; }
+#dailyPane .op-c-src .op-badge {
+  width: 100%;
+  max-width: 84px;
+  justify-content: center;
+  padding: 0 4px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+#dailyPane .op-c-act { justify-content: flex-end; }
+
+/* 中档（520–620px 面板）：收窄固定列，把空间还给歌名 / 歌手 */
+@container (max-width: 620px) {
+  #dailyPane .op-tr {
+    grid-template-columns: 28px minmax(0, 1.6fr) minmax(0, 1fr) 62px 54px 42px 64px;
+    gap: 8px;
+  }
+  #dailyPane .op-c-src .op-badge { max-width: 74px; }
+}
+
+/* 窄档（< 520px 面板，例如 1080 宽窗口 + 歌词栏展开）：让出时长列，操作键收紧 */
+@container (max-width: 520px) {
+  #dailyPane .op-tr {
+    grid-template-columns: 24px minmax(0, 1.6fr) minmax(0, 1fr) 58px 52px 56px;
+    gap: 6px;
+  }
+  #dailyPane .op-c-dur { display: none; }
+  #dailyPane .op-act-btn { width: 24px; height: 24px; }
+  #dailyPane .op-c-src .op-badge { max-width: 70px; font-size: 10.5px; }
+}
