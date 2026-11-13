@@ -22,7 +22,8 @@
   // 这些容器整块可拖（内部控件除外），与原来 app-region: drag 的范围一一对应
   const HOLDERS = ['#titlebar', '#miniView .mv-head', '#miniView .mv-body']
   // 落在这些元素上时不启动拖动：按钮/输入框自己要用鼠标
-  const BLOCK = 'button, input, textarea, select, a, .no-drag, .search-box, .row-act'
+  // .tb-fold = 顶栏「⋯」菜单容器（点它开菜单，不能当拖动起点）
+  const BLOCK = 'button, input, textarea, select, a, .no-drag, .search-box, .row-act, .tb-fold'
 
   let dragging = false
   let startX = 0

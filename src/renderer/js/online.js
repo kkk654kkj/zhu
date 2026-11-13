@@ -375,8 +375,13 @@ const Online = {
   /* ---------------- 播放 ---------------- */
 
   /**
-   * 播放第 i 首。队列 = 同源的其他结果（同一源的可播性最接近），
-   * 避免播到别的平台的付费歌时整条队列全是"跳过"。
+   * 播放第 i 首。队列 = 整页搜索结果（**跨源**）。
+   *
+   * v3.3.40：以前只把「同一个源」的结果放进队列，切上一首/下一首只能在
+   * 酷我或 QQ 内部循环，用户看到的是「播哪个源就只能选哪个源」。
+   * 现在整页入队：每首的地址自带 src（proxyBase/stream?src=&id=&q=），
+   * 解析都发生在播到那一首的时候，所以跨源不会互相踩；某首无版权/付费
+   * 放不出来时由播放器的 error 链自动跳下一首（连续 3 首失败才停）。
    */
   async playAt(i) {
     const song = this.list[i]
@@ -413,10 +418,8 @@ const Online = {
     }
     const actual = r.song || song
     const track = this.toTrack(song, r)
-    // 队列取「用户点的那个源」这一批，跟界面上看到的列表一致
-    const queue = listAtStart
-      .filter((s) => s.source === song.source)
-      .map((s) => this.toTrack(s, null))
+    // 队列取整页结果（跨源），与界面上看到的列表一致
+    const queue = listAtStart.map((s) => this.toTrack(s, null))
     const idx = queue.findIndex((t) => t.id === track.id)
     if (idx >= 0) queue[idx] = track
     else queue.unshift(track)

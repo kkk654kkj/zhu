@@ -257,5 +257,19 @@ try {
     /addEventListener\('click', seekByLyricLine\)/.test(app))
 } catch (e) { ok('每日推荐单测组', false, e.message.slice(0, 200)) }
 
+
+// (i) v3.3.40：在线封面 https 化 + 搜索队列整页跨源
+try {
+  const onlineMain = fs.readFileSync(path.join(REPO, 'src/main/online.js'), 'utf8')
+  const onlineJs = fs.readFileSync(path.join(REPO, 'src/renderer/js/online.js'), 'utf8')
+  ok('封面地址统一升 https（酷狗/网易返回 http 图会被 CSP 拦掉）',
+    /function httpsify\(u\)/.test(onlineMain) &&
+    /httpsify\(String\(s\.Image\)\.replace\('\{size\}', '400'\)\)/.test(onlineMain) &&
+    /httpsify\(clean\(album\.picUrl \|\| ''\)\)/.test(onlineMain))
+  ok('在线搜索队列 = 整页结果（不再按「当前播放的源」过滤）',
+    /const queue = listAtStart\.map\(\(s\) => this\.toTrack\(s, null\)\)/.test(onlineJs) &&
+    !/filter\(\(s\) => s\.source === song\.source\)/.test(onlineJs))
+} catch (e) { ok('在线封面/队列单测组', false, e.message.slice(0, 200)) }
+
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
 process.exit(fail ? 1 : 0)

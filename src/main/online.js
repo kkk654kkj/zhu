@@ -261,6 +261,18 @@ function clean(s) {
 }
 
 /**
+ * v3.3.40：封面地址一律升到 https。
+ *
+ * 酷狗（imge.kugou.com）与网易（p.music.126.net）的搜索接口返回的是 http 图，
+ * 而渲染层 CSP 只允许 `img-src 'self' lxfile: lxcover: data: https:` —— http 图
+ * 在 1ms 内被 onerror 掉，表现就是「酷我/QQ 有封面、酷狗/网易没图」。
+ * 这两个 CDN 都支持 https，直接升级即可，不必为了封面放宽 CSP。
+ */
+function httpsify(u) {
+  return String(u == null ? '' : u).replace(/^http:\/\//i, 'https://')
+}
+
+/**
  * 音源接口返回的 ext 只认白名单：它会被拼进缓存文件名，
  * 万一接口给出 '../../evil' 这类值就是目录穿越。非法一律回退 mp3。
  */
@@ -345,7 +357,7 @@ const kw = {
       quality: /MP3H|MP3HIGH|ALFLAC/.test(String(r.FORMATS || '')) ? '320k' : '128k',
       hasLossless: /ALFLAC|FLAC/.test(String(r.FORMATS || '')),
       cover: r.web_albumpic_short
-        ? `https://img2.kuwo.cn/star/albumcover/${String(r.web_albumpic_short).replace(/^\//, '')}`
+        ? httpsify(`https://img2.kuwo.cn/star/albumcover/${String(r.web_albumpic_short).replace(/^\//, '')}`)
         : '',
       raw: undefined
     })).filter((s) => s.id && s.title)
@@ -430,7 +442,7 @@ const wy = {
         duration: Math.round((Number(ms) || 0) / 1000),
         quality: '128k',
         hasLossless: false,
-        cover: clean(album.picUrl || ''),
+        cover: httpsify(clean(album.picUrl || '')),
         raw: undefined
       }
     }).filter((s) => s.id && s.title)
@@ -556,7 +568,7 @@ const qq = {
         duration: Number(s.interval) || 0,
         quality: '128k',
         hasLossless: false,
-        cover: albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : '',
+        cover: albumMid ? httpsify(`https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg`) : '',
         raw: undefined
       }
     }).filter((s) => s.id && s.title)
@@ -643,7 +655,7 @@ const kg = {
       duration: Number(s.Duration) || 0,
       quality: s.HQFileHash ? '320k' : '128k',
       hasLossless: false,
-      cover: s.Image ? String(s.Image).replace('{size}', '400') : '',
+      cover: s.Image ? httpsify(String(s.Image).replace('{size}', '400')) : '',
       albumId: String(s.AlbumID || ''),
       raw: undefined
     })).filter((s) => s.id && s.title)
