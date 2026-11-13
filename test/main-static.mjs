@@ -220,6 +220,13 @@ function main() {
   ok('拖动态关闭全屏 blur / backdrop-filter（降低移动重绘成本）',
     /body\.win-dragging[\s\S]{0,400}?filter:\s*none/.test(appCss) &&
     /body\.win-dragging\s*\*\s*\{[^}]*backdrop-filter:\s*none/.test(appCss))
+  // v3.3.40（master 2.8.36）：右上角按钮组整块带 no-drag 时，那 400px 宽的空白带
+  // （按钮左侧到搜索框之间）全按不动窗口 —— 只留容器不排除，按钮本身仍由 button 规则挡住。
+  const tbHtml = read('src/renderer/index.html')
+  ok('标题栏右上按钮组不再整块 no-drag（空白带可拖）',
+    /<div class="tb-right">/.test(tbHtml) && !/<div class="tb-right no-drag">/.test(tbHtml))
+  ok('「⋯」折叠菜单容器排除在拖动之外（点它开菜单）',
+    /\.row-act,\s*\.tb-fold'/.test(dragSrc) || /,\s*\.tb-fold'/.test(dragSrc))
   const uiSrc = read('src/renderer/js/ui.js')
   ok('虚拟滚动改为头尾增删（保留 _rowHtml 单一模板）',
     /_rowHtml\(i\)/.test(uiSrc) && /data-sp="top"/.test(uiSrc))
