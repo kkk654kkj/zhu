@@ -20,10 +20,13 @@
 
 ;(() => {
   // 这些容器整块可拖（内部控件除外），与原来 app-region: drag 的范围一一对应
-  const HOLDERS = ['#titlebar', '#miniView .mv-head', '#miniView .mv-body']
+  // v2.8.37 / v3.3.45：#fsView 是 z-index:50 的整屏覆盖层，把 z-index:1 的
+  // #titlebar 整层盖住；不把它加进拖动源，全屏播放页里按哪都拖不动窗口。
+  const HOLDERS = ['#titlebar', '#miniView .mv-head', '#miniView .mv-body', '#fsView']
   // 落在这些元素上时不启动拖动：按钮/输入框自己要用鼠标
-  // .tb-fold = 顶栏「⋯」菜单容器（点它开菜单，不能当拖动起点）
-  const BLOCK = 'button, input, textarea, select, a, .no-drag, .search-box, .row-act, .tb-fold'
+  // .tb-fold = 顶栏「⋯」菜单容器（点它开菜单，不能当拖动起点；放在末尾以兼容既有静态断言）
+  // #fsBar = 全屏页进度条（拖它要 seek）；#fsLyrics = 全屏页歌词（点行要跳进度）
+  const BLOCK = 'button, input, textarea, select, a, .no-drag, .search-box, .row-act, #fsBar, #fsLyrics, .lyric-line, .tb-fold'
 
   let dragging = false
   let startX = 0

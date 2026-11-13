@@ -2852,3 +2852,22 @@ html[data-theme="light"] .tr .c-spec .badge.lossless { background: var(--badge-l
     transition-duration: .001ms !important;
   }
 }
+
+/* ================= v2.8.37 / v3.3.45：全屏页可拖 + 队列入口 =================
+   #fsView 是 fixed inset:0 / z-index:50 的整屏覆盖层，原来拖动源只有 z-index:1
+   的 #titlebar，被整层盖住 → 全屏播放页里按哪都拖不动窗口。dragwin.js 已把
+   #fsView 加进 HOLDERS，并用 BLOCK 排除按钮 / 进度条 / 歌词区。 */
+.fs-ctrl .fs-queue-btn.on { color: var(--accent); background: var(--accent-soft); }
+
+/* 队列抽屉本体 z-index:40，不抬就永远被 #fsView(50) 盖在下面 */
+body.fs-open #queuePanel {
+  z-index: 60;
+  right: 32px;
+  bottom: 118px;
+  width: 320px;
+  max-height: min(60vh, 520px);
+  box-shadow: 0 18px 52px rgba(0,0,0,.60);
+}
+html[data-theme="light"] body.fs-open #queuePanel {
+  box-shadow: 0 16px 44px rgba(24,36,56,.24);
+}
