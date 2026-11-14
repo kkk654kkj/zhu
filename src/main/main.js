@@ -1607,7 +1607,9 @@ function registerWindowIpc() {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node,
-    userData
+    userData,
+    // v2.8.42：渲染层据此把 <audio> 直接压静音（测试实例双保险，正常启动恒 false）
+    testMute: process.env.LX_TEST_MUTE === '1'
   }))
 
 }

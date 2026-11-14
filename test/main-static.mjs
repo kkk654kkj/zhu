@@ -483,8 +483,10 @@ function main() {
         /while \(idx >= 0 && st\.lines\[idx\] && st\.lines\[idx\]\.skip\) idx--/.test(uiSrc) &&
         /setLyricDiag\(parsed && parsed\.sync, track\.duration\)/.test(read('src/renderer/js/app.js')) &&
         /id="lpDiag"/.test(read('src/renderer/index.html')))
-      ok('测试静音覆盖 HTML5 audio（Chromium mute-audio，不再只静音 mpv）',
-        /appendSwitch\('mute-audio'\)/.test(read('src/main/main.js')))
+      ok('测试静音双保险：Chromium mute-audio + 渲染层 audio.muted（不再只静音 mpv）',
+        /appendSwitch\('mute-audio'\)/.test(read('src/main/main.js')) &&
+        /testMute: process\.env\.LX_TEST_MUTE === '1'/.test(read('src/main/main.js')) &&
+        /info\.testMute && audio\) audio\.muted = true/.test(read('src/renderer/js/app.js')))
     }
 
   }
