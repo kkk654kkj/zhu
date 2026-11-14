@@ -223,6 +223,9 @@ async function boot() {
   UI.setMode(player.mode)
   UI.setLyricOffset(state.lyricOffset)
   UI.setLyricPanelVisible(state.settings.showLyricPanel !== false)
+  // v3.3.48：视图模式（列表 / 卡片）初始化 —— 只同步按钮状态，不触发一次多余的重渲染
+  UI.gridMode = state.settings.viewMode === 'grid'
+  syncViewToggle()
   UI.setNorm(state.settings.normalizeVolume === true)
   updateHifiBadge()
   showReleaseNotice()
@@ -392,11 +395,12 @@ function computedList() {
 function switchView(view) {
   // v3.3.29（P2 #12）：视图切换保留滚动位置。renderTable 会把 scrollTop 归零，
   // 所以恢复放在 renderView 之后，并让虚拟滚动按新位置重算一次窗口。
-  const body = document.getElementById('tableBody')
+  // v3.3.48：滚动容器从 tableBody 换成 #viewScroll（表头 sticky 的单一滚动容器）
+  const scroller = document.getElementById('viewScroll')
   try {
-    if (body && state.view !== view) {
+    if (scroller && state.view !== view) {
       if (!state._viewScroll) state._viewScroll = new Map()
-      state._viewScroll.set(state.view, body.scrollTop)
+      state._viewScroll.set(state.view, scroller.scrollTop)
     }
   } catch { /* 视图滚动位置是纯体验，失败不影响切换 */ }
   state.view = view
@@ -406,9 +410,9 @@ function switchView(view) {
   if (view === 'daily' && typeof Daily !== 'undefined') Daily.recompute()
   try {
     const saved = state._viewScroll && state._viewScroll.get(view)
-    if (body && saved) {
-      body.scrollTop = saved
-      if (typeof UI._renderTableWindow === 'function') UI._renderTableWindow(false)
+    if (scroller && saved) {
+      scroller.scrollTop = saved
+      UI._renderTableWindow(false)
     }
   } catch { /* 同上 */ }
 }
@@ -416,9 +420,9 @@ function switchView(view) {
 /* v3.3.29（P2 #11）：播放条「定位当前曲」按钮派发的事件。
    虚拟滚动只渲染窗口行，所以按 index*40 直接算 scrollTop 而不是找 DOM 节点。 */
 window.addEventListener('uix:locate', () => {
-  const body = document.getElementById('tableBody')
+  const scroller = document.getElementById('viewScroll')
   const gridViews = ['online', 'daily', 'albums', 'folders']
-  if (!body || gridViews.indexOf(state.view) >= 0 || !document.getElementById('tableBody').offsetParent) {
+  if (!scroller || gridViews.indexOf(state.view) >= 0 || !scroller.offsetParent) {
     if (typeof toast === 'function') toast('先切到歌曲列表视图')
     return
   }
@@ -428,9 +432,14 @@ window.addEventListener('uix:locate', () => {
     if (typeof toast === 'function') toast('当前曲目不在本列表')
     return
   }
-  const target = Math.max(0, i * TABLE_ROW_H - Math.max(0, (body.clientHeight - TABLE_ROW_H) / 2))
-  body.scrollTop = target
-  if (typeof UI._renderTableWindow === 'function') UI._renderTableWindow(false)
+  // v3.3.48：虚拟滚动内核接管定位（网格模式下按「行」而不是按曲目序号换算）
+  if (typeof UI !== 'undefined' && UI._vl) {
+    const row = UI.gridMode ? Math.floor(i / Math.max(1, UI._gridCols())) : i
+    UI._vl.scrollToIndex(row, true)
+  } else {
+    scroller.scrollTop = Math.max(0, i * TABLE_ROW_H - Math.max(0, (scroller.clientHeight - TABLE_ROW_H) / 2))
+    UI._renderTableWindow(false)
+  }
   if (typeof toast === 'function') toast('已定位到当前曲目')
 })
 
@@ -440,6 +449,9 @@ function renderView() {
   const isOnline = state.view === 'online'
   const isDaily = state.view === 'daily'
   const isPane = isOnline || isDaily
+  // v3.3.48：本地列表视图整体包在 #viewScroll（唯一滚动容器）里，pane 视图整块让位
+  const vs = document.getElementById('viewScroll')
+  if (vs) vs.hidden = isPane
   document.getElementById('viewHeader').hidden = isPane
   document.getElementById('onlinePane').hidden = !isOnline
   document.getElementById('dailyPane').hidden = !isDaily
@@ -963,13 +975,26 @@ function bindPlaylistUi() {
 
 /** 曲目列表：点选播放 / Ctrl·Shift 多选 / 右键菜单 / 表头排序 / 扫描入口 */
 function bindTrackListUi() {
+  // 列表 / 网格共用同一次点击委托（v3.3.48 卡片视图：行元素是 .mc 不是 .tr）
+  const pickRow = (e) => e.target.closest('.tr, .mc')
   // 列表点击
   document.getElementById('tableBody').addEventListener('click', (e) => {
-    const row = e.target.closest('.tr')
+    const row = pickRow(e)
     if (!row) { clearSelection(); return }
+    // v3.3.48：点行即把焦点交给列表本体 —— 键盘导航只在列表有焦点时接管方向键，
+    // 没焦点时 ↑↓ 仍然是音量（老习惯不破）
+    const tb = document.getElementById('tableBody')
+    if (tb && document.activeElement !== tb) tb.focus({ preventScroll: true })
     const id = row.dataset.id
     const track = state.byId.get(id)
     if (!track) return
+    // 网格卡片的播放浮层：直接播，不切换选中
+    if (e.target.closest('.mc-play')) {
+      e.stopPropagation()
+      clearSelection()
+      playFromVisible(track)
+      return
+    }
     // v2.8.26（追加清单 #7）：行内快捷钮优先于整行播放，复用右键菜单动作管道
     const actBtn = e.target.closest('.row-act')
     if (actBtn) {
@@ -996,12 +1021,22 @@ function bindTrackListUi() {
 
   // 列表右键
   document.getElementById('tableBody').addEventListener('contextmenu', (e) => {
-    const row = e.target.closest('.tr')
+    const row = pickRow(e)
     if (!row) return
     e.preventDefault()
     const track = state.byId.get(row.dataset.id)
     if (track) showTrackMenu(e.clientX, e.clientY, track)
   })
+
+  // v3.3.48：列表 / 卡片视图切换（存 settings.viewMode，默认列表）
+  const viewBtn = document.getElementById('btnViewToggle')
+  if (viewBtn) {
+    viewBtn.addEventListener('click', () => {
+      setViewMode(UI.gridMode ? 'list' : 'grid')
+    })
+  }
+
+  bindListKeyboard()
 
   // 多选工具条（v2.6）：播放 / 收藏 / 加入歌单 / 清除
   document.getElementById('selBar').addEventListener('click', async (e) => {
@@ -1070,6 +1105,187 @@ function bindTrackListUi() {
   document.getElementById('btnEmptyScan').addEventListener('click', doScan)
   document.getElementById('btnScan').addEventListener('click', openDirModal)
 
+}
+
+/* ================= v3.3.48：视图模式 + 列表键盘导航 ================= */
+
+/** 同步表头切换按钮的图标 / 提示 / aria 状态（启动与切换都走这里） */
+function syncViewToggle() {
+  const btn = document.getElementById('btnViewToggle')
+  if (!btn) return
+  const use = btn.querySelector('svg use')
+  if (use) use.setAttribute('href', UI.gridMode ? '#i-list-view' : '#i-grid')
+  btn.title = UI.gridMode ? '切换列表视图' : '切换卡片视图'
+  btn.setAttribute('aria-label', btn.title)
+  btn.setAttribute('aria-pressed', UI.gridMode ? 'true' : 'false')
+  btn.classList.toggle('on', UI.gridMode)
+}
+
+/** 列表 / 卡片网格切换（settings.viewMode，默认 list） */
+function setViewMode(mode, save = true) {
+  const next = mode === 'grid' ? 'grid' : 'list'
+  UI.gridMode = next === 'grid'
+  syncViewToggle()
+  if (state.settings) state.settings.viewMode = next
+  if (save && typeof saveSettings === 'function') saveSettings({ viewMode: next })
+  state.kbIndex = -1
+  const hint = document.getElementById('kbHint')
+  if (hint) hint.hidden = true
+  renderView()
+}
+
+/**
+ * 列表键盘导航（第 2 条）：
+ *   ↑↓ 选行（网格按行）· ←→ 网格内逐卡 · PgUp/PgDn · Home/End ·
+ *   Enter 播放 · Ctrl+Enter 下一首播放 · 空格 暂停 · Esc 退出 · 字母/拼音跳转
+ * 只在「本地列表视图可见 + 没有输入框/模态/全屏页占用」时生效。
+ */
+function bindListKeyboard() {
+  if (document._kbBound) return
+  document._kbBound = true
+  const hint = document.getElementById('kbHint')
+  let typeBuf = ''
+  let typeAt = 0
+  let hintTimer = 0
+
+  const listOk = () => {
+    const vs = document.getElementById('viewScroll')
+    if (!vs || vs.hidden) return false
+    if (document.body.classList.contains('fs-open')) return false
+    for (const id of ['dirModal', 'renameModal', 'diagModal']) {
+      const m = document.getElementById(id)
+      if (m && !m.hidden) return false
+    }
+    return true
+  }
+  const colsOf = () => (UI.gridMode ? Math.max(1, UI._gridCols()) : 1)
+
+  function showHint(text) {
+    if (!hint) return
+    hint.hidden = false
+    hint.textContent = text
+    clearTimeout(hintTimer)
+    hintTimer = setTimeout(() => { hint.hidden = true }, 6000)
+  }
+
+  function paint() {
+    const idx = state.kbIndex
+    if (idx == null || idx < 0) return
+    let hit = null
+    document.querySelectorAll('#tableBody .tr, #tableBody .mc').forEach((el) => {
+      const on = Number(el.dataset.index) === idx
+      el.classList.toggle('kb', on)
+      if (on) hit = el
+    })
+    const scroller = document.getElementById('viewScroll')
+    if (hit && scroller) {
+      const r = hit.getBoundingClientRect()
+      const b = scroller.getBoundingClientRect()
+      const topPad = 44
+      if (r.top < b.top + topPad) scroller.scrollTop -= (b.top + topPad - r.top)
+      else if (r.bottom > b.bottom - 6) scroller.scrollTop += (r.bottom - b.bottom + 6)
+    }
+    const t = state.visible && state.visible[idx]
+    if (t) {
+      showHint(`${idx + 1}/${state.visible.length} · ${t.title} — ↑↓ 选行 · Enter 播放 · Ctrl+Enter 下一首 · 空格 暂停 · Esc 退出`)
+    }
+  }
+
+  function moveTo(idx) {
+    const n = state.visible ? state.visible.length : 0
+    if (!n) return
+    const next = Math.max(0, Math.min(n - 1, idx))
+    state.kbIndex = next
+    const row = Math.floor(next / colsOf())
+    const vl = UI._vl
+    // 行不在当前渲染窗口内才让内核滚动（否则每次移动都居中，整屏跟着抖）
+    if (vl && (row < vl.start || row > vl.end - 1)) {
+      vl.scrollToIndex(row, true)
+      requestAnimationFrame(paint)
+    } else {
+      paint()
+    }
+  }
+
+  function exitKb() {
+    state.kbIndex = -1
+    document.querySelectorAll('#tableBody .kb').forEach((el) => el.classList.remove('kb'))
+    if (hint) hint.hidden = true
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.altKey || e.metaKey) return
+    if (!listOk()) return
+    // v3.3.48：只有焦点在列表本体上时才接管方向键 —— 否则会和全局快捷键
+    // （↑↓ 音量、←→ 快进）打架。点一下列表行 / Tab 进列表即激活。
+    if (document.activeElement !== document.getElementById('tableBody')) return
+    const ae = document.activeElement
+    if (ae && ae !== document.body &&
+      (/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) || ae.isContentEditable)) return
+    const n = state.visible ? state.visible.length : 0
+    if (!n) return
+
+    let idx = state.kbIndex
+    if (idx == null || idx < 0) {
+      const cur = state.visible.findIndex((t) => t.id === state.currentId)
+      idx = cur >= 0 ? cur : 0
+    }
+    const cols = colsOf()
+    const scroller = document.getElementById('viewScroll')
+    const page = Math.max(1, Math.floor((scroller ? scroller.clientHeight : 600) / UI._rowH()) - 1) * cols
+
+    switch (e.key) {
+      case 'ArrowDown': e.preventDefault(); e.stopPropagation(); moveTo(idx + cols); break
+      case 'ArrowUp': e.preventDefault(); e.stopPropagation(); moveTo(idx - cols); break
+      case 'ArrowRight':
+        // 列表模式下不拦 → 交给全局「快进 5 秒」
+        if (UI.gridMode) { e.preventDefault(); e.stopPropagation(); moveTo(idx + 1) }
+        break
+      case 'ArrowLeft':
+        if (UI.gridMode) { e.preventDefault(); e.stopPropagation(); moveTo(idx - 1) }
+        break
+      case 'PageDown': e.preventDefault(); e.stopPropagation(); moveTo(idx + page); break
+      case 'PageUp': e.preventDefault(); e.stopPropagation(); moveTo(idx - page); break
+      case 'Home': e.preventDefault(); e.stopPropagation(); moveTo(0); break
+      case 'End': e.preventDefault(); e.stopPropagation(); moveTo(n - 1); break
+      case 'Enter': {
+        e.preventDefault()
+        e.stopPropagation()
+        const t = state.visible[Math.max(0, Math.min(n - 1, idx))]
+        if (!t) break
+        if (e.ctrlKey) {
+          player.addToQueue(t, { next: true })
+          toast('下一首播放：' + t.title)
+        } else playFromVisible(t)
+        break
+      }
+      case ' ': {
+        // 焦点在按钮上时空格归按钮（否则「播放全部」会被空格连带触发播放/暂停）
+        if (ae && ae.tagName === 'BUTTON') return
+        if (!state.visible[idx]) return
+        e.preventDefault()
+        e.stopPropagation()
+        player.toggle()
+        break
+      }
+      case 'Escape': exitKb(); break
+      default: {
+        if (e.key.length !== 1 || e.ctrlKey) return
+        // 全局单键快捷键（M 静音 / L 收藏）不被 typeahead 抢走
+        if (e.key === 'm' || e.key === 'M' || e.key === 'l' || e.key === 'L') return
+        const now = Date.now()
+        if (now - typeAt > 600) typeBuf = ''
+        typeAt = now
+        typeBuf += e.key.toLowerCase()
+        const q = typeBuf
+        const hit = state.visible.findIndex((t) =>
+          String(t.title || '').toLowerCase().startsWith(q) ||
+          String(t.artist || '').toLowerCase().startsWith(q) ||
+          matchQuery(t, q))
+        if (hit >= 0) { e.stopPropagation(); moveTo(hit) }
+      }
+    }
+  })
 }
 
 /** 歌词面板：显隐、字号、每曲偏移、点行跳转 */
@@ -1390,6 +1606,12 @@ function bindWindowUi() {
 
   // 迷你卡片进度条拖动（与完整播放条同一套逻辑）
   bindProgressBar(document.getElementById('mvBar'))
+
+  // v3.3.48：窗口宽度变化 → 网格列数变化 → 重算 --gcols / 行高并重建窗口
+  window.addEventListener('resize', debounce(() => {
+    if (UI.gridMode) UI.refreshGrid()
+    else UI._renderTableWindow(false)
+  }, 120))
 }
 
 /**

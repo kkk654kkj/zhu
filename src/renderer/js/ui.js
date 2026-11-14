@@ -1,9 +1,11 @@
 'use strict'
 /* 视图渲染层：只负责把状态画到 DOM，不做业务决策 */
 
-/* 虚拟滚动参数：行高必须与 css .tr 的 height 严格一致（52px，v3.4.0 起） */
-const TABLE_ROW_H = 52
-const TABLE_VBUF = 8   // 可视区上下各多渲染 8 行缓冲，滚动时不露白
+/* 虚拟滚动：行高常量 TABLE_ROW_H 与内核 createVList 都在 vlist.js（必须早于本文件加载）。
+   这里不再重复声明 const，否则同一全局作用域二次声明直接 SyntaxError。 */
+
+/** 网格模式下每行的卡片数 / 行高缓存（窗口宽度变化时重算） */
+let _gridCache = { w: -1, cols: 0, rowH: 0 }
 
 const UI = {
   els: {},
@@ -12,8 +14,8 @@ const UI = {
     const ids = [
       'searchInput', 'searchClear', 'btnScan', 'btnLyricToggle', 'btnMin', 'btnMax', 'btnClose',
       'cntAll', 'cntFav', 'cntRecent', 'cntMost', 'cntFolders', 'cntAlbums', 'cntAdded', 'playlistList', 'btnNewPlaylist', 'libStat',
-      'viewHeader', 'vhCover', 'vhTitle', 'vhSub', 'btnPlayAll', 'btnShuffleAll', 'btnPlaylistRemove',
-      'tableHead', 'tableBody', 'emptyState', 'emptyText', 'btnEmptyScan',
+      'viewHeader', 'viewScroll', 'vhCover', 'vhTitle', 'vhSub', 'btnPlayAll', 'btnShuffleAll', 'btnPlaylistRemove',
+      'tableHead', 'tableBody', 'emptyState', 'emptyText', 'btnEmptyScan', 'btnViewToggle', 'kbHint',
       'scanOverlay', 'scanTitle', 'scanBar', 'scanSub',
       'lyricPanel', 'lpCover', 'lpTitle', 'lpArtist', 'lpLyrics', 'lpOffset',
       'btnLyricSmaller', 'btnLyricBigger', 'btnLyricEarlier', 'btnLyricLater',
@@ -100,148 +102,122 @@ const UI = {
     this.els.btnPlaylistRemove.hidden = !showRemove
   },
 
-  /* ---------------- 列表 ---------------- */
+  /* ---------------- 列表 / 网格 ---------------- */
+
+  /** 网格模式开关（由 settings.viewMode 同步，默认 false = 列表） */
+  gridMode: false,
 
   /**
    * @param {Array} tracks 已排序过滤后的列表
    * @param {object} ctx {currentId, playing, favorites, playCounts, showCounts, sortKey, sortDir, selected}
    */
   renderTable(tracks, ctx) {
-    const body = this.els.tableBody
+    const host = this.els.tableBody
     this._tTracks = tracks
     this._tCtx = ctx || {}
     this._tCurrentId = this._tCtx.currentId || null
+    host.classList.toggle('grid-mode', !!this.gridMode)
     if (!tracks.length) {
-      body.innerHTML = ''
+      if (this._vl) { this._vl.destroy(); this._vl = null }
+      host.innerHTML = ''
       this._tStart = -1
       this._tEnd = -1
       return
     }
-    // v3.3.22：虚拟滚动。曲库上千首时一次性拼 n 行 HTML 仍会让 DOM 节点数破万、
-    // 切视图/搜索掉帧。改为只渲染可视区 ± 缓冲行，上下用占位 div 撑住总高度；
-    // 滚动时 rAF 节流重画窗口。行高固定 40px（css .tr），事件委托（click/contextmenu/
-    // dragstart 都挂在 tableBody 上）与 data-index 语义不变。
-    if (!this._tScrollBound) {
-      this._tScrollBound = true
-      let raf = 0
-      body.addEventListener('scroll', () => {
-        if (raf) return
-        raf = requestAnimationFrame(() => {
-          raf = 0
-          this._renderTableWindow(false)
-        })
+    this._syncGridVars()
+    const scroller = this.els.viewScroll
+    // 虚拟滚动内核（vlist.js）：列表与网格共用一套，行高/行数由回调给
+    if (!this._vl && scroller) {
+      this._vl = createVList({
+        scroller,
+        host,
+        count: () => this._rowCount(),
+        rowH: () => this._rowH(),
+        renderRow: (i) => this._rowRender(i)
       })
-      // 窗口最大化/还原、面板显隐会改 tableBody 高度；不重算可视窗口会露出空白占位
-      if (typeof ResizeObserver === 'function' && !this._tResizeBound) {
-        this._tResizeBound = true
-        let raf2 = 0
-        // 帧率轮：容器高度缓存起来，滚动帧不再读 clientHeight。
-        // 必须缓存 clientHeight（滚动容器的可视高度），不能改用 RO 的内容矩形高度：
-        // 后者在未布局/隐藏窗口下会反映全部内容的总高，让虚拟窗口退化成全量渲染。
-        this._tViewH = Math.max(1, body.clientHeight || 600)
-        new ResizeObserver(() => {
-          this._tViewH = Math.max(1, body.clientHeight || 600)
-          if (raf2) return
-          raf2 = requestAnimationFrame(() => {
-            raf2 = 0
-            this._renderTableWindow(false)
-          })
-        }).observe(body)
-      }
     }
     // 与旧实现（innerHTML 重建后浏览器自动回顶）行为一致：切视图/排序/搜索回顶部
-    if (body.scrollTop) body.scrollTop = 0
-    this._tStart = -1
-    this._tEnd = -1
-    this._renderTableWindow(true)
+    if (scroller && scroller.scrollTop) scroller.scrollTop = 0
+    if (this._vl) this._vl.reset()
+    this._markSortHeader(this._tCtx.sortKey, this._tCtx.sortDir)
   },
 
-  /** 只重画可视窗口；内容总高不变，scrollTop 由占位 div 维持 */
+  /** 虚拟化的「行」数：列表 = 曲目数；网格 = ceil(曲目数 / 每行列数) */
+  _rowCount() {
+    const n = this._tTracks ? this._tTracks.length : 0
+    if (!this.gridMode) return n
+    return Math.ceil(n / this._gridCols())
+  },
+
+  /** 网格可用宽度：扣掉 .grid-mode 的左右各 32px 内边距 */
+  _gridWidth() {
+    const host = this.els.tableBody
+    const w = (host ? host.clientWidth : 0) - 64
+    return w > 120 ? w : 600
+  },
+
+  _gridCols() {
+    const w = this._gridWidth()
+    if (_gridCache.w === w && _gridCache.cols) return _gridCache.cols
+    _gridCache = { w, cols: gridCols(w), rowH: 0 }
+    return _gridCache.cols
+  },
+
+  _rowH() {
+    if (!this.gridMode) return TABLE_ROW_H
+    const w = this._gridWidth()
+    if (_gridCache.w === w && _gridCache.rowH) return _gridCache.rowH
+    _gridCache = { w, cols: gridCols(w), rowH: gridRowHeight(w) }
+    return _gridCache.rowH
+  },
+
+  /** 把列数 / 间距 / 行高写进 CSS 变量，保证 DOM 高度与内核算的行高完全一致 */
+  _syncGridVars() {
+    const host = this.els.tableBody
+    if (!host || !this.gridMode) return
+    host.style.setProperty('--gcols', String(this._gridCols()))
+    host.style.setProperty('--ggap', GRID_GAP + 'px')
+    host.style.setProperty('--growh', this._rowH() + 'px')
+  },
+
+  /** 窗口尺寸变化后网格列数可能变 → 重算变量并重建（由 app.js 的 resize 钩子调用） */
+  refreshGrid() {
+    if (!this.gridMode || !this._tTracks || !this._tTracks.length) return
+    _gridCache = { w: -1, cols: 0, rowH: 0 }
+    this._syncGridVars()
+    if (this._vl) this._vl.reset()
+  },
+
+  _rowRender(i) {
+    return this.gridMode ? this._gridRowHtml(i) : this._rowHtml(i)
+  },
+
+  /** 网格一行（内含 cols 张卡片）；行号 → 曲目索引 = row*cols + j */
+  _gridRowHtml(row) {
+    const ctx = this._tCtx || {}
+    const tracks = this._tTracks || []
+    const cols = this._gridCols()
+    const curId = this._tCurrentId != null ? this._tCurrentId : ctx.currentId
+    const cells = []
+    for (let j = 0; j < cols; j++) {
+      const idx = row * cols + j
+      const t = tracks[idx]
+      if (!t) { cells.push('<div class="mc empty" aria-hidden="true"></div>'); continue }
+      const isCur = t.id === curId
+      const isSel = ctx.selected && ctx.selected.has(t.id)
+      const eq = isCur ? '<span class="eq-bars"><i></i><i></i><i></i></span>' : ''
+      cells.push(`<div class="mc${isCur ? ' playing' : ''}${isSel ? ' selected' : ''}" data-id="${esc(t.id)}" data-index="${idx}" title="${esc(t.title)}${t.artist ? ' — ' + esc(t.artist) : ''}">
+        <div class="mc-cv">${t.cover ? `<img src="${esc(t.cover)}" decoding="async" draggable="false" alt="" />` : icon('music')}<span class="mc-play">${icon('play')}</span></div>
+        <div class="mc-name">${eq}${esc(t.title)}</div>
+        <div class="mc-sub">${esc(t.artist || '未知歌手')}</div>
+      </div>`)
+    }
+    return `<div class="grid-row" data-row="${row}">${cells.join('')}</div>`
+  },
+
+  /** 兼容旧调用点（switchView 恢复滚动位置 / uix:locate）：转给内核 */
   _renderTableWindow(force) {
-    const body = this.els.tableBody
-    const tracks = this._tTracks
-    if (!tracks || !tracks.length) return
-    const n = tracks.length
-    /* 帧率轮：容器高度由 ResizeObserver 缓存。上一帧刚写过占位 div 的
-       style.height，滚动帧再读 clientHeight 会强制同步布局；有 RO 时改读缓存，
-       无 RO 的兜底路径保持原样。scrollTop 同帧只读一次。 */
-    const viewH = this._tResizeBound
-      ? (this._tViewH || (this._tViewH = body.clientHeight || 600))
-      : (body.clientHeight || 600)
-    const scrollTop = body.scrollTop
-    const start = Math.max(0, Math.floor(scrollTop / TABLE_ROW_H) - TABLE_VBUF)
-    const end = Math.min(n, Math.ceil((scrollTop + viewH) / TABLE_ROW_H) + TABLE_VBUF)
-    const oldStart = this._tStart
-    const oldEnd = this._tEnd
-    // 首帧 / 强制（切视图·排序·搜索·收藏变化）→ 整块重建，上下带占位块
-    if (force || oldStart < 0 || oldEnd <= oldStart) {
-      this._tStart = start
-      this._tEnd = end
-      const rows = []
-      for (let i = start; i < end; i++) rows.push(this._rowHtml(i))
-      // 占位 div 不带 class，closest('.tr') 查不到，点空白走原有 clearSelection 分支
-      body.innerHTML =
-        `<div data-sp="top" style="height:${start * TABLE_ROW_H}px"></div>` +
-        rows.join('') +
-        `<div data-sp="bottom" style="height:${(n - end) * TABLE_ROW_H}px"></div>`
-      this._markSortHeader(this._tCtx.sortKey, this._tCtx.sortDir)
-      return
-    }
-    if (start === oldStart && end === oldEnd) return
-    /* 滚动条大幅跳跃：新旧窗口完全不重叠时，仍然是删旧行 + 补新行，
-       不回退到整块 innerHTML 重建（守 §2 不变量 #5，避免封面 <img> 被销毁） */
-    if (start >= oldEnd || end <= oldStart) {
-      const jumpTop = body.firstElementChild
-      const jumpBot = body.lastElementChild
-      if (!jumpTop || !jumpBot || jumpTop.dataset.sp !== 'top' || jumpBot.dataset.sp !== 'bottom') {
-        this._tStart = -1
-        this._renderTableWindow(true)
-        return
-      }
-      let html = ''
-      for (let i = start; i < end; i++) html += this._rowHtml(i)
-      let row = jumpTop.nextElementSibling
-      while (row && row !== jumpBot) {
-        const next = row.nextElementSibling
-        row.remove()
-        row = next
-      }
-      jumpBot.insertAdjacentHTML('beforebegin', html)
-      jumpTop.style.height = `${start * TABLE_ROW_H}px`
-      jumpBot.style.height = `${(n - end) * TABLE_ROW_H}px`
-      this._tStart = start
-      this._tEnd = end
-      this._markSortHeader(this._tCtx.sortKey, this._tCtx.sortDir)
-      return
-    }
-    /* v2.8.27 / v3.3.28：滚动改成「头尾增删」，不再整块 innerHTML 重建。
-       以前每滚 40px 就把可视区 20+ 行全销毁重建：行内封面 <img> 要重新请求 +
-       重新解码（lxcover 协议原来还是 no-store），表现就是滚动时整屏封面闪。
-       现在留在视口里的行连节点都不动，图片自然不闪，顺带省掉每帧的合成层重建。 */
-    const topSp = body.firstElementChild
-    const botSp = body.lastElementChild
-    if (!topSp || !botSp || topSp.dataset.sp !== 'top' || botSp.dataset.sp !== 'bottom') {
-      this._tStart = -1
-      this._renderTableWindow(true)
-      return
-    }
-    // 先删多余行，再补新行（topSp 之后是首行，botSp 之前是末行）
-    for (let i = oldStart; i < start; i++) body.children[1].remove()
-    for (let i = end; i < oldEnd; i++) botSp.previousElementSibling.remove()
-    if (start < oldStart) {
-      let html = ''
-      for (let i = start; i < oldStart; i++) html += this._rowHtml(i)
-      topSp.insertAdjacentHTML('afterend', html)
-    }
-    if (end > oldEnd) {
-      let html = ''
-      for (let i = oldEnd; i < end; i++) html += this._rowHtml(i)
-      botSp.insertAdjacentHTML('beforebegin', html)
-    }
-    topSp.style.height = `${start * TABLE_ROW_H}px`
-    botSp.style.height = `${(n - end) * TABLE_ROW_H}px`
-    this._tStart = start
-    this._tEnd = end
+    if (this._vl) this._vl.update(!!force)
   },
 
   /** 单行 HTML：整块重建与增量更新共用，避免两套模板走偏 */
@@ -281,24 +257,24 @@ const UI = {
   },
 
   _markSortHeader(key, dir) {
+    const label = { artist: '歌手', album: '专辑', quality: '规格', duration: '时长' }
     $$('#tableHead [data-sort]').forEach((el) => {
-      el.textContent = {
-        artist: '歌手', album: '专辑', quality: '规格', duration: '时长'
-      }[el.dataset.sort] || el.dataset.sort
-      if (el.dataset.sort === key) {
-        el.textContent += dir === 'asc' ? ' ↑' : ' ↓'
-        el.style.color = 'var(--accent)'
-      } else {
-        el.style.color = ''
-      }
+      const k = el.dataset.sort
+      el.textContent = label[k] || k
+      const on = k === key
+      if (on) el.textContent += dir === 'asc' ? ' ↑' : ' ↓'
+      el.classList.toggle('sorted', on)
+      // 9. WCAG：排序列的状态要给屏幕阅读器，不能只靠颜色
+      el.setAttribute('aria-sort', on ? (dir === 'asc' ? 'ascending' : 'descending') : 'none')
+      el.style.color = ''
     })
   },
 
   setRowPlaying(id, playing) {
-    // v3.3.22：虚拟滚动后可视窗口重画需要最新的当前曲 id（ctx 里的会过时）
+    // 虚拟滚动后可视窗口重画需要最新的当前曲 id（ctx 里的会过时）
     if (playing) this._tCurrentId = id
     else if (this._tCurrentId === id) this._tCurrentId = null
-    $$('#tableBody .tr').forEach((el) => {
+    $$('#tableBody .tr, #tableBody .mc').forEach((el) => {
       el.classList.toggle('playing', el.dataset.id === id)
     })
   },
@@ -463,7 +439,7 @@ const UI = {
       this._setIcon(this.els.fsPlay, name)
       this.els.fsPlay.title = title
     }
-    document.querySelectorAll('#tableBody .tr.playing')
+    document.querySelectorAll('#tableBody .tr.playing, #tableBody .mc.playing')
       .forEach((el) => el.classList.toggle('paused', !playing))
     // v3.3.29：播放态给 body 一个标记，封面轻 pulse / 唱片旋转都跟着暂停
     document.body.classList.toggle('uix-playing', !!playing)
@@ -696,7 +672,7 @@ const UI = {
 
   /* ---------------- 歌词 ---------------- */
 
-  lyricState: { lines: [], plain: false, index: -2 },
+  lyricState: { lines: [], plain: false, index: -2, wordsActive: false },
 
   renderLyric(parsed, trackTitle) {
     const box = this.els.lpLyrics
@@ -705,6 +681,7 @@ const UI = {
     this.lyricState.plain = !!(parsed && parsed.plain)
     this.lyricState.index = -2
     this.lyricState.fsIndex = -2
+    this.lyricState.wordsActive = false
     this.els.mvLyric.textContent = ''
     if (!parsed || !parsed.lines.length) {
       box.innerHTML = '<div class="lyric-empty">暂无歌词</div>'
@@ -715,8 +692,10 @@ const UI = {
     // 普通整句行保持原样（降级路径，样式不变）
     box.innerHTML = parsed.lines.map((l, i) => {
       if (l.words && l.words.length) {
+        // v3.3.48：每词带一份 data-t 文本，CSS 的 ::after 用它铺「已唱」的彩色层，
+        // --rest 控制裁剪比例 → 词内平滑填色（原来只有整词瞬间变色）
         return `<div class="lyric-line${this.lyricState.plain ? ' plain' : ''}" data-i="${i}">` +
-          l.words.map((w) => `<span class="kw">${esc(w.text)}</span>`).join('') +
+          l.words.map((w) => `<span class="kw" data-t="${esc(w.text)}">${esc(w.text)}</span>`).join('') +
           `</div>`
       }
       return `<div class="lyric-line${this.lyricState.plain ? ' plain' : ''}" data-i="${i}">${esc(l.text || '♪')}</div>`
@@ -731,18 +710,52 @@ const UI = {
     }
   },
 
-  /** 活动行逐字染色：同一句内 curSec 持续推进，行号不变也要刷新词级高亮 */
+  /**
+   * 活动行逐词填色（v3.3.48）。
+   * 每个词算「词内进度 p = (cur - t) / (next.t - t)」，写 --rest = (1-p)*100%。
+   * 已唱完的词直接把 --rest 钉成 0%（并加 .done 兜底），避免每帧重复写同一个值。
+   * timeupdate 只有 ~4Hz，词内推进靠 _ensureWordLoop 的 rAF 循环，暂停/无关行自动停。
+   */
   _paintLyricWords(st, idx, curSec) {
-    if (idx < 0) return
-    const node = this.els.lpLyrics.children[idx]
-    if (!node) return
-    const words = st.lines[idx] && st.lines[idx].words
-    if (!words || !words.length) return
+    const node = idx >= 0 ? this.els.lpLyrics.children[idx] : null
+    const words = node && st.lines[idx] ? st.lines[idx].words : null
+    if (!node || !words || !words.length) { st.wordsActive = false; return }
+    st.wordsActive = true
     const kws = node.querySelectorAll('.kw')
+    const nextLineT = st.lines[idx + 1] && st.lines[idx + 1].t != null ? st.lines[idx + 1].t : null
     for (let i = 0; i < kws.length; i++) {
-      if (!words[i]) break
-      kws[i].classList.toggle('done', curSec >= words[i].t)
+      const w = words[i]
+      if (!w) break
+      const el = kws[i]
+      const wEnd = w.e != null ? w.e : (words[i + 1] ? words[i + 1].t : (nextLineT != null ? nextLineT : w.t + 1.2))
+      const span = Math.max(0.08, wEnd - w.t)
+      let p = (curSec - w.t) / span
+      if (p >= 1) {
+        if (!el.classList.contains('done')) el.classList.add('done')
+        if (el.style.getPropertyValue('--rest') !== '0%') el.style.setProperty('--rest', '0%')
+      } else {
+        if (el.classList.contains('done')) el.classList.remove('done')
+        el.style.setProperty('--rest', ((1 - Math.max(0, p)) * 100).toFixed(1) + '%')
+      }
     }
+  },
+
+  /** 逐词推进的 rAF 循环：只在「当前行有逐词数据 + 正在播放」时跑，否则自然熄火 */
+  _wordRaf: 0,
+  _ensureWordLoop() {
+    if (this._wordRaf) return
+    const st = this.lyricState
+    if (!st.wordsActive) return
+    const step = () => {
+      this._wordRaf = 0
+      if (!st.wordsActive || st.index < 0) return
+      if (!document.body.classList.contains('uix-playing')) return
+      if (typeof audio === 'undefined' || !audio || typeof audio.currentTime !== 'number') return
+      const off = (typeof state !== 'undefined' && state && state.lyricOffset) ? state.lyricOffset : 0
+      this._paintLyricWords(st, st.index, audio.currentTime + off)
+      this._wordRaf = requestAnimationFrame(step)
+    }
+    this._wordRaf = requestAnimationFrame(step)
   },
 
   updateLyricIndex(curSec) {
@@ -751,6 +764,7 @@ const UI = {
     const idx = findLineIndex(st.lines, curSec)
     if (idx === st.index) {
       this._paintLyricWords(st, idx, curSec)
+      this._ensureWordLoop()
       return
     }
     const prevIdx = st.index
@@ -763,6 +777,7 @@ const UI = {
     if (idx >= 0 && nodes[idx]) nodes[idx].classList.add('active')
     // v3.3.27（追加清单 #2）：逐字行词级染色；curSec 已含歌词偏移，与行时间轴同源
     this._paintLyricWords(st, idx, curSec)
+    this._ensureWordLoop()
     // 迷你卡片只显示当前一句（没到第一句时留空，CSS 会隐藏这一行）
     const cur = idx >= 0 && st.lines[idx] ? st.lines[idx].text : ''
     if (this.els.mvLyric.textContent !== cur) this.els.mvLyric.textContent = cur
@@ -854,10 +869,31 @@ const UI = {
       </div>`).join('')
   },
 
+  /**
+   * 队列侧栏（v3.3.48）：从右下 288×420 浮窗改成右侧滑出 400px 侧栏。
+   * hidden 会 display:none 把过渡掐掉，所以走「先取消 hidden → 下一帧加 .show」两段式；
+   * 关闭时先摘 .show，等过渡结束再加 hidden。
+   */
   toggleQueue(show) {
     const el = this.els.queuePanel
-    const next = show == null ? el.hidden : show
-    el.hidden = !next
+    if (!el) return
+    const next = show == null ? !el.classList.contains('show') : !!show
+    if (el._qTimer) { clearTimeout(el._qTimer); el._qTimer = null }
+    const setAria = (v) => { if (typeof el.setAttribute === 'function') el.setAttribute('aria-hidden', v) }
+    if (next) {
+      el.hidden = false
+      // 强制一次样式计算，保证 transform 起点生效（否则第一帧就跳到终点，没有滑入）
+      void el.offsetWidth
+      el.classList.add('show')
+      setAria('false')
+    } else {
+      el.classList.remove('show')
+      setAria('true')
+      el._qTimer = setTimeout(() => {
+        el._qTimer = null
+        if (!el.classList.contains('show')) el.hidden = true
+      }, 240)
+    }
   },
 
   /* ---------------- 文件夹网格（v1.7） ---------------- */
@@ -871,8 +907,10 @@ const UI = {
    */
   _renderCardGrid(cards, dataKey, onClick) {
     const body = this.els.tableBody
-    // v3.3.32：网格视图不走 renderTable，但 tableBody 的 scroll 监听是永久绑定的。
-    // 不清掉虚拟滚动状态，滚动一帧就会拿上一次列表把网格整块重画成歌曲行。
+    // v3.3.32：专辑/文件夹网格不走 renderTable，但滚动监听在 vlist 内核里是常驻的。
+    // 不解绑，滚一帧就会拿上一次列表把网格整块重画成歌曲行。
+    if (this._vl) { this._vl.destroy(); this._vl = null }
+    body.classList.remove('grid-mode')
     this._tTracks = []
     this._tStart = -1
     this._tEnd = -1

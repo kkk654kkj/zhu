@@ -705,11 +705,75 @@ const kg = {
       + `&duration=&hash=${encode(song.id)}`, opts)
     const cand = search && search.candidates && search.candidates[0]
     if (!cand) return null
+    // v3.3.48（逐词歌词）：先要 krc（含逐字时间轴），解不出来再回退整行 lrc。
+    // krc 是酷狗自家的容器格式（base64 + 固定 XOR），解失败一律静默降级，
+    // 不能让「想要的更多」把「原本能拿到的整行歌词」弄丢。
+    const kr = await reqJson(`https://lyrics.kugou.com/download?ver=1&client=pc&id=${encode(cand.id)}`
+      + `&accesskey=${encode(cand.accesskey)}&fmt=krc&charset=utf8`, opts).catch(() => null)
+    if (kr && kr.content) {
+      const enhanced = krcToEnhancedLrc(Buffer.from(kr.content, 'base64'))
+      if (enhanced) return enhanced
+    }
     const dl = await reqJson(`https://lyrics.kugou.com/download?ver=1&client=pc&id=${encode(cand.id)}`
       + `&accesskey=${encode(cand.accesskey)}&fmt=lrc&charset=utf8`, opts)
     if (!dl || !dl.content) return null
     const txt = Buffer.from(dl.content, 'base64').toString('utf8')
     return /\[\d{1,3}:/.test(txt) ? txt : null
+  }
+}
+
+/* ---------------- 酷狗 krc → 增强 LRC（逐词） ---------------- */
+
+/** 酷狗 krc 的固定 XOR 密钥（16 字节）；前 4 字节是 'krc1' 头 */
+const KRC_KEY = [0x40, 0x47, 0x61, 0x77, 0x5e, 0x32, 0x74, 0x47, 0x51, 0x36, 0x31, 0x2d, 0x64, 0x00, 0x00, 0x00]
+
+const msStamp = (ms) => {
+  const v = Math.max(0, Math.round(Number(ms) || 0))
+  const m = Math.floor(v / 60000)
+  const s = Math.floor((v % 60000) / 1000)
+  const f = v % 1000
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') + '.' + String(f).padStart(3, '0')
+}
+
+/**
+ * krc 文本 → 增强 LRC（<mm:ss.xxx> 词级时间戳，lyric.js 已经能解析）。
+ * 行格式：[行起点ms,行时长ms]<词偏移ms,词时长ms,0>词…
+ * 少于 2 个词的行走整句降级（和本地解析口径一致）。
+ */
+function krcToEnhancedLrc(buf) {
+  try {
+    if (!buf || buf.length < 8) return null
+    if (buf.slice(0, 4).toString('ascii') !== 'krc1') return null
+    const body = Buffer.alloc(buf.length - 4)
+    for (let i = 4; i < buf.length; i++) body[i - 4] = buf[i] ^ KRC_KEY[(i - 4) % 16]
+    const text = body.toString('utf8')
+    const out = []
+    for (const row of text.split(/\r?\n/)) {
+      const m = /^\[(\d+),(\d+)\]([\s\S]*)$/.exec(row.trim())
+      if (!m) continue
+      const lineStart = Number(m[1])
+      const content = m[3]
+      const re = /<(\d+),(\d+),\d+>([^<]*)/g
+      let w
+      let built = ''
+      let n = 0
+      while ((w = re.exec(content))) {
+        const txt = w[3]
+        if (!txt) continue
+        built += '<' + msStamp(lineStart + Number(w[1])) + '>' + txt
+        n++
+      }
+      if (n >= 2) {
+        out.push('[' + msStamp(lineStart) + ']' + built)
+      } else {
+        const plain = content.replace(/<[^>]*>/g, '').trim()
+        if (plain) out.push('[' + msStamp(lineStart) + ']' + plain)
+      }
+    }
+    if (out.length < 2) return null
+    return out.join('\n')
+  } catch {
+    return null
   }
 }
 

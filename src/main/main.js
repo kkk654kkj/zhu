@@ -269,7 +269,10 @@ const DEFAULT_SETTINGS = {
   lyricOffset: 0,
   lyricOffsetById: {},         // 每曲歌词偏移（v1.7）：{ trackId: 秒 }，优先于 lyricOffset
   theme: 'dark',
-  accent: '#31c27c',
+  // v2.8.40 / v3.3.48：主题色默认改成「跟随封面」（tonal palette 默认开，可关回固定色）
+  accent: 'auto',
+  accentAutoMigrated: false,   // 一次性迁移标记：老的裸色值 #31c27c → auto
+  viewMode: 'list',            // v3.3.48：主列表形态 list | grid
   showLyricPanel: true,
   autoScanOnStart: false,
   watchFolders: true,          // 监视音乐文件夹变化并自动增量扫描（v1.7）
@@ -1974,13 +1977,20 @@ function registerSystemIpc() {
   // 渲染层 canvas 取色会被 CSP / 跨域污染卡住，这里用 nativeImage 在主进程做：
   // 封面缓冲本来就按专辑缓存在 library 里（getCover），命中时零磁盘 IO。
   const accentCache = new Map()   // trackId -> '#rrggbb'
-  ipcMain.handle('ui:accentForTrack', async (e, trackId) => {
+  ipcMain.handle('ui:accentForTrack', async (e, trackId, coverUrl) => {
     try {
       if (!trackId || typeof trackId !== 'string') return null
       if (accentCache.has(trackId)) return accentCache.get(trackId)
+      let buf = null
       const cov = G.library ? await G.library.getCover(trackId) : null
-      if (!cov || !cov.buf || !cov.buf.length) return null
-      const img = nativeImage.createFromBuffer(cov.buf)
+      if (cov && cov.buf && cov.buf.length) buf = cov.buf
+      // v3.3.48：在线曲不在本地曲库里，取不到内嵌封面 —— 按 https 地址拉一次
+      // （限 512KB / 8 秒，失败静默，渲染层保持上一个颜色，不闪烁）
+      if (!buf && coverUrl && /^https:\/\//i.test(String(coverUrl))) {
+        buf = await fetchCoverBuffer(String(coverUrl))
+      }
+      if (!buf || !buf.length) return null
+      const img = nativeImage.createFromBuffer(buf)
       if (img.isEmpty()) return null
       const hex = accentFromImage(img)
       if (hex) {
@@ -1993,6 +2003,44 @@ function registerSystemIpc() {
     }
   })
 
+}
+
+/**
+ * v3.3.48：「跟随封面」对在线曲也生效 —— 按封面 https 地址拉一次缓冲。
+ * 限 512KB / 8 秒，任何失败都返回 null（纯装饰，不能拖慢播放）。
+ */
+function fetchCoverBuffer(url) {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (v) => { if (!done) { done = true; resolve(v) } }
+    let timer = null
+    try {
+      const req = net.request({ method: 'GET', url })
+      timer = setTimeout(() => { try { req.abort() } catch { /* 已结束 */ } finish(null) }, 8000)
+      const chunks = []
+      let size = 0
+      req.on('response', (res) => {
+        if (res.statusCode !== 200) { clearTimeout(timer); finish(null); return }
+        res.on('data', (d) => {
+          size += d.length
+          if (size > 512 * 1024) {
+            clearTimeout(timer)
+            try { req.abort() } catch { /* 已结束 */ }
+            finish(null)
+            return
+          }
+          chunks.push(d)
+        })
+        res.on('end', () => { clearTimeout(timer); finish(Buffer.concat(chunks)) })
+        res.on('error', () => { clearTimeout(timer); finish(null) })
+      })
+      req.on('error', () => { clearTimeout(timer); finish(null) })
+      req.end()
+    } catch {
+      if (timer) clearTimeout(timer)
+      finish(null)
+    }
+  })
 }
 
 /**
@@ -2596,6 +2644,20 @@ if (gotLock) cleanChromiumCache().catch(() => {})
         const q = st1.onlineQuality === '128k' ? '128k' : 'master'
         store.patch({ settings: { ...st1, onlineQuality: q, onlineQualityMasterMigrated: true } })
         logLine('[settings] 音质迁移到', q)
+      }
+    }
+
+    // v2.8.40 / v3.3.48：主题色一次性迁到「跟随封面」。
+    // 老版本默认是裸色值 #31c27c，用户从没改过的话应跟着新默认走；
+    // 自己选过预设（green/cyan/purple/orange/ocean）的保持原样，不硬改。
+    {
+      const st0 = store.get().settings
+      if (!st0.accentAutoMigrated) {
+        const legacy = String(st0.accent || '').toLowerCase()
+        const patch = { accentAutoMigrated: true }
+        if (!legacy || legacy === '#31c27c') patch.accent = 'auto'
+        store.patch({ settings: { ...st0, ...patch } })
+        logLine('[settings] 主题色迁移 →', patch.accent || st0.accent)
       }
     }
 

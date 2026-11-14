@@ -48,14 +48,99 @@ const Theme = (() => {
     return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 }
   }
 
-  /** 把一个 hex 写进三个主题变量（--accent 由 audiofx 频谱等直接消费） */
-  function applyVars(hex) {
+  /* ---------------- v3.3.48：tonal palette（OKLCH 保色相派生） ----------------
+     封面主色直接拿来当 UI 强调色有两个坑：暗封面（黑胶、暗调照片）取出来的
+     主色会把按钮/进度条压成一片黑，浅色封面又会糊在白底上。这里用 OKLCH 只调
+     明度 L 与彩度 C，色相 h 原样保留 —— 「跟随封面」听起来还是那张封面的颜色，
+     但一定落在可读区间里。派生后的 6 档表面色交给 css 的 color-mix 消费。 */
+
+  function srgbToLinear(c) {
+    const v = c / 255
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+  }
+  function linearToSrgb8(v) {
+    const c = v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055
+    return Math.max(0, Math.min(255, Math.round(c * 255)))
+  }
+  function rgbToOklab(rgb) {
+    const R = srgbToLinear(rgb.r)
+    const G = srgbToLinear(rgb.g)
+    const B = srgbToLinear(rgb.b)
+    const l = Math.cbrt(0.4122214708 * R + 0.5363325363 * G + 0.0514459929 * B)
+    const m = Math.cbrt(0.2119034982 * R + 0.6806995451 * G + 0.1073969566 * B)
+    const s = Math.cbrt(0.0883024619 * R + 0.2817188376 * G + 0.6299787005 * B)
+    return {
+      L: 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+      a: 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+      b: 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+    }
+  }
+  function oklabToRgb(lab) {
+    const l_ = lab.L + 0.3963377774 * lab.a + 0.2158037573 * lab.b
+    const m_ = lab.L - 0.1055613458 * lab.a - 0.0638541728 * lab.b
+    const s_ = lab.L - 0.0894841775 * lab.a - 1.2914855480 * lab.b
+    const l = l_ * l_ * l_
+    const m = m_ * m_ * m_
+    const s = s_ * s_ * s_
+    return {
+      r: linearToSrgb8(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+      g: linearToSrgb8(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+      b: linearToSrgb8(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s)
+    }
+  }
+  const toHex = (rgb) => '#' + [rgb.r, rgb.g, rgb.b]
+    .map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('')
+
+  /** 相对亮度（WCAG）：用来决定强调色上面压黑字还是白字 */
+  function luminance(rgb) {
+    return 0.2126 * srgbToLinear(rgb.r) + 0.7152 * srgbToLinear(rgb.g) + 0.0722 * srgbToLinear(rgb.b)
+  }
+
+  /**
+   * 把任意主色规范到「能当 UI 强调色」的区间。
+   * 深色主题要亮一点（否则压在 #12151a 上看不见），浅色主题要暗一点。
+   */
+  function normalize(hex) {
     const rgb = hexToRgb(hex)
-    if (!rgb) return false
+    if (!rgb) return null
+    const lab = rgbToOklab(rgb)
+    const C0 = Math.sqrt(lab.a * lab.a + lab.b * lab.b)
+    const h = Math.atan2(lab.b, lab.a)
+    const light = document.documentElement.getAttribute('data-theme') === 'light'
+    // 深色底：L 0.64~0.88；浅色底：L 0.44~0.62。彩度保留但夹上下限，
+    // 免得灰封面（C≈0）选出来像没上色、荧光封面（C>0.2）刺眼
+    let L = light
+      ? Math.min(0.62, Math.max(0.44, lab.L))
+      : Math.min(0.88, Math.max(0.64, lab.L))
+    const C = Math.min(0.20, Math.max(C0 < 0.02 ? 0.04 : C0, 0.05))
+    const out = oklabToRgb({ L, a: Math.cos(h) * C, b: Math.sin(h) * C })
+    return out
+  }
+
+  /** 强调色上的文字色：按 WCAG 对比度二选一，不再写死「22% 黑」 */
+  function inkFor(rgb) {
+    const L = luminance(rgb)
+    // 0.36 是黑白字切换的经验分界（深色主题的亮 accent 用近黑字，浅色主题的暗 accent 用白字）
+    return L > 0.36 ? '#0b0e13' : '#ffffff'
+  }
+
+  /** 把一个 hex 写进主题变量（--accent 由音频频谱等直接消费）
+   *  keep=true 时不规范化：用户手选的预设色就是他想要的那个色，别替他改。 */
+  function applyVars(hex, keep) {
+    const raw = hexToRgb(hex)
+    if (!raw) return false
+    const tone = keep ? raw : (normalize(hex) || raw)
+    const norm = toHex(tone)
+    const rgb = hexToRgb(norm)
     const root = document.documentElement.style
-    root.setProperty('--accent', hex)
-    root.setProperty('--accent-soft', `rgba(${rgb.r},${rgb.g},${rgb.b},0.13)`)
-    root.setProperty('--accent-dim', `rgba(${rgb.r},${rgb.g},${rgb.b},0.72)`)
+    root.setProperty('--accent', norm)
+    root.setProperty('--accent-soft', `rgba(${rgb.r},${rgb.g},${rgb.b},0.14)`)
+    root.setProperty('--accent-dim', toHex(oklabToRgb({
+      L: Math.max(0.28, rgbToOklab(rgb).L * 0.72),
+      a: rgbToOklab(rgb).a * 0.85,
+      b: rgbToOklab(rgb).b * 0.85
+    })))
+    root.setProperty('--on-accent', inkFor(rgb))
     return true
   }
 
@@ -74,15 +159,15 @@ const Theme = (() => {
    * @param {boolean} save true=写回设置（用户主动选择）；启动应用存量设置时传 false
    */
   function apply(key, save = true) {
-    if (key && key[0] === '#') { applyVars(key); return }   // 兼容旧裸色值
+    if (key && key[0] === '#') { applyVars(key, true); return }   // 兼容旧裸色值
     const p = PRESETS.find((x) => x.key === key) || PRESETS[0]
     if (p.key === 'auto') {
       const t = currentTrack()
       const hex = t ? coverAccent.get(t.id) : null
       // 没有封面色时先落默认绿，onTrack 拿到颜色后会再刷一次
-      applyVars(hex || PRESETS[0].hex)
+      applyVars(hex || PRESETS[0].hex, !hex)
     } else {
-      applyVars(p.hex)
+      applyVars(p.hex, true)
     }
     if (save && state && state.settings) {
       state.settings.accent = p.key
@@ -96,7 +181,7 @@ const Theme = (() => {
     if (coverAccent.has(track.id)) { applyVars(coverAccent.get(track.id)); return }
     if (!window.api || !window.api.accentForTrack) return
     try {
-      const hex = await window.api.accentForTrack(track.id)
+      const hex = await window.api.accentForTrack(track.id, track.cover || '')
       if (!hex) return   // 本地无内嵌封面 / 在线曲：保持现状色
       if (coverAccent.size > 500) coverAccent.clear()
       coverAccent.set(track.id, hex)
@@ -130,7 +215,11 @@ const Theme = (() => {
   }
 
   function onSysChange() {
-    if (mode === 'system') document.documentElement.setAttribute('data-theme', effective('system'))
+    if (mode === 'system') {
+      document.documentElement.setAttribute('data-theme', effective('system'))
+      // v3.3.48：明暗变了要重算 tonal（同一封面色在深/浅底上夹取的亮度区间不同）
+      if (typeof state !== 'undefined' && state && state.settings) apply(currentKey(), false)
+    }
   }
 
   function setMode(next, save = true) {
@@ -138,6 +227,8 @@ const Theme = (() => {
     mode = next
     try { localStorage.setItem(MODE_KEY, next) } catch { /* 隐私模式下忽略 */ }
     document.documentElement.setAttribute('data-theme', effective(next))
+    // v3.3.48：tonal 的亮度夹取依赖当前明暗，切完模式立刻重算一次（不写设置）
+    if (typeof state !== 'undefined' && state && state.settings) apply(currentKey(), false)
     if (mql) {
       try { mql.removeEventListener('change', onSysChange) } catch { /* 老 API */ }
       mql = null

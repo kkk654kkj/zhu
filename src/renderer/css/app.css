@@ -2894,3 +2894,307 @@ body.fs-open #queuePanel {
 html[data-theme="light"] body.fs-open #queuePanel {
   box-shadow: 0 16px 44px rgba(24,36,56,.24);
 }
+
+/* =========================================================================
+   v2.8.40 / v3.3.48「九条 UI 建议全实装」轮
+   ---------------------------------------------------------------------------
+   本节是覆盖层，不改上面 2900 行里的历史规则（那些带着前几轮的防回归注释，
+   逐条改回去风险更大）。九条依次是：
+     1 卡片网格视图        2 sticky 表头 + 键盘导航   3 虚拟滚动内核（vlist.js）
+     4 队列右侧滑出侧栏     5 逐词歌词平滑填充        6 封面取色 tonal palette
+     7 交互态统一          8 图标线性描边体系        9 WCAG AA + reduced-motion
+   硬约束：blur 数值与动画时长一字不改（不变量 #38 的修正版）。
+   ========================================================================= */
+
+/* ---------- 8. 图标：24 网格 / 1.5px 描边 / round 端点 ---------- */
+svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* 主控 4 枚在 symbol 内显式 fill=currentColor stroke=none；这里只把旧规则里
+   「往 svg 上写 fill」的地方拉回来，否则 .btn.primary 会把描边图标灌成实心块 */
+.btn.primary svg,
+.btn.primary svg use,
+.nav-item svg,
+.mini-btn svg,
+.wbtn svg,
+.row-act svg,
+.th-btn svg { fill: none; stroke: currentColor; }
+.icon-btn.play svg,
+.icon-btn.play svg use { fill: currentColor; stroke: none; }
+
+/* ---------- 7 / 9. 交互态 token（一套值，全站复用） ---------- */
+:root {
+  --state-hover: rgba(255, 255, 255, .06);
+  --state-active: rgba(255, 255, 255, .10);
+  --state-selected: color-mix(in srgb, var(--accent) 16%, transparent);
+  --ease: cubic-bezier(.22, .61, .36, 1);
+  /* 6. tonal palette：主色派生的表面/描边色阶（theme.js 只改 --accent 一处，这里跟着变） */
+  --tone-1: color-mix(in srgb, var(--accent) 7%, var(--bg-panel));
+  --tone-2: color-mix(in srgb, var(--accent) 13%, var(--bg-panel));
+  --tone-3: color-mix(in srgb, var(--accent) 20%, var(--bg-panel));
+  --tone-line: color-mix(in srgb, var(--accent) 26%, var(--line));
+  --tone-accent-hi: color-mix(in srgb, var(--accent) 74%, #fff);
+}
+html[data-theme="light"] {
+  --state-hover: rgba(8, 19, 31, .05);
+  --state-active: rgba(8, 19, 31, .085);
+  /* 9. WCAG AA：浅色底上这两个灰字原来只有 3.6:1 / 4.0:1，正文不达标 */
+  --txt-3: #5f6b7d;
+}
+/* 9. 深色主题的第三级文字：原 #6e7683 对 #12151a 只有 ~4.0:1 */
+:root { --txt-3: #8a92a0; }
+
+/* 7. 统一交互态：hover / active / selected / 键盘焦点环 */
+.nav-item:hover,
+.pl-item:hover > .nav-item,
+.qp-item:hover,
+.ctx-item:hover,
+.th-btn:hover,
+.uix-btn:hover { background: var(--state-hover); }
+.nav-item.active { background: var(--tone-2); color: var(--txt); }
+.nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 50%;
+  width: 3px; height: 18px;
+  margin-top: -9px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+.nav-item { position: relative; }
+.tr:hover { background: var(--state-hover); }
+.tr.selected { background: var(--state-selected); }
+.tr.playing { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.qp-item.active { color: var(--accent); background: var(--tone-1); }
+/* 键盘可见、鼠标不可见（原实现完全没有焦点环，纯键盘用户找不到自己在哪） */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-main), 0 0 0 4px var(--accent);
+  border-radius: 6px;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible { outline: none; }
+/* 所有过渡统一节奏，避免同一个界面里 .12s / .14s / .2s 三种速度混用 */
+.wbtn, .mini-btn, .icon-btn, .th-btn, .uix-btn, .btn, .nav-item, .qp-item, .tr, .mc {
+  transition: background .12s var(--ease), color .12s var(--ease),
+              border-color .12s var(--ease), opacity .12s var(--ease),
+              transform .12s var(--ease);
+}
+
+/* ---------- 2 / 3. 单一滚动容器 + sticky 表头 ---------- */
+.view-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 虚拟滚动靠占位块撑高度，浏览器滚动锚定会把 scrollTop 拽回去（老问题） */
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
+}
+/* 行容器不再是滚动容器：滚动交给 .view-scroll，虚拟滚动内核按它的 scrollTop 算窗口 */
+.table-body {
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow: visible;
+  padding-bottom: 16px;
+}
+/* 表头吸顶：滚过 viewHeader 之后一直贴住内容区上沿 */
+.table-head {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: color-mix(in srgb, var(--bg-main) 88%, transparent);
+  backdrop-filter: blur(12px) saturate(1.15);
+  border-bottom: 1px solid var(--hair);
+}
+/* 视图切换按钮压在表头右侧内边距区（32px），不侵入任何一列 */
+.th-tools {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 2px;
+}
+.th-btn {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--txt-3);
+}
+.th-btn svg { width: 15px; height: 15px; }
+.th-btn:hover { color: var(--txt); }
+.th-btn.on { color: var(--accent); background: var(--accent-soft); }
+/* 表头排序态：原来写内联 style 改颜色，这里统一成类 */
+.table-head > div[data-sort].sorted { color: var(--accent); }
+
+/* 2. 键盘导航：当前行描边 + 底部提示 */
+.tr.kb { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.kb-hint {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--pb-h) + 18px);
+  transform: translateX(-50%);
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-panel) 92%, transparent);
+  border: 1px solid var(--line);
+  color: var(--txt-2);
+  font-size: 11.5px;
+  z-index: 30;
+  pointer-events: none;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+}
+
+/* ---------- 1. 卡片网格视图 ---------- */
+.table-body.grid-mode { padding: 6px 32px 20px; }
+.grid-row {
+  display: grid;
+  grid-template-columns: repeat(var(--gcols, 5), minmax(0, 1fr));
+  gap: var(--ggap, 18px);
+  height: var(--growh, 240px);
+  align-content: start;
+}
+.mc { min-width: 0; cursor: pointer; }
+.mc-cv {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--tone-1);
+  display: grid;
+  place-items: center;
+  color: var(--txt-3);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .34);
+  transition: transform .18s var(--ease), box-shadow .18s var(--ease);
+}
+.mc:hover .mc-cv { transform: translateY(-2px); box-shadow: 0 14px 30px rgba(0, 0, 0, .46); }
+.mc-cv img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mc-cv svg { width: 40px; height: 40px; opacity: .5; }
+.mc-play {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--on-accent);
+  opacity: 0;
+  transform: translateY(6px) scale(.92);
+  transition: opacity .16s var(--ease), transform .16s var(--ease);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.mc-play svg { width: 15px; height: 15px; fill: currentColor; stroke: none; }
+.mc:hover .mc-play, .mc.kb .mc-play { opacity: 1; transform: none; }
+.mc-name {
+  margin-top: 9px;
+  font-size: 12.5px;
+  color: var(--txt);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mc-sub {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--txt-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mc.playing .mc-name { color: var(--accent); }
+.mc.selected .mc-cv { box-shadow: 0 0 0 2px var(--accent), 0 12px 26px rgba(0, 0, 0, .4); }
+.mc.kb .mc-cv { box-shadow: 0 0 0 2px var(--accent), 0 12px 26px rgba(0, 0, 0, .4); }
+html[data-theme="light"] .mc-cv { box-shadow: 0 6px 18px rgba(24, 36, 56, .16); }
+html[data-theme="light"] .mc:hover .mc-cv { box-shadow: 0 12px 26px rgba(24, 36, 56, .22); }
+
+/* ---------- 4. 队列：右侧滑出侧栏（原本是右下 288×420 浮窗） ---------- */
+#queuePanel {
+  position: fixed;
+  top: calc(var(--tb-h) + 12px);
+  right: 12px;
+  bottom: calc(var(--pb-h) + 12px);
+  width: 400px;
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--bg-panel);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, .58);
+  z-index: 60;
+  transform: translateX(calc(100% + 24px));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .22s var(--ease), opacity .18s var(--ease);
+}
+#queuePanel.show { transform: none; opacity: 1; pointer-events: auto; }
+#queuePanel .qp-head { padding: 13px 16px; font-size: 12.5px; }
+#queuePanel .qp-body { flex: 1; min-height: 0; padding: 8px; }
+#queuePanel .qp-item { padding: 8px 10px; font-size: 12.5px; border-radius: 8px; }
+body.fs-open #queuePanel {
+  top: 12px;
+  bottom: 12px;
+  right: 12px;
+  width: 400px;
+  max-height: none;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .66);
+}
+@media (max-width: 900px) {
+  #queuePanel, body.fs-open #queuePanel { width: calc(100vw - 24px); }
+}
+
+/* ---------- 5. 逐词歌词：词内平滑填色（原来只有「整词瞬间变色」） ---------- */
+.lyric-line .kw {
+  position: relative;
+  display: inline-block;
+  white-space: pre;
+  transition: none;
+}
+.lyric-line .kw::after {
+  content: attr(data-t);
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--accent);
+  white-space: pre;
+  pointer-events: none;
+  /* --rest = 还没唱到的比例；JS 每帧按词内时间插值写这个变量 */
+  clip-path: inset(0 var(--rest, 100%) 0 0);
+}
+.lyric-line.active .kw { color: var(--txt-3); opacity: .8; }
+/* 词级 .done 留着做兜底：没有逐帧驱动时（迷你模式 / 后台）整词点亮 */
+.lyric-line.active .kw.done::after { --rest: 0%; }
+
+/* ---------- 6. tonal palette 消费点 ---------- */
+.lp-cover { background: var(--tone-1); }
+.vh-cover { background: linear-gradient(140deg, var(--tone-2), var(--tone-1)); }
+.mv-cover { background: var(--tone-1); }
+.pb-cover { background: var(--tone-1); }
+.search-box:focus-within { border-color: var(--tone-line); }
+.btn:hover { border-color: var(--tone-line); }
+.btn.primary:hover { background: var(--tone-accent-hi); }
+.qp-head { border-bottom-color: var(--tone-line); }
+.hifi-badge.perfect { background: var(--accent-soft); color: var(--accent); }
+
+/* ---------- 9. reduced-motion：连 layout 动画与滚动都停 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .view-scroll, .table-body, .lp-lyrics, #fsLyrics { scroll-behavior: auto !important; }
+  .mc:hover .mc-cv, .tr:hover, .mc-cv { transform: none !important; }
+  .mc-play { transition: none; }
+  #queuePanel { transition: none; }
+  .uix-btn, .th-btn, .wbtn, .mini-btn, .icon-btn, .btn, .nav-item, .qp-item, .tr, .mc {
+    transition: none !important;
+  }
+}
