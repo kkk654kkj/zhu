@@ -117,11 +117,11 @@ const Theme = (() => {
     return out
   }
 
-  /** 强调色上的文字色：按 WCAG 对比度二选一，不再写死「22% 黑」 */
+  /** 强调色上的文字色：按 WCAG 对比度二选一，不再写死「22% 黑」
+   *  0.179 是黑白字都刚好 4.5:1 的分界（(L+0.05)/0.05 = 4.5 → L≈0.175），
+   *  比凭感觉取 0.36 更严 —— 之前那档会给出 3.3:1 的白字，AA 不达标。 */
   function inkFor(rgb) {
-    const L = luminance(rgb)
-    // 0.36 是黑白字切换的经验分界（深色主题的亮 accent 用近黑字，浅色主题的暗 accent 用白字）
-    return L > 0.36 ? '#0b0e13' : '#ffffff'
+    return luminance(rgb) > 0.179 ? '#0b0e13' : '#ffffff'
   }
 
   /** 把一个 hex 写进主题变量（--accent 由音频频谱等直接消费）
