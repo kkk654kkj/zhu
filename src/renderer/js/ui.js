@@ -135,11 +135,12 @@ const UI = {
       if (typeof ResizeObserver === 'function' && !this._tResizeBound) {
         this._tResizeBound = true
         let raf2 = 0
-        // 帧率轮：容器高度缓存起来，滚动帧不再读 clientHeight
+        // 帧率轮：容器高度缓存起来，滚动帧不再读 clientHeight。
+        // 必须缓存 clientHeight（滚动容器的可视高度），不能改用 RO 的内容矩形高度：
+        // 后者在未布局/隐藏窗口下会反映全部内容的总高，让虚拟窗口退化成全量渲染。
         this._tViewH = Math.max(1, body.clientHeight || 600)
-        new ResizeObserver((entries) => {
-          const r = entries && entries[0] && entries[0].contentRect
-          this._tViewH = Math.max(1, Math.round(r ? r.height : body.clientHeight))
+        new ResizeObserver(() => {
+          this._tViewH = Math.max(1, body.clientHeight || 600)
           if (raf2) return
           raf2 = requestAnimationFrame(() => {
             raf2 = 0

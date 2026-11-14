@@ -261,6 +261,9 @@ function main() {
     /_tViewH/.test(uiSrc) && /const scrollTop = body\.scrollTop/.test(uiSrc) &&
     /fsScroll !== null/.test(uiSrc) && /boxScroll !== null/.test(uiSrc) &&
     /TABLE_ROW_H = 52/.test(uiSrc))
+  ok('帧率轮：虚拟滚动高度缓存只认 clientHeight，禁止用内容矩形高度',
+    /this\._tViewH = Math\.max\(1, body\.clientHeight \|\| 600\)/.test(uiSrc) &&
+    !/contentRect\.height/.test(uiSrc))
   const dragSrc2 = read('src/renderer/js/dragwin.js')
   ok('双击标题栏只由 dblclick 处理（拖动链路不重复 toggleMaximize）',
     !/toggleMaximize/.test(dragSrc2) && /e\.detail === 2/.test(dragSrc2))
