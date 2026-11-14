@@ -464,6 +464,14 @@ function main() {
       /el\.classList\.remove\('paused'\)/.test(uiSrc))
     ok('歌词：渲染完立刻按当前时间落高亮（切歌瞬间不留空窗）',
       /this\.updateLyricIndex\(audio\.currentTime \+ off\)/.test(uiSrc))
+    // v2.8.43 / v3.3.51：行内爱心就地同步 —— 收藏后不必切视图/刷新才看见红心
+    ok('收藏：行内爱心就地翻状态（右键/行内钮/多选条/迷你卡四条链路都接）',
+      /syncFavMarks\(ids, favorites\) \{/.test(uiSrc) &&
+      /el\.querySelector\('\.row-act\[data-act="fav"\]'\)/.test(uiSrc) &&
+      /UI\.syncFavMarks\(targets\.map\(\(t\) => t\.id\), state\.favorites\)/.test(read('src/renderer/js/menus.js')) &&
+      /UI\.syncFavMarks\(\[state\.currentId\], state\.favorites\)/.test(read('src/renderer/js/mini.js')))
+    ok('收藏：行内爱心带 aria-pressed（初始态也交给屏幕阅读器）',
+      /data-act="fav" aria-pressed="\$\{favOn \? 'true' : 'false'\}"/.test(uiSrc))
     // v2.8.42 / v3.3.50：歌词同步体检 —— 直接跑解析器，断言语义而不是字面
     {
       const lyricSrc2 = read('src/renderer/js/lyric.js')

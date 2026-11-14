@@ -266,7 +266,7 @@ const UI = {
     // v2.8.26（追加清单 #7）：行内快捷钮（收藏/加入歌单），hover 浮现，覆盖在时长列上；
     // 点击走 tableBody 的委托（bindTrackListUi），复用右键菜单的动作管道
     const favOn = ctx.favorites && ctx.favorites.has(t.id) ? ' on' : ''
-    const acts = `<span class="row-acts"><button class="row-act${favOn}" data-act="fav" title="${favOn ? '取消收藏' : '加入收藏'}">${icon('heart')}</button><button class="row-act" data-act="addpl" title="加入歌单">${icon('plus')}</button></span>`
+    const acts = `<span class="row-acts"><button class="row-act${favOn}" data-act="fav" aria-pressed="${favOn ? 'true' : 'false'}" title="${favOn ? '取消收藏' : '加入收藏'}">${icon('heart')}</button><button class="row-act" data-act="addpl" title="加入歌单">${icon('plus')}</button></span>`
     return `<div class="tr${isCur ? ' playing' : ''}${isSel ? ' selected' : ''}" data-id="${esc(t.id)}" data-index="${i}">
           <div class="c-idx">
             <span class="num" draggable="true" title="拖到左侧歌单可加入歌单">${i + 1}</span>
@@ -309,6 +309,30 @@ const UI = {
       el.classList.toggle('playing', on)
       // v2.8.41：非当前行必须把 paused 一起摘掉 —— 否则上一首会留下 tr.paused 脏类
       if (!on) el.classList.remove('paused')
+    })
+  },
+
+  /**
+   * v2.8.43：收藏状态就地同步（行内小爱心）。
+   * 行内爱心是在 `_rowHtml` 渲染那一刻按 `ctx.favorites` 写死的；收藏动作原来只改
+   * `state.favorites` + 底栏那颗心，于是停在「全部音乐」里点爱心必须切视图/刷新才看得见
+   * （用户实报）。这里只翻可见行的按钮状态，不重建 DOM —— 虚拟滚动不变量（不许整块
+   * 重建 `#tableBody`）不受影响。`favorites` 可显式传入，缺省取全局 state。
+   */
+  syncFavMarks(ids, favorites) {
+    const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null).map(String)
+    if (!list.length) return
+    const favs = favorites || (typeof state !== 'undefined' && state && state.favorites) || null
+    if (!favs) return
+    const want = new Set(list)
+    $$('#tableBody .tr, #tableBody .mc').forEach((el) => {
+      if (!want.has(String(el.dataset.id))) return
+      const btn = el.querySelector('.row-act[data-act="fav"]')
+      if (!btn) return
+      const on = !!favs.has(el.dataset.id)
+      btn.classList.toggle('on', on)
+      btn.title = on ? '取消收藏' : '加入收藏'
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false')
     })
   },
 

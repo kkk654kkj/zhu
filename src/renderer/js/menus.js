@@ -126,6 +126,8 @@ async function handleCtxAction(act, arg) {
       }
       updateNavCounts()
       if (state.currentId) UI.setFavorite(state.favorites.has(state.currentId))
+      // v2.8.43：行内爱心就地翻状态 —— 否则要切视图/刷新才看得见（用户实报）
+      UI.syncFavMarks(targets.map((t) => t.id), state.favorites)
       if (state.view === 'fav') renderView()
       toast(allFav
         ? '已取消收藏' + (targets.length > 1 ? ' ' + targets.length + ' 首' : '')
