@@ -471,6 +471,13 @@ function main() {
     ok('九条·不变量收窄：#fsView::before 的 blur 参数仍一字未改',
       /blur\(52px\) saturate\(1\.35\) brightness\(\.42\)/.test(appCss) &&
       /blur\(52px\) saturate\(1\.15\) brightness\(1\.02\)/.test(appCss))
+    ok('播放图标：音波节点常驻、靠 .playing 显隐（切歌不再残留 / 新行立刻有图标）',
+      !/isCur \? '<span class="eq-bars">/.test(uiSrc) &&
+      (uiSrc.match(/const eq = '<span class="eq-bars">/g) || []).length === 2 &&
+      /\.tr\.playing \.eq-bars, \.mc\.playing \.eq-bars \{ display: inline-flex; \}/.test(appCss) &&
+      /el\.classList\.remove\('paused'\)/.test(uiSrc))
+    ok('歌词：渲染完立刻按当前时间落高亮（切歌瞬间不留空窗）',
+      /this\.updateLyricIndex\(audio\.currentTime \+ off\)/.test(uiSrc))
   }
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
