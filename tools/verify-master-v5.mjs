@@ -136,7 +136,17 @@ ok('拖动时不再把 #fsView::before 的 filter 关成 none（专辑背景模�
   !/html\[data-theme="light"\]\s+body\.win-dragging\s+#fsView::before/.test(css))
 ok('仍保留迷你视图与 backdrop-filter 的拖动态降级',
   /body\.win-dragging #miniView::before\s*\{\s*filter:\s*none;\s*\}/.test(css) &&
-  /body\.win-dragging\s*\*\s*\{[^}]*backdrop-filter:\s*none/.test(css))
+  /body\.win-dragging\s+\.scan-overlay[\s\S]{0,220}?backdrop-filter:\s*none/.test(css) &&
+  !/body\.win-dragging\s*\*\s*\{/.test(css))
+ok('帧率轮：blur 铺底 / mesh / 光晕各自独立成层，滤镜值未变',
+  /#fsView::before\s*\{[\s\S]{0,400}?will-change:\s*transform/.test(css) &&
+  /body::before\s*\{[\s\S]{0,300}?will-change:\s*transform/.test(css) &&
+  /#fsView::after\s*\{[\s\S]{0,400}?will-change:\s*opacity/.test(css) &&
+  /blur\(52px\) saturate\(1\.35\) brightness\(\.42\)/.test(css))
+ok('帧率轮：频谱调度与虚拟滚动读写分离（两版共享）',
+  /_beatVal === v/.test(R('src/renderer/js/audiofx.js')) &&
+  /_tViewH/.test(R('src/renderer/js/ui.js')) &&
+  /fsScroll !== null/.test(R('src/renderer/js/ui.js')))
 
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
 process.exit(fail ? 1 : 0)

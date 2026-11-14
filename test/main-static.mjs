@@ -221,7 +221,20 @@ function main() {
     !/body\.win-dragging\s+#fsView::before/.test(appCss) &&
     /#fsView::before\s*\{[\s\S]{0,300}?filter:\s*blur\(/.test(appCss) &&
     /body\.win-dragging #miniView::before\s*\{\s*filter:\s*none;/.test(appCss) &&
-    /body\.win-dragging\s*\*\s*\{[^}]*backdrop-filter:\s*none/.test(appCss))
+    /body\.win-dragging\s+\.scan-overlay[\s\S]{0,220}?backdrop-filter:\s*none/.test(appCss) &&
+    !/body\.win-dragging\s*\*\s*\{/.test(appCss))
+  // v2.8.39 帧率轮：合成层 / 视觉不变量
+  ok('帧率轮：整屏 blur 与常驻动画提到独立合成层，且不用绘制裁剪裁掉 blur',
+    /#fsView::before\s*\{[\s\S]{0,400}?will-change:\s*transform/.test(appCss) &&
+    /#miniView::before\s*\{[\s\S]{0,300}?will-change:\s*transform/.test(appCss) &&
+    /body::before\s*\{[\s\S]{0,300}?will-change:\s*transform/.test(appCss) &&
+    !/#fsView::before\s*\{[^}]*contain:/.test(appCss))
+  ok('帧率轮：视觉参数一字未动（blur 值 / 动画时长）',
+    /blur\(52px\) saturate\(1\.35\) brightness\(\.42\)/.test(appCss) &&
+    /blur\(52px\) saturate\(1\.15\) brightness\(1\.02\)/.test(appCss) &&
+    /blur\(46px\) saturate\(1\.4\) brightness\(\.5\)/.test(appCss) &&
+    /uixMesh 30s/.test(appCss) && /uixGallery 68s/.test(appCss) &&
+    /uixCoverPulse 5s/.test(appCss) && /eqjump 1s/.test(appCss))
   // v3.3.40（master 2.8.36）：右上角按钮组整块带 no-drag 时，那 400px 宽的空白带
   // （按钮左侧到搜索框之间）全按不动窗口 —— 只留容器不排除，按钮本身仍由 button 规则挡住。
   const tbHtml = read('src/renderer/index.html')
@@ -238,6 +251,16 @@ function main() {
   ok('滚动帧不再整块重建 tableBody',
     /jumpBot\.insertAdjacentHTML\('beforebegin', html\)/.test(uiSrc) &&
     (uiSrc.match(/body\.innerHTML\s*=\s*[\s\S]{0,80}<div data-sp="top"/g) || []).length === 1)
+  const fxSrc = read('src/renderer/js/audiofx.js')
+  ok('帧率轮：--beat 只在全屏页显示时写、值未变不写；隐藏画布零绘制',
+    /classList\.contains\('open'\)/.test(fxSrc) &&
+    /_beatVal === v/.test(fxSrc) &&
+    /c\.hidden \|\| w < 24/.test(fxSrc) &&
+    /_drawExtra\(bins\)/.test(fxSrc) && /_updateBeat\(bins\)/.test(fxSrc))
+  ok('帧率轮：虚拟滚动缓存容器高度、滚动帧只读一次 scrollTop；歌词读写分离',
+    /_tViewH/.test(uiSrc) && /const scrollTop = body\.scrollTop/.test(uiSrc) &&
+    /fsScroll !== null/.test(uiSrc) && /boxScroll !== null/.test(uiSrc) &&
+    /TABLE_ROW_H = 52/.test(uiSrc))
   const dragSrc2 = read('src/renderer/js/dragwin.js')
   ok('双击标题栏只由 dblclick 处理（拖动链路不重复 toggleMaximize）',
     !/toggleMaximize/.test(dragSrc2) && /e\.detail === 2/.test(dragSrc2))
