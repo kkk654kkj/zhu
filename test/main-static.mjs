@@ -472,6 +472,34 @@ function main() {
       /UI\.syncFavMarks\(\[state\.currentId\], state\.favorites\)/.test(read('src/renderer/js/mini.js')))
     ok('收藏：行内爱心带 aria-pressed（初始态也交给屏幕阅读器）',
       /data-act="fav" aria-pressed="\$\{favOn \? 'true' : 'false'\}"/.test(uiSrc))
+    // v2.8.44：主进程拉起的每个子进程都要隐藏控制台窗口。
+    // `shutdown.exe` 是控制台程序、Electron 主进程没有控制台 —— 少一个
+    // `windowsHide: true` 就会新开一个黑框一闪（用户实报「测试时一直闪黑窗」）。
+    {
+      const bad = []
+      const dir = path.join(ROOT, 'src', 'main')
+      for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.js'))) {
+        const raw = fs.readFileSync(path.join(dir, f), 'utf8')
+        const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+        const re = /(?<![.\w])(?:G\.)?(execFile|execFileSync|spawn|exec)\s*\(/g
+        let m
+        while ((m = re.exec(src))) {
+          // 排除「get execFile() { return execFile }」这类 getter 定义，不是真的调用
+          if (/\b(get|set)\s+$/.test(src.slice(0, m.index))) continue
+          if (/^\(\s*\)\s*\{/.test(src.slice(re.lastIndex - 1))) continue
+          let i = re.lastIndex - 1
+          let depth = 0
+          for (; i < src.length; i++) {
+            if (src[i] === '(') depth++
+            else if (src[i] === ')') { depth--; if (!depth) break }
+          }
+          const call = src.slice(m.index, i + 1)
+          if (!/windowsHide:\s*true/.test(call)) bad.push(f + ' → ' + call.replace(/\s+/g, ' ').slice(0, 90))
+        }
+      }
+      ok('主进程子进程一律带 windowsHide（shutdown / taskkill / mpv / powershell 都不许闪控制台）',
+        bad.length === 0, bad.join(' || '))
+    }
     // v2.8.42 / v3.3.50：歌词同步体检 —— 直接跑解析器，断言语义而不是字面
     {
       const lyricSrc2 = read('src/renderer/js/lyric.js')

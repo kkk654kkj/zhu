@@ -612,9 +612,9 @@ function runPowerAction() {
         }, 30000)
         if (systemShutdownTimer.unref) systemShutdownTimer.unref()
         refreshTrayMenu()
-        execFile('shutdown', ['/s', '/t', '30'], (err) => onShutdownDone(err, 'shutdown'))
+        execFile('shutdown', ['/s', '/t', '30'], { windowsHide: true }, (err) => onShutdownDone(err, 'shutdown'))
       } else if (kind === 'hibernate') {
-        execFile('shutdown', ['/h'], (err) => onShutdownDone(err, 'hibernate'))
+        execFile('shutdown', ['/h'], { windowsHide: true }, (err) => onShutdownDone(err, 'hibernate'))
       }
     } catch (err) {
       logLine('[power] 执行失败 ' + err.message)
@@ -665,7 +665,7 @@ function cancelPowerAction() {
   systemShutdownPending = false
   // 第四轮 §4.2 #5：直接传 onShutdownDone 会把 (err, stdout, stderr) 里的 stdout 当 kind
   if (needAbort) {
-    try { execFile('shutdown', ['/a'], (err) => onShutdownDone(err, 'cancel')) } catch (err) { logLine('[power] 取消执行失败 ' + err.message) }
+    try { execFile('shutdown', ['/a'], { windowsHide: true }, (err) => onShutdownDone(err, 'cancel')) } catch (err) { logLine('[power] 取消执行失败 ' + err.message) }
   }
   logLine('[power] 已取消')
   refreshTrayMenu()   // v3.3.9：不然「⚠ 取消关机」菜单项一直残留
