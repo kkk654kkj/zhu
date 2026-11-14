@@ -872,6 +872,8 @@ async function loadLyric(track) {
   }
   if (track.id !== state.currentId) return
   UI.renderLyric(parsed, track.title)
+  // v2.8.42：把「歌词末句时间 vs 音频时长」的体检结果交给面板（只在真有问题时显示一行小字）
+  UI.setLyricDiag(parsed && parsed.sync, track.duration)
   UI.updateLyricIndex(audio.currentTime + state.lyricOffset)
   pushDesktopLyric(true)
 }

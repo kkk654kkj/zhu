@@ -17,7 +17,7 @@ const UI = {
       'viewHeader', 'viewScroll', 'vhCover', 'vhTitle', 'vhSub', 'btnPlayAll', 'btnShuffleAll', 'btnPlaylistRemove',
       'tableHead', 'tableBody', 'emptyState', 'emptyText', 'btnEmptyScan', 'btnViewToggle', 'kbHint',
       'scanOverlay', 'scanTitle', 'scanBar', 'scanSub',
-      'lyricPanel', 'lpCover', 'lpTitle', 'lpArtist', 'lpLyrics', 'lpOffset',
+      'lyricPanel', 'lpCover', 'lpTitle', 'lpArtist', 'lpLyrics', 'lpOffset', 'lpDiag',
       'btnLyricSmaller', 'btnLyricBigger', 'btnLyricEarlier', 'btnLyricLater',
       'pbCover', 'pbTitle', 'pbArtist', 'btnFav', 'btnMode', 'btnPrev', 'btnPlay', 'btnNext', 'btnQueue',
       'tCur', 'tDur', 'progressBar', 'progressFill', 'progressDot',
@@ -219,6 +219,34 @@ const UI = {
   /** 兼容旧调用点（switchView 恢复滚动位置 / uix:locate）：转给内核 */
   _renderTableWindow(force) {
     if (this._vl) this._vl.update(!!force)
+  },
+
+  /**
+   * v2.8.42：歌词同步体检提示。
+   * 只报「能确证的问题」，不猜：
+   *   · 末句时间 < 音频时长-30s → 「歌词只到 mm:ss，之后为纯音乐」
+   *   · 末句时间 > 音频时长+2s  → 「歌词比音频长 xx 秒，可能不是同一版本」
+   * 制作信息抢跑（creditSkip）不提示 —— 已经自动跳过了，没必要打扰用户。
+   */
+  setLyricDiag(sync, duration) {
+    const el = this.els.lpDiag
+    if (!el) return
+    const st = this.lyricState
+    if (!sync || st.plain || !st.lines.length || !duration || duration <= 0) {
+      el.hidden = true
+      el.textContent = ''
+      return
+    }
+    const last = sync.lastTs
+    if (last == null) { el.hidden = true; el.textContent = ''; return }
+    let msg = ''
+    if (last > duration + 2) {
+      msg = '歌词时间轴比音频长 ' + Math.round(last - duration) + ' 秒，可能不是同一版本'
+    } else if (duration - last > 30) {
+      msg = '歌词到 ' + mmss(last) + ' 结束，之后 ' + Math.round(duration - last) + ' 秒为纯音乐'
+    }
+    el.textContent = msg
+    el.hidden = !msg
   },
 
   /** 单行 HTML：整块重建与增量更新共用，避免两套模板走偏 */
@@ -699,11 +727,11 @@ const UI = {
       if (l.words && l.words.length) {
         // v3.3.48：每词带一份 data-t 文本，CSS 的 ::after 用它铺「已唱」的彩色层，
         // --rest 控制裁剪比例 → 词内平滑填色（原来只有整词瞬间变色）
-        return `<div class="lyric-line${this.lyricState.plain ? ' plain' : ''}" data-i="${i}">` +
+        return `<div class="lyric-line${this.lyricState.plain ? ' plain' : ''}${l.skip ? ' credit' : ''}" data-i="${i}">` +
           l.words.map((w) => `<span class="kw" data-t="${esc(w.text)}">${esc(w.text)}</span>`).join('') +
           `</div>`
       }
-      return `<div class="lyric-line${this.lyricState.plain ? ' plain' : ''}" data-i="${i}">${esc(l.text || '♪')}</div>`
+      return `<div class="lyric-line${this.lyricState.plain ? ' plain' : ''}${l.skip ? ' credit' : ''}" data-i="${i}">${esc(l.text || '♪')}</div>`
     }).join('')
     box.scrollTop = 0
     // v3.3.29（P3 #17）：全屏页多行歌词面板。整句渲染即可，词级卡拉OK
@@ -773,7 +801,10 @@ const UI = {
   updateLyricIndex(curSec) {
     const st = this.lyricState
     if (st.plain || !st.lines.length) return
-    const idx = findLineIndex(st.lines, curSec)
+    let idx = findLineIndex(st.lines, curSec)
+    // v2.8.42：被硬塞时间戳的制作信息行不参与同步 —— 向前落到最近一句正式歌词，
+    // 落不到（还在前奏/名单里）就保持 -1，一行都不高亮，不再"抢跑"
+    while (idx >= 0 && st.lines[idx] && st.lines[idx].skip) idx--
     if (idx === st.index) {
       this._paintLyricWords(st, idx, curSec)
       this._ensureWordLoop()
