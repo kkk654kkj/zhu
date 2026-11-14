@@ -555,6 +555,44 @@ function main() {
         /info\.testMute && audio\) audio\.muted = true/.test(read('src/renderer/js/app.js')))
     }
 
+    // v2.8.45：toast 两条用户实报 —— ① 浅色主题下深底 + 深字看不见；
+    // ② 30 秒同类去重把用户主动点击的回执也吞了（外观模式 / 频谱开关点几次后不弹）。
+    {
+      const cssSrc = read('src/renderer/css/app.css')
+      ok('浅色主题 toast 给独立墨色（白底 + 深字，不再深底叠深字）',
+        /html\[data-theme="light"\] #toast \{\s*background: rgba\(255, 255, 255, \.97\);\s*border-color: rgba\(8, 19, 31, \.14\);\s*color: #172031;/.test(cssSrc))
+
+      // 真跑一遍 toast（切出配置段 + 打桩 $ / window / 定时器），断言语义而不是字面
+      const utilSrc = read('src/renderer/js/util.js')
+      const seg = utilSrc.slice(
+        utilSrc.indexOf('let toastTimer = null'),
+        utilSrc.indexOf('/** 极简事件器 */')
+      )
+      const el = { hidden: true, textContent: '', classList: { s: new Set(), add(c) { this.s.add(c) }, remove(c) { this.s.delete(c) } } }
+      const mkToast = () => new Function(
+        '$', 'window', 'setTimeout', 'clearTimeout',
+        seg + '\nreturn { toast, setInput: (t) => { lastUserInputAt = t } }'
+      )(() => el, { addEventListener() {} }, () => 1, () => {})
+
+      const u1 = mkToast()
+      u1.setInput(Date.now())
+      u1.toast('外观：浅色')
+      const firstShown = el.hidden === false && el.textContent === '外观：浅色'
+      el.hidden = true
+      u1.toast('外观：浅色')          // 同文本立刻再点一次（用户主动操作）
+      const againShown = el.hidden === false
+
+      const a1 = mkToast()
+      a1.setInput(Date.now() - 5000)  // 非交互：模拟自动循环触发
+      a1.toast('设备已断开')
+      el.hidden = true
+      a1.toast('设备已断开')          // 30 秒内第二条必须仍被去重
+      const autoDeduped = el.hidden === true
+
+      ok('toast 去重不再吞用户主动操作的提示（交互 1.5 秒内必弹）', firstShown && againShown)
+      ok('toast 去重仍拦住自动循环的重复提示（防刷屏不回退）', autoDeduped)
+    }
+
   }
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)

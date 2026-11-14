@@ -153,14 +153,27 @@ let toastHideTimer = null
 const TOAST_DEDUP_MS = 30000
 const TOAST_DEDUP_MAX = 50
 const toastShownAt = new Map()
+// v2.8.45：30 秒同类去重只应拦住「自动循环触发的重复提示」（失败连跳 / 设备长期被占），
+// 不能把用户主动操作的回执一起吞掉 —— 外观模式 / 频谱光效这类开关点几次之后就再也不弹了。
+// 判据用「最近一次真实输入」的时间：交互后 USER_INPUT_GAP 内产生的 toast 一律不过滤。
+const USER_INPUT_GAP = 1500
+let lastUserInputAt = 0
+if (typeof window !== 'undefined' && window.addEventListener) {
+  // click 也要算：真实鼠标的 click 前面一定有 pointerdown，但程序化 el.click() 没有
+  for (const ev of ['pointerdown', 'keydown', 'wheel', 'click']) {
+    window.addEventListener(ev, () => { lastUserInputAt = Date.now() }, { capture: true, passive: true })
+  }
+}
 function toast(msg, ms = 1800, force = false) {
   const el = $('#toast')
   if (!el) return
   const key = String(msg)
   const now = Date.now()
   const last = toastShownAt.get(key)
-  // force=true 供必须每次出现的紧急错误绕过；否则同一文本 30 秒内只显示一次
-  if (!force && last != null && now - last < TOAST_DEDUP_MS) return
+  // force=true 供必须每次出现的紧急错误绕过；否则同一文本 30 秒内只显示一次。
+  // v2.8.45：用户刚操作过（1.5 秒内）时同样跳过过滤 —— 主动点击必须有回执。
+  const fromUser = now - lastUserInputAt < USER_INPUT_GAP
+  if (!force && !fromUser && last != null && now - last < TOAST_DEDUP_MS) return
   if (toastShownAt.has(key)) toastShownAt.delete(key)
   toastShownAt.set(key, now)
   while (toastShownAt.size > TOAST_DEDUP_MAX) {
