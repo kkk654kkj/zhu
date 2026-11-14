@@ -121,8 +121,11 @@ const UI = {
   isFullscreen: () => fsView.classList.contains('open'),
   toggleQueue: () => {
     calls.queueToggle++
-    els.get('queuePanel').hidden = !els.get('queuePanel').hidden
-    observers.filter((o) => o.target === els.get('queuePanel')).forEach((o) => o.cb([]))
+    // v3.3.48：队列改右侧滑出侧栏，开态是 .show 类（hidden 由关闭过渡补）
+    const q = els.get('queuePanel')
+    q.classList.toggle('show')
+    q.hidden = !q.classList.contains('show')
+    observers.filter((o) => o.target === q).forEach((o) => o.cb([]))
   }
 }
 const fireWin = (type, ev) => {

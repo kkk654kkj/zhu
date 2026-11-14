@@ -193,7 +193,10 @@ const DEFAULT_SETTINGS = {
   lyricOffset: 0,
   lyricOffsetById: {},         // 每曲歌词偏移（v1.7）：{ trackId: 秒 }，优先于 lyricOffset
   theme: 'dark',
-  accent: '#31c27c',
+  // v2.8.40：主题色默认改成「跟随封面」（tonal palette 默认开，可关回固定色）
+  accent: 'auto',
+  accentAutoMigrated: false,   // 一次性迁移标记：老的裸色值 #31c27c → auto
+  viewMode: 'list',            // v2.8.40：主列表形态 list | grid
   showLyricPanel: true,
   autoScanOnStart: false,
   watchFolders: true,          // 监视音乐文件夹变化并自动增量扫描（v1.7）
@@ -2041,6 +2044,20 @@ if (gotLock) cleanChromiumCache().catch(() => {})
     powerAfterQueue = store.get().settings.powerAfterQueue || 'off'
 
     // 异步清上次残留的 mpv，不阻塞启动
+    // v2.8.40：主题色一次性迁到「跟随封面」。
+    // 老版本默认是裸色值 #31c27c，用户从没改过的话应跟着新默认走；
+    // 自己选过预设（green/cyan/purple/orange/ocean）的保持原样，不硬改。
+    {
+      const st0 = store.get().settings
+      if (!st0.accentAutoMigrated) {
+        const legacy = String(st0.accent || '').toLowerCase()
+        const patch = { accentAutoMigrated: true }
+        if (!legacy || legacy === '#31c27c') patch.accent = 'auto'
+        store.patch({ settings: { ...st0, ...patch } })
+        logLine('[settings] 主题色迁移 →', patch.accent || st0.accent)
+      }
+    }
+
     killOrphanMpv()
 
     library = new Library({

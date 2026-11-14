@@ -10,43 +10,55 @@
 <body>
 
 <!-- ============ 图标库 ============ -->
-<svg style="display:none" aria-hidden="true">
-  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></symbol>
-  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z"/></symbol>
-  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 4h4v16H7zM13 4h4v16h-4z"/></symbol>
-  <symbol id="i-prev" viewBox="0 0 24 24"><path d="M6 4h2.5v16H6zM20 4.5v15L9.5 12z"/></symbol>
-  <symbol id="i-next" viewBox="0 0 24 24"><path d="M15.5 4H18v16h-2.5zM4 4.5v15L14.5 12z"/></symbol>
-  <symbol id="i-list" viewBox="0 0 24 24"><path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h10v2H4z"/></symbol>
-  <symbol id="i-queue" viewBox="0 0 24 24"><path d="M3 5h14v2H3zM3 10h14v2H3zM3 15h9v2H3zM16 12l7 4-7 4z"/></symbol>
-  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2zM17 17H7v-3l-4 4 4 4v-3h12v-6h-2z"/></symbol>
-  <symbol id="i-repeat-one" viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2zM17 17H7v-3l-4 4 4 4v-3h12v-6h-2z"/><text x="12" y="15.5" font-size="9" text-anchor="middle" fill="currentColor" font-family="sans-serif">1</text></symbol>
-  <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M16 3h5v5h-2V6.4l-4.3 4.3-1.4-1.4L17.6 5H16zM3 6h4.2l3.1 3.1-1.4 1.4L6.4 8H3zM16 21v-2h1.6l-4.3-4.3 1.4-1.4L19 17.6V16h2v5zM3 18v-2h3.4l3.1-3.1 1.4 1.4L6.2 18z"/></symbol>
-  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 21s-8-5.1-8-10.4C4 7.3 6.2 5 9 5c1.6 0 3 .8 3 .8S13.4 5 15 5c2.8 0 5 2.3 5 5.6C20 15.9 12 21 12 21z"/></symbol>
-  <symbol id="i-search" viewBox="0 0 24 24"><path d="M10.5 3a7.5 7.5 0 015.9 12.1l4.8 4.8-1.4 1.4-4.8-4.8A7.5 7.5 0 1110.5 3zm0 2a5.5 5.5 0 100 11 5.5 5.5 0 000-11z"/></symbol>
-  <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9h3.5L13 4.5v15L7.5 15H4zM16 8.4a5 5 0 010 7.2l-1.4-1.4a3 3 0 000-4.4zM18.4 5.6a8.5 8.5 0 010 12.8L17 17a6.5 6.5 0 000-10z"/></symbol>
-  <symbol id="i-volume-off" viewBox="0 0 24 24"><path d="M4 9h3.5L13 4.5v15L7.5 15H4zM16.3 9.2l1.4-1.4 2.1 2.1 2.1-2.1 1.4 1.4L21.2 11.3l2.1 2.1-1.4 1.4-2.1-2.1-2.1 2.1-1.4-1.4 2.1-2.1z"/></symbol>
-  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z"/></symbol>
-  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M9 3h6l1 2h4v2H4V5h4zM6 8h12l-1 12H7zM10 10v8h1.5v-8zm2.5 0v8H14v-8z"/></symbol>
-  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 5h6l2 2h10v12H3z"/></symbol>
-  <symbol id="i-clock" viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 2a7 7 0 110 14 7 7 0 010-14zm-1 3v5l4 2 .9-1.7-3-1.5V8z"/></symbol>
-  <symbol id="i-album" viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 2a7 7 0 110 14 7 7 0 010-14zm0 3a4 4 0 100 8 4 4 0 000-8zm0 2a2 2 0 110 4 2 2 0 010-4z"/></symbol>
-  <symbol id="i-min" viewBox="0 0 24 24"><path d="M5 11h14v2H5z"/></symbol>
-  <symbol id="i-max" viewBox="0 0 24 24"><path d="M5 5h14v14H5zm2 2v10h10V7z"/></symbol>
-  <symbol id="i-restore" viewBox="0 0 24 24"><path d="M8 4h12v12h-3v3H4V6h4zm2 2v1h7v7h1V6zm-4 1v11h9V7z"/></symbol>
-  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></symbol>
-  <symbol id="i-sort-up" viewBox="0 0 24 24"><path d="M12 5l6 7h-4v7h-4v-7H6z"/></symbol>
-  <symbol id="i-sort-down" viewBox="0 0 24 24"><path d="M12 19l-6-7h4V5h4v7h4z"/></symbol>
-  <symbol id="i-more" viewBox="0 0 24 24"><path d="M6 10.5a1.5 1.5 0 100 3 1.5 1.5 0 000-3zm6 0a1.5 1.5 0 100 3 1.5 1.5 0 000-3zm6 0a1.5 1.5 0 100 3 1.5 1.5 0 000-3z"/></symbol>
-  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M12 4a8 8 0 017.7 10.1l-1.9-.6A6 6 0 1012 18a5.9 5.9 0 002.9-.8l1 1.7A7.9 7.9 0 0112 20a8 8 0 010-16z"/><path d="M18.5 3.2l.9 5.2-5.1-1.2z"/></symbol>
-  <symbol id="i-eq" viewBox="0 0 24 24"><path d="M5 2h2v6H5zM5 10h2v12H5zM11 6h2v5h-2zM11 13h2v9h-2zM17 3h2v10h-2zM17 15h2v7h-2z"/></symbol>
-  <symbol id="i-dlyric" viewBox="0 0 24 24"><path d="M3 4h18v12H3V4zm2 2v8h14V6H5zm3 1h8v2H8V7zm0 3.5h11V12H8v-1.5z"/><path d="M9 16h6v2h5v2H4v-2h5z"/></symbol>
-  <symbol id="i-lock" viewBox="0 0 24 24"><path d="M7 10V7a5 5 0 0110 0v3h1a1 1 0 011 1v9a1 1 0 01-1 1H6a1 1 0 01-1-1v-9a1 1 0 011-1h1zm2 0h6V7a3 3 0 00-6 0v3zm3 4a1.5 1.5 0 00-.75 2.8V18h1.5v-1.2A1.5 1.5 0 0012 14z"/></symbol>
-  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h9v2H4zM17 5h2v5h-2zM4 16h4v2H4zM12 15h2v5h-2zM4 11h13v2H4zM19 11h2v2h-2zM16 6h5v2h-5zM8 16h9v2H8z"/></symbol>
-  <symbol id="i-mini" viewBox="0 0 24 24"><path d="M4 4h16v16H4zm2 2v12h12V6z"/><path d="M11 12h6v6h-6z"/></symbol>
-  <symbol id="i-hifi" viewBox="0 0 24 24"><path d="M4 6h2v12H4zM8 9h2v6H8zM12 4h2v16h-2zM16 8h2v8h-2zM20 11h2v2h-2z"/></symbol>
-  <symbol id="i-bug" viewBox="0 0 24 24"><path d="M9 3.2a3 3 0 016 0V4h1.5A3.5 3.5 0 0120 7.5V13a8 8 0 01-16 0V7.5A3.5 3.5 0 017.5 4H9zM11 5h2v-.8a1 1 0 10-2 0z"/><path d="M2 9l2.6 1.4L4 13H2zM22 9l-2.6 1.4L20 13h2zM1.5 15h3v1.6h-3zM19.5 15h3v1.6h-3zM3.5 19.2l2.7-1.5 1 1.6-2.5 1.4zM20.5 19.2l-2.7-1.5-1 1.6 2.5 1.4z"/></symbol>
-  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 2.5l1.9 5.6 5.6 1.9-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.9zM18.7 15.2l.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9z"/></symbol>
-  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M16.8 3.3l3.9 3.9-1.4 1.4-3.9-3.9 1.4-1.4zM4 17.2L15.1 6.1l3.9 3.9L7.9 21H4v-3.8zM6 17v2.1h2.1l9.5-9.5-2.1-2.1L6 17z"/></symbol>
+<svg style="display:none" aria-hidden="true" focusable="false">
+  <!-- v2.8.40 / v3.3.48 图标系统：24 网格 · 1.5px 描边 · round 端点 · fill:none（主控 4 枚实心）
+       新增：i-list-view / i-grid / i-font / i-align / i-minus / i-keyboard -->
+  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 17.4V6.3l10-2v11.1"/><circle cx="6.5" cy="17.4" r="2.5"/><circle cx="16.5" cy="15.4" r="2.5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8.5 5.4v13.2L19 12z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5.2h3.2v13.6H8zM12.8 5.2H16v13.6h-3.2z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 24 24"><path d="M6.4 5.2h2v13.6h-2zM19 5.6v12.8L9.2 12z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="M15.6 5.2h2v13.6h-2zM5 5.6v12.8L14.8 12z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h16M4 17.5h10"/></symbol>
+  <symbol id="i-list-view" viewBox="0 0 24 24"><path d="M4 6.5h3.4M10 6.5h10M4 12h3.4M10 12h10M4 17.5h3.4M10 17.5h10"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/></symbol>
+  <symbol id="i-queue" viewBox="0 0 24 24"><path d="M3.5 6h11M3.5 11h11M3.5 16h7"/><path d="M15.2 12.4v6.8l5.3-3.4z"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M6 9V7.6A2.1 2.1 0 018.1 5.5H15"/><path d="M12.6 3.1L15.1 5.5 12.6 7.9"/><path d="M18 15v1.4a2.1 2.1 0 01-2.1 2.1H9"/><path d="M11.4 20.9L8.9 18.5 11.4 16.1"/></symbol>
+  <symbol id="i-repeat-one" viewBox="0 0 24 24"><path d="M6 9V7.6A2.1 2.1 0 018.1 5.5H15"/><path d="M12.6 3.1L15.1 5.5 12.6 7.9"/><path d="M18 15v1.4a2.1 2.1 0 01-2.1 2.1H9"/><path d="M11.4 20.9L8.9 18.5 11.4 16.1"/><path d="M12 9.6v4.8"/><path d="M11 10.6l1-.9"/></symbol>
+  <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M4 6.5h3.2l3 3.7"/><path d="M4 17.5h3.2l9-11.2h3.6"/><path d="M17.4 3.7l2.6 2.6-2.6 2.6"/><path d="M13.2 14.6l3 3.1h3.6"/><path d="M17.4 15.1l2.6 2.6-2.6 2.6"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.3s-7.7-4.6-7.7-9.7A4.5 4.5 0 0112 7.4a4.5 4.5 0 017.7 3.2c0 5.1-7.7 9.7-7.7 9.7z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.4 15.4L21 21"/></symbol>
+  <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9.4h3.3L12 5.4v13.2L7.3 14.6H4z"/><path d="M15.6 9.2a4.2 4.2 0 010 5.6"/><path d="M18.4 6.6a8.2 8.2 0 010 10.8"/></symbol>
+  <symbol id="i-volume-off" viewBox="0 0 24 24"><path d="M4 9.4h3.3L12 5.4v13.2L7.3 14.6H4z"/><path d="M16.2 10.2l4.2 4.2M20.4 10.2L16.2 14.4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.2v13.6M5.2 12h13.6"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5.2 12h13.6"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9.6 4.2h4.8"/><path d="M6.4 7l.9 12.1a1.6 1.6 0 001.6 1.5h6.2a1.6 1.6 0 001.6-1.5L17.6 7"/><path d="M10.2 11v5.6M13.8 11v5.6"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 6.6h5.1l1.9 2.1h10v10.7h-17z"/></symbol>
+  <symbol id="i-folder-open" viewBox="0 0 24 24"><path d="M3.5 6.6h5.1l1.9 2.1h8.9"/><path d="M3.5 8.7v10.7h16l1.7-7.2H5.2z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2"/><path d="M12 7.4V12l3.2 1.9"/></symbol>
+  <symbol id="i-album" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2"/><circle cx="12" cy="12" r="2.3"/></symbol>
+  <symbol id="i-min" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-max" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1.6"/></symbol>
+  <symbol id="i-restore" viewBox="0 0 24 24"><rect x="4" y="8.4" width="11.6" height="11.6" rx="1.6"/><path d="M8 8.4V5.9A1.9 1.9 0 019.9 4h9.2A1 1 0 0120 5v9.1a1.9 1.9 0 01-1.9 1.9H15.6"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.2 6.2l11.6 11.6M17.8 6.2L6.2 17.8"/></symbol>
+  <symbol id="i-sort-up" viewBox="0 0 24 24"><path d="M12 5.6l5.8 6.8H6.2z"/></symbol>
+  <symbol id="i-sort-down" viewBox="0 0 24 24"><path d="M12 18.4l-5.8-6.8h11.6z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="6.2" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="17.8" cy="12" r="1.4"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-2.4-5.7"/><path d="M20 4.6V10h-5.4"/></symbol>
+  <symbol id="i-eq" viewBox="0 0 24 24"><path d="M5 3.8v4.6M5 12.6v7.6M12 3.8v8.4M12 16.4v3.8M19 3.8v2.6M19 10.6v9.6"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M3.6 7h5.2M14.4 7h6M3.6 12h9.6M18.2 12h2.2M3.6 17h2.4M10.6 17h9.8"/><circle cx="11.4" cy="7" r="1.8"/><circle cx="15.6" cy="12" r="1.8"/><circle cx="8.2" cy="17" r="1.8"/></symbol>
+  <symbol id="i-dlyric" viewBox="0 0 24 24"><rect x="3" y="4.4" width="18" height="11" rx="1.6"/><path d="M6.4 8h7.2M6.4 11h11"/><path d="M9 19h6"/><path d="M4.2 19h2.4M17.4 19h2.4"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.6" width="14" height="9.4" rx="1.7"/><path d="M8 10.6V7.9a4 4 0 018 0v2.7"/></symbol>
+  <symbol id="i-mini" viewBox="0 0 24 24"><rect x="4" y="4.6" width="16" height="14.8" rx="1.7"/><rect x="11.2" y="11.4" width="6.6" height="5.6" rx="1"/></symbol>
+  <symbol id="i-hifi" viewBox="0 0 24 24"><path d="M4 6.4v11.2M8 9.2v5.6M12 4.8v14.4M16 8.6v6.8M20 11v2"/></symbol>
+  <symbol id="i-bug" viewBox="0 0 24 24"><path d="M12 6.4c2.3 0 3.9 1.7 3.9 3.9v3.3a3.9 3.9 0 01-7.8 0v-3.3c0-2.2 1.6-3.9 3.9-3.9z"/><path d="M12 3.2v3.2M4.4 8.6l2.9 1.6M19.6 8.6l-2.9 1.6M4.4 16.2l2.9-1.4M19.6 16.2l-2.9-1.4M1.8 12.4h1.8M20.4 12.4h1.8"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M11.6 2.8l1.9 5.5 5.5 1.9-5.5 1.9-1.9 5.5-1.9-5.5-5.5-1.9 5.5-1.9z"/><path d="M18.6 15.4l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h3.9L18.3 9.6a1.9 1.9 0 000-2.7l-1.2-1.2a1.9 1.9 0 00-2.7 0L4 16.1z"/><path d="M14.4 6.4l3.2 3.2"/></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7.4 18.2a4.1 4.1 0 01-.4-8.2 5.6 5.6 0 0110.5 1.4 3.6 3.6 0 01-.5 6.8z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4.2v10"/><path d="M8 10.4l4 4 4-4"/><path d="M5 19.2h14"/></symbol>
+  <symbol id="i-cache" viewBox="0 0 24 24"><ellipse cx="12" cy="6.4" rx="7" ry="2.8"/><path d="M5 6.4v11.2c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6.4"/><path d="M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8"/></symbol>
+  <symbol id="i-font" viewBox="0 0 24 24"><path d="M6 19.2L12 4.8l6 14.4"/><path d="M8.6 13.6h6.8"/></symbol>
+  <symbol id="i-align" viewBox="0 0 24 24"><path d="M4 6.4h16M4 12h9.6M4 17.6h13"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2.8" y="6.2" width="18.4" height="11.6" rx="2"/><path d="M6.4 10h.6M9.8 10h.6M13.2 10h.6M16.6 10h.6M6.4 13.6h11.2"/></symbol>
 </svg>
 
 <!-- ============ 标题栏 ============ -->
@@ -59,26 +71,26 @@
     <div class="search-box">
       <svg class="s-icon"><use href="#i-search"/></svg>
       <input id="searchInput" type="text" placeholder="搜索歌曲、歌手、专辑（支持拼音/首字母 zjl）" spellcheck="false" />
-      <button id="searchClear" class="s-clear" title="清空" hidden><svg><use href="#i-close"/></svg></button>
+      <button id="searchClear" class="s-clear" title="清空" hidden aria-label="清空"><svg><use href="#i-close"/></svg></button>
     </div>
   </div>
   <div class="tb-right">
-    <button class="wbtn" id="btnLyricToggle" title="歌词面板"><svg><use href="#i-album"/></svg></button>
-    <button class="wbtn" id="btnDLyric" title="桌面歌词（Ctrl+Alt+D）"><svg><use href="#i-dlyric"/></svg></button>
-    <button class="wbtn" id="btnHifi" title="独占输出（位完美）"><svg><use href="#i-hifi"/></svg></button>
-    <button class="wbtn" id="btnMini" title="迷你模式（Ctrl+Alt+M）"><svg><use href="#i-mini"/></svg></button>
+    <button class="wbtn" id="btnLyricToggle" title="歌词面板" aria-label="歌词面板"><svg><use href="#i-album"/></svg></button>
+    <button class="wbtn" id="btnDLyric" title="桌面歌词（Ctrl+Alt+D）" aria-label="桌面歌词（Ctrl+Alt+D）"><svg><use href="#i-dlyric"/></svg></button>
+    <button class="wbtn" id="btnHifi" title="独占输出（位完美）" aria-label="独占输出（位完美）"><svg><use href="#i-hifi"/></svg></button>
+    <button class="wbtn" id="btnMini" title="迷你模式（Ctrl+Alt+M）" aria-label="迷你模式（Ctrl+Alt+M）"><svg><use href="#i-mini"/></svg></button>
     <!-- v3.4.0：低频图标收进 ⋯，标题栏从 10 个键压到 5 个 -->
     <div class="tb-fold" id="tbFold">
-      <button class="wbtn" id="btnMore" title="更多"><svg><use href="#i-more"/></svg></button>
+      <button class="wbtn" id="btnMore" title="更多" aria-label="更多"><svg><use href="#i-more"/></svg></button>
       <div class="tb-fold-menu" id="tbFoldMenu">
-        <button id="btnScan" title="音乐文件夹与扫描"><svg><use href="#i-folder"/></svg><span>音乐文件夹</span></button>
-        <button id="btnDiag" title="诊断信息（解析失败 / mpv 日志）"><svg><use href="#i-bug"/></svg><span>诊断信息</span></button>
+        <button id="btnScan" title="音乐文件夹与扫描" aria-label="音乐文件夹与扫描"><svg><use href="#i-folder"/></svg><span>音乐文件夹</span></button>
+        <button id="btnDiag" title="诊断信息（解析失败 / mpv 日志）" aria-label="诊断信息（解析失败 / mpv 日志）"><svg><use href="#i-bug"/></svg><span>诊断信息</span></button>
       </div>
     </div>
     <span class="tb-sep"></span>
-    <button class="wbtn" id="btnMin" title="最小化"><svg><use href="#i-min"/></svg></button>
-    <button class="wbtn" id="btnMax" title="最大化"><svg><use href="#i-max"/></svg></button>
-    <button class="wbtn danger" id="btnClose" title="关闭"><svg><use href="#i-close"/></svg></button>
+    <button class="wbtn" id="btnMin" title="最小化" aria-label="最小化"><svg><use href="#i-min"/></svg></button>
+    <button class="wbtn" id="btnMax" title="最大化" aria-label="最大化"><svg><use href="#i-max"/></svg></button>
+    <button class="wbtn danger" id="btnClose" title="关闭" aria-label="关闭"><svg><use href="#i-close"/></svg></button>
   </div>
 </header>
 
@@ -99,8 +111,8 @@
     <nav class="nav-group" id="playlistNav">
       <div class="nav-title">
         <span>我的歌单</span>
-        <button class="mini-btn" id="btnImportPlaylist" title="导入 m3u 歌单" style="margin-left:auto"><svg><use href="#i-folder"/></svg></button>
-        <button class="mini-btn" id="btnNewPlaylist" title="新建歌单"><svg><use href="#i-plus"/></svg></button>
+        <button class="mini-btn" id="btnImportPlaylist" title="导入 m3u 歌单" style="margin-left:auto" aria-label="导入 m3u 歌单"><svg><use href="#i-folder"/></svg></button>
+        <button class="mini-btn" id="btnNewPlaylist" title="新建歌单" aria-label="新建歌单"><svg><use href="#i-plus"/></svg></button>
       </div>
       <div id="playlistList"></div>
     </nav>
@@ -111,6 +123,10 @@
 
   <!-- 内容区 -->
   <main id="content">
+    <!-- v2.8.40：本地列表视图改成单一滚动容器。
+         以前 tableBody 自己滚、viewHeader 永远钉在顶部，大封面吃掉 260px 高度；
+         现在头图随滚动走、表头 sticky 吸顶（Apple Music 的专辑页手法）。 -->
+    <div class="view-scroll" id="viewScroll">
     <div id="viewHeader" class="view-header">
       <div class="vh-cover" id="vhCover"><svg><use href="#i-music"/></svg></div>
       <div class="vh-meta">
@@ -124,16 +140,22 @@
       </div>
     </div>
 
-    <div class="table-head" id="tableHead">
-      <div class="col-idx">#</div>
-      <div class="col-title">标题</div>
-      <div class="col-artist" data-sort="artist">歌手</div>
-      <div class="col-album" data-sort="album">专辑</div>
-      <div class="col-spec" data-sort="quality" title="格式 / 位深 / 采样率，点按按音质排序">规格</div>
-      <div class="col-dur" data-sort="duration">时长</div>
+    <div class="table-head" id="tableHead" role="row">
+      <div class="col-idx" role="columnheader">#</div>
+      <div class="col-title" role="columnheader">标题</div>
+      <div class="col-artist" data-sort="artist" role="columnheader" aria-sort="none">歌手</div>
+      <div class="col-album" data-sort="album" role="columnheader" aria-sort="none">专辑</div>
+      <div class="col-spec" data-sort="quality" role="columnheader" aria-sort="none" title="格式 / 位深 / 采样率，点按按音质排序">规格</div>
+      <div class="col-dur" data-sort="duration" role="columnheader" aria-sort="none">时长</div>
+      <!-- v2.8.40：列表 / 卡片切换（绝对定位在表头右内边距区，不参与 --cols 网格） -->
+      <div class="th-tools" role="group" aria-label="视图切换">
+        <button class="th-btn" id="btnViewToggle" title="切换卡片视图" aria-label="切换卡片视图" aria-pressed="false"><svg><use href="#i-grid"/></svg></button>
+      </div>
     </div>
 
-    <div class="table-body" id="tableBody"></div>
+    <div class="table-body" id="tableBody" role="rowgroup" aria-label="歌曲列表" tabindex="0"></div>
+    <div class="kb-hint" id="kbHint" hidden aria-hidden="true">↑↓ 选行 · Enter 播放 · Ctrl+Enter 下一首播放 · 空格 暂停 · Esc 退出</div>
+    </div><!-- /viewScroll -->
 
     <!-- 多选工具条（v2.6）：Ctrl/Shift 选中歌曲后浮现 -->
     <div class="sel-bar" id="selBar" hidden>
@@ -172,10 +194,10 @@
       <div class="lyric-empty">暂无歌词</div>
     </div>
     <div class="lp-tools">
-      <button class="mini-btn" id="btnLyricSmaller" title="减小字号">A-</button>
-      <button class="mini-btn" id="btnLyricBigger" title="增大字号">A+</button>
-      <button class="mini-btn" id="btnLyricEarlier" title="歌词提前 0.5s">«</button>
-      <button class="mini-btn" id="btnLyricLater" title="歌词延后 0.5s">»</button>
+      <button class="mini-btn" id="btnLyricSmaller" title="减小字号" aria-label="减小字号">A-</button>
+      <button class="mini-btn" id="btnLyricBigger" title="增大字号" aria-label="增大字号">A+</button>
+      <button class="mini-btn" id="btnLyricEarlier" title="歌词提前 0.5s" aria-label="歌词提前 0.5s">«</button>
+      <button class="mini-btn" id="btnLyricLater" title="歌词延后 0.5s" aria-label="歌词延后 0.5s">»</button>
       <span class="lp-offset" id="lpOffset">0.0s</span>
     </div>
   </aside>
@@ -189,17 +211,17 @@
       <div class="pb-title" id="pbTitle">未在播放</div>
       <div class="pb-artist" id="pbArtist">—</div>
     </div>
-    <button class="icon-btn fav" id="btnFav" title="收藏"><svg><use href="#i-heart"/></svg></button>
+    <button class="icon-btn fav" id="btnFav" title="收藏" aria-label="收藏"><svg><use href="#i-heart"/></svg></button>
   </div>
 
   <div class="pb-center">
     <div class="pb-controls">
-      <button class="icon-btn" id="btnMode" title="播放模式"><svg><use href="#i-list"/></svg></button>
-      <button class="icon-btn lg" id="btnPrev" title="上一首"><svg><use href="#i-prev"/></svg></button>
-      <button class="icon-btn play" id="btnPlay" title="播放/暂停"><svg><use href="#i-play"/></svg></button>
-      <button class="icon-btn lg" id="btnNext" title="下一首"><svg><use href="#i-next"/></svg></button>
-      <button class="icon-btn" id="btnQueue" title="播放队列"><svg><use href="#i-list"/></svg></button>
-      <button class="ab-btn" id="btnAb" title="A-B 循环：点一下设起点，再点一下设终点（拖动进度条可重设）">A-B</button>
+      <button class="icon-btn" id="btnMode" title="播放模式" aria-label="播放模式"><svg><use href="#i-list"/></svg></button>
+      <button class="icon-btn lg" id="btnPrev" title="上一首" aria-label="上一首"><svg><use href="#i-prev"/></svg></button>
+      <button class="icon-btn play" id="btnPlay" title="播放/暂停" aria-label="播放/暂停"><svg><use href="#i-play"/></svg></button>
+      <button class="icon-btn lg" id="btnNext" title="下一首" aria-label="下一首"><svg><use href="#i-next"/></svg></button>
+      <button class="icon-btn" id="btnQueue" title="播放队列" aria-label="播放队列"><svg><use href="#i-list"/></svg></button>
+      <button class="ab-btn" id="btnAb" title="A-B 循环：点一下设起点，再点一下设终点（拖动进度条可重设）" aria-label="A-B 循环：点一下设起点，再点一下设终点（拖动进度条可重设）">A-B</button>
     </div>
     <div class="pb-progress">
       <span class="t" id="tCur">0:00</span>
@@ -210,10 +232,10 @@
 
   <div class="pb-right">
     <span class="hifi-badge" id="hifiBadge" hidden></span>
-    <button class="icon-btn" id="btnSleep" title="睡眠定时"><svg><use href="#i-clock"/></svg></button>
-    <button class="icon-btn" id="btnEq" title="均衡器"><svg><use href="#i-sliders"/></svg></button>
-    <button class="icon-btn" id="btnNorm" title="音量均衡"><svg><use href="#i-eq"/></svg></button>
-    <button class="icon-btn" id="btnMute" title="静音"><svg><use href="#i-volume"/></svg></button>
+    <button class="icon-btn" id="btnSleep" title="睡眠定时" aria-label="睡眠定时"><svg><use href="#i-clock"/></svg></button>
+    <button class="icon-btn" id="btnEq" title="均衡器" aria-label="均衡器"><svg><use href="#i-sliders"/></svg></button>
+    <button class="icon-btn" id="btnNorm" title="音量均衡" aria-label="音量均衡"><svg><use href="#i-eq"/></svg></button>
+    <button class="icon-btn" id="btnMute" title="静音" aria-label="静音"><svg><use href="#i-volume"/></svg></button>
     <div class="volbar" id="volBar"><i class="fill" id="volFill"></i><i class="dot" id="volDot"></i></div>
     <span class="vol-val" id="volVal">80</span>
   </div>
@@ -224,9 +246,9 @@
   <div class="mv-head">
     <span class="mv-brand"><img src="../assets/icon-32.png" alt="" /><b>猪专属播放器</b></span>
     <div class="mv-win no-drag">
-      <button class="mv-btn" id="miniRestore" title="回到完整模式（Ctrl+Alt+M）"><svg><use href="#i-max"/></svg></button>
-      <button class="mv-btn" id="miniMin" title="最小化"><svg><use href="#i-min"/></svg></button>
-      <button class="mv-btn mv-close" id="miniClose" title="关闭"><svg><use href="#i-close"/></svg></button>
+      <button class="mv-btn" id="miniRestore" title="回到完整模式（Ctrl+Alt+M）" aria-label="回到完整模式（Ctrl+Alt+M）"><svg><use href="#i-max"/></svg></button>
+      <button class="mv-btn" id="miniMin" title="最小化" aria-label="最小化"><svg><use href="#i-min"/></svg></button>
+      <button class="mv-btn mv-close" id="miniClose" title="关闭" aria-label="关闭"><svg><use href="#i-close"/></svg></button>
     </div>
   </div>
 
@@ -245,11 +267,11 @@
   </div>
 
   <div class="mv-controls">
-    <button class="mv-ctl" id="mvMode" title="播放模式"><svg><use href="#i-list"/></svg></button>
-    <button class="mv-ctl" id="mvPrev" title="上一首"><svg><use href="#i-prev"/></svg></button>
-    <button class="mv-ctl mv-play" id="mvPlay" title="播放/暂停"><svg><use href="#i-play"/></svg></button>
-    <button class="mv-ctl" id="mvNext" title="下一首"><svg><use href="#i-next"/></svg></button>
-    <button class="mv-ctl mv-fav" id="mvFav" title="收藏"><svg><use href="#i-heart"/></svg></button>
+    <button class="mv-ctl" id="mvMode" title="播放模式" aria-label="播放模式"><svg><use href="#i-list"/></svg></button>
+    <button class="mv-ctl" id="mvPrev" title="上一首" aria-label="上一首"><svg><use href="#i-prev"/></svg></button>
+    <button class="mv-ctl mv-play" id="mvPlay" title="播放/暂停" aria-label="播放/暂停"><svg><use href="#i-play"/></svg></button>
+    <button class="mv-ctl" id="mvNext" title="下一首" aria-label="下一首"><svg><use href="#i-next"/></svg></button>
+    <button class="mv-ctl mv-fav" id="mvFav" title="收藏" aria-label="收藏"><svg><use href="#i-heart"/></svg></button>
   </div>
 </div>
 
@@ -258,15 +280,15 @@
   <canvas id="fsSpectrum" height="108"></canvas>
   <div class="fs-head">
     <span>正在播放</span>
-    <div id="fsHeadTools">
-      <button class="uix-btn" id="fsFx" title="封面特效（循环切换）" aria-label="封面特效">◉</button>
-      <button class="uix-btn" id="fsLyricSize" title="歌词字号" aria-label="歌词字号">A</button>
-      <button class="uix-btn" id="fsLyricAlign" title="歌词对齐" aria-label="歌词对齐">≡</button>
-      <button class="uix-btn" id="fsOffsetMinus" title="歌词提前 0.5 秒" aria-label="歌词提前">−</button>
-      <button class="uix-btn" id="fsOffsetPlus" title="歌词延后 0.5 秒" aria-label="歌词延后">+</button>
-      <button class="uix-btn" id="fsFxOff" title="开关频谱光效" aria-label="开关频谱光效">✦</button>
-      <button class="uix-btn" id="fsGallery" title="封面画廊" aria-label="封面画廊">▦</button>
-      <button class="mini-btn" id="fsClose" title="收起（Esc）"><svg><use href="#i-close"/></svg></button>
+    <div id="fsHeadTools" role="toolbar" aria-label="全屏播放页工具">
+      <button class="uix-btn" id="fsFx" title="封面特效（循环切换）" aria-label="封面特效"><svg><use href="#i-spark"/></svg></button>
+      <button class="uix-btn" id="fsLyricSize" title="歌词字号" aria-label="歌词字号"><svg><use href="#i-font"/></svg></button>
+      <button class="uix-btn" id="fsLyricAlign" title="歌词对齐" aria-label="歌词对齐"><svg><use href="#i-align"/></svg></button>
+      <button class="uix-btn" id="fsOffsetMinus" title="歌词提前 0.5 秒" aria-label="歌词提前"><svg><use href="#i-minus"/></svg></button>
+      <button class="uix-btn" id="fsOffsetPlus" title="歌词延后 0.5 秒" aria-label="歌词延后"><svg><use href="#i-plus"/></svg></button>
+      <button class="uix-btn" id="fsFxOff" title="开关频谱光效" aria-label="开关频谱光效"><svg><use href="#i-hifi"/></svg></button>
+      <button class="uix-btn" id="fsGallery" title="封面画廊" aria-label="封面画廊"><svg><use href="#i-grid"/></svg></button>
+      <button class="mini-btn" id="fsClose" title="收起（Esc）" aria-label="收起全屏页"><svg><use href="#i-close"/></svg></button>
     </div>
   </div>
   <div class="fs-body">
@@ -286,11 +308,11 @@
       <span class="t" id="fsDur">0:00</span>
     </div>
     <div class="fs-ctrl">
-      <button class="icon-btn" id="fsMode" title="播放模式"><svg><use href="#i-list"/></svg></button>
-      <button class="icon-btn lg" id="fsPrev" title="上一首"><svg><use href="#i-prev"/></svg></button>
-      <button class="icon-btn play" id="fsPlay" title="播放/暂停"><svg><use href="#i-play"/></svg></button>
-      <button class="icon-btn lg" id="fsNext" title="下一首"><svg><use href="#i-next"/></svg></button>
-      <button class="icon-btn fav" id="fsFav" title="收藏"><svg><use href="#i-heart"/></svg></button>
+      <button class="icon-btn" id="fsMode" title="播放模式" aria-label="播放模式"><svg><use href="#i-list"/></svg></button>
+      <button class="icon-btn lg" id="fsPrev" title="上一首" aria-label="上一首"><svg><use href="#i-prev"/></svg></button>
+      <button class="icon-btn play" id="fsPlay" title="播放/暂停" aria-label="播放/暂停"><svg><use href="#i-play"/></svg></button>
+      <button class="icon-btn lg" id="fsNext" title="下一首" aria-label="下一首"><svg><use href="#i-next"/></svg></button>
+      <button class="icon-btn fav" id="fsFav" title="收藏" aria-label="收藏"><svg><use href="#i-heart"/></svg></button>
       <button class="icon-btn fs-queue-btn" id="fsQueue" title="播放队列" aria-label="播放队列"><svg><use href="#i-queue"/></svg></button>
     </div>
   </div>
@@ -325,7 +347,7 @@
   <div class="sp-head">
     <span>独占输出</span>
     <div class="eq-head-right">
-      <button class="mini-btn" id="btnAudioRefresh" title="重新检测设备"><svg><use href="#i-refresh"/></svg></button>
+      <button class="mini-btn" id="btnAudioRefresh" title="重新检测设备" aria-label="重新检测设备"><svg><use href="#i-refresh"/></svg></button>
       <button class="mini-btn" id="btnAudioClose"><svg><use href="#i-close"/></svg></button>
     </div>
   </div>
@@ -362,7 +384,7 @@
   <div class="eq-bands" id="eqBands"></div>
   <div class="eq-foot">
     <span class="eq-hint">拖动滑块调整 · 双击归零</span>
-    <button class="mini-btn" id="btnEqFlat" title="全部归零">重置</button>
+    <button class="mini-btn" id="btnEqFlat" title="全部归零" aria-label="全部归零">重置</button>
   </div>
 </div>
 
@@ -423,7 +445,7 @@
         <div class="diag-bar">
           <span class="diag-sum" id="diagFailSum">正在读取…</span>
           <span class="grow"></span>
-          <button class="mini-btn" id="btnDiagClear" title="清空失败记录（下次扫描会重新记录）">清空记录</button>
+          <button class="mini-btn" id="btnDiagClear" title="清空失败记录（下次扫描会重新记录）" aria-label="清空失败记录（下次扫描会重新记录）">清空记录</button>
         </div>
         <div class="diag-list" id="diagFailList"></div>
       </div>
@@ -432,11 +454,11 @@
           <span class="diag-dot" id="diagMpvDot"></span>
           <span id="diagMpvState">引擎未运行</span>
           <span class="grow"></span>
-          <button class="mini-btn active" data-mpv="live" title="本次运行期间的 mpv 事件">实时</button>
-          <button class="mini-btn" data-mpv="file" title="data\lx-player.log 尾部">日志文件</button>
-          <button class="mini-btn" id="btnDiagProbeDevice" title="实测声卡现在能不能被别的程序打开">检测声卡</button>
-          <button class="mini-btn" id="btnDiagRelease" title="关闭引擎、清掉残留进程并确认声卡已释放">释放独占</button>
-          <button class="mini-btn" id="btnDiagMpvRefresh" title="刷新">刷新</button>
+          <button class="mini-btn active" data-mpv="live" title="本次运行期间的 mpv 事件" aria-label="本次运行期间的 mpv 事件">实时</button>
+          <button class="mini-btn" data-mpv="file" title="data\lx-player.log 尾部" aria-label="data\lx-player.log 尾部">日志文件</button>
+          <button class="mini-btn" id="btnDiagProbeDevice" title="实测声卡现在能不能被别的程序打开" aria-label="实测声卡现在能不能被别的程序打开">检测声卡</button>
+          <button class="mini-btn" id="btnDiagRelease" title="关闭引擎、清掉残留进程并确认声卡已释放" aria-label="关闭引擎、清掉残留进程并确认声卡已释放">释放独占</button>
+          <button class="mini-btn" id="btnDiagMpvRefresh" title="刷新" aria-label="刷新">刷新</button>
         </div>
         <pre class="diag-log" id="diagLog"></pre>
       </div>
@@ -462,6 +484,8 @@
 <div id="toast" class="toast" hidden></div>
 
 <script src="js/util.js"></script>
+<!-- v2.8.40：虚拟滚动内核必须先于 ui.js（ui.js 反过来依赖 createVList / TABLE_ROW_H） -->
+<script src="js/vlist.js"></script>
 <script src="js/lyric.js"></script>
 <script src="js/loudness.js"></script>
 <script src="js/audiofx.js"></script>

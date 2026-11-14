@@ -145,7 +145,7 @@ ok('帧率轮：blur 铺底 / mesh / 光晕各自独立成层，滤镜值未变'
   /blur\(52px\) saturate\(1\.35\) brightness\(\.42\)/.test(css))
 ok('帧率轮：频谱调度与虚拟滚动读写分离（两版共享）',
   /_beatVal === v/.test(R('src/renderer/js/audiofx.js')) &&
-  /_tViewH/.test(R('src/renderer/js/ui.js')) &&
+  /let viewH = 0/.test(R('src/renderer/js/vlist.js')) &&
   /fsScroll !== null/.test(R('src/renderer/js/ui.js')))
 
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)

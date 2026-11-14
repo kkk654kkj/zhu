@@ -32,8 +32,10 @@
      #btnQueue 内的点击」当成点外部，立刻把刚打开的抽屉又关掉。 */
   const fsQueue = $('fsQueue')
   const queuePanel = $('queuePanel')
+  // v3.3.48：队列改成右侧滑出侧栏后，开态是 .show 类而不是 hidden
+  //（hidden 在关闭过渡结束才补上，盯它会慢 240ms）
   const syncQueueBtn = () => {
-    if (fsQueue && queuePanel) fsQueue.classList.toggle('on', !queuePanel.hidden)
+    if (fsQueue && queuePanel) fsQueue.classList.toggle('on', queuePanel.classList.contains('show'))
   }
   if (fsQueue) {
     fsQueue.addEventListener('click', (e) => {
@@ -43,7 +45,7 @@
     })
     if (queuePanel && typeof MutationObserver === 'function') {
       new MutationObserver(syncQueueBtn).observe(queuePanel, {
-        attributes: true, attributeFilter: ['hidden']
+        attributes: true, attributeFilter: ['class', 'hidden']
       })
     }
     syncQueueBtn()

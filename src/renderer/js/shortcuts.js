@@ -31,6 +31,12 @@ function bindGlobalKeys() {
         return
       }
       UI.hideContextMenu()
+      // v3.3.48：队列侧栏用 Esc 收起（滑出层，没有遮罩可点）
+      if (UI.els.queuePanel && UI.els.queuePanel.classList.contains('show')) {
+        UI.toggleQueue(false)
+        e.preventDefault()
+        return
+      }
       if (typeof Diag !== 'undefined' && Diag.isOpen()) { Diag.close(); e.preventDefault(); return }
       if (!UI.els.dirModal.hidden) { UI.hideDirModal(); e.preventDefault(); return }
       if (!document.getElementById('renameModal').hidden) { closeRenameModal(); e.preventDefault(); return }
