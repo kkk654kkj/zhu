@@ -44,6 +44,8 @@ async function toggleFavoriteCurrent() {
   catch (err) { toast('操作失败：' + (err.message || err), 2500); return }
   state.favorites = new Set(favs)
   UI.setFavorite(state.favorites.has(state.currentId))
+  // v2.8.43：底栏/迷你卡收藏后，列表行内那颗心同步翻过来
+  UI.syncFavMarks([state.currentId], state.favorites)
   updateNavCounts()
   if (state.view === 'fav') renderView()
   toast(state.favorites.has(state.currentId) ? '已加入收藏' : '已取消收藏')
