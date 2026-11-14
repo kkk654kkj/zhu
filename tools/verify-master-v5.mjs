@@ -130,6 +130,13 @@ ok('队列编辑工具已移植到 master 且各只引入一次',
   /\.qp-item \.qi-x \{/.test(R('src/renderer/css/queue-tools.css')))
 ok('master 没有联网版专属文件（daily / online）',
   !/css\/daily\.css|js\/daily\.js|js\/online\.js/.test(h))
+ok('拖动时不再把 #fsView::before 的 filter 关成 none（专辑背景模糊全程保留）',
+  !/body\.win-dragging\s+#fsView::before/.test(css) &&
+  /#fsView::before\s*\{[\s\S]{0,300}?filter:\s*blur\(52px\)/.test(css) &&
+  !/html\[data-theme="light"\]\s+body\.win-dragging\s+#fsView::before/.test(css))
+ok('仍保留迷你视图与 backdrop-filter 的拖动态降级',
+  /body\.win-dragging #miniView::before\s*\{\s*filter:\s*none;\s*\}/.test(css) &&
+  /body\.win-dragging\s*\*\s*\{[^}]*backdrop-filter:\s*none/.test(css))
 
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
 process.exit(fail ? 1 : 0)
