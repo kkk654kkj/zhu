@@ -134,11 +134,12 @@ input { font: inherit; color: inherit; }
 #titlebar img, .mv-cover img, .mv-brand img { -webkit-user-drag: none; }
 /* 拖动中给个抓手光标，和系统标题栏手感一致 */
 body.win-dragging #titlebar, body.win-dragging .mv-head, body.win-dragging .mv-body { cursor: grabbing; }
-/* v2.8.32：窗口每帧移动都会触发整窗重绘，全屏 blur / backdrop-filter 是最贵的一层。
-   拖动态临时关掉，松手立刻恢复，视觉几乎无感但能明显提帧。 */
-body.win-dragging #miniView::before,
-body.win-dragging #fsView::before,
-html[data-theme="light"] body.win-dragging #fsView::before { filter: none; }
+/* v2.8.32：窗口每帧移动都会触发整窗重绘，backdrop-filter 是最贵的一层，拖动态临时关掉。
+   v2.8.38 / v3.3.46：#fsView 在 v2.8.37 成了拖动源，用户拖的时候正看着全屏页；
+   这里原先把封面铺底那层的 filter 也一起关成 none，blur / saturate / brightness
+   瞬间全丢，专辑背景在拖动期间突然变清晰发白，看着就像「模糊层消失」。
+   全屏页的 filter 必须全程保留；只对迷你视图降级。 */
+body.win-dragging #miniView::before { filter: none; }
 body.win-dragging * { backdrop-filter: none !important; }
 /* 右上角整组：自身 + 所有子孙都显式 no-drag，双保险 */
 .tb-right, .tb-right * { -webkit-app-region: no-drag; }
