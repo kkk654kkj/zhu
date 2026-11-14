@@ -2656,6 +2656,14 @@ html[data-theme="light"] #toast,
 html[data-theme="light"] .ctx-menu,
 html[data-theme="light"] .qp-head,
 html[data-theme="light"] .eq-head { box-shadow: 0 12px 32px rgba(24,36,56,.18); }
+/* v2.8.45：浅色主题下 .toast 仍是深底（rgba(28,33,41,.96)）+ color:var(--txt) ——
+   而浅色的 --txt 是 #1c2431，深底叠深字 ≈ 1.2:1，等于看不见（用户实报「外观模式提示看不清」）。
+   浅色给一套独立墨色：白底 + 深字（≈15:1），深色主题不受影响。 */
+html[data-theme="light"] #toast {
+  background: rgba(255, 255, 255, .97);
+  border-color: rgba(8, 19, 31, .14);
+  color: #172031;
+}
 html[data-theme="light"] .fs-cover { background: linear-gradient(140deg, #dfe6f2, #c8d3e4); }
 html[data-theme="light"] #fsView::before { filter: blur(52px) saturate(1.15) brightness(1.02); opacity: .45; }
 html[data-theme="light"] #fsView .fs-title,
