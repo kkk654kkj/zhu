@@ -404,7 +404,17 @@ try {
     !/html\[data-theme="light"\]\s+body\.win-dragging\s+#fsView::before/.test(cssL))
   ok('仍保留迷你视图与 backdrop-filter 的拖动态降级（不牺牲性能口径）',
     /body\.win-dragging #miniView::before\s*\{\s*filter:\s*none;\s*\}/.test(cssL) &&
-    /body\.win-dragging\s*\*\s*\{[^}]*backdrop-filter:\s*none/.test(cssL))
+    /body\.win-dragging\s+\.scan-overlay[\s\S]{0,220}?backdrop-filter:\s*none/.test(cssL) &&
+    !/body\.win-dragging\s*\*\s*\{/.test(cssL))
+  ok('帧率轮：blur 铺底 / mesh / 光晕各自独立成层，滤镜值未变',
+    /#fsView::before\s*\{[\s\S]{0,400}?will-change:\s*transform/.test(cssL) &&
+    /body::before\s*\{[\s\S]{0,300}?will-change:\s*transform/.test(cssL) &&
+    /#fsView::after\s*\{[\s\S]{0,400}?will-change:\s*opacity/.test(cssL) &&
+    /blur\(52px\) saturate\(1\.35\) brightness\(\.42\)/.test(cssL))
+  ok('帧率轮：频谱调度与虚拟滚动读写分离（两版共享）',
+    /_beatVal === v/.test(fs.readFileSync(path.join(REPO, 'src/renderer/js/audiofx.js'), 'utf8')) &&
+    /_tViewH/.test(fs.readFileSync(path.join(REPO, 'src/renderer/js/ui.js'), 'utf8')) &&
+    /fsScroll !== null/.test(fs.readFileSync(path.join(REPO, 'src/renderer/js/ui.js'), 'utf8')))
 } catch (e) { ok('全屏页模糊层单测组', false, e.message.slice(0, 200)) }
 
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
