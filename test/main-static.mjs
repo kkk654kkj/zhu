@@ -478,6 +478,29 @@ function main() {
       /el\.classList\.remove\('paused'\)/.test(uiSrc))
     ok('歌词：渲染完立刻按当前时间落高亮（切歌瞬间不留空窗）',
       /this\.updateLyricIndex\(audio\.currentTime \+ off\)/.test(uiSrc))
+    // v2.8.42 / v3.3.50：歌词同步体检 —— 直接跑解析器，断言语义而不是字面
+    {
+      const lyricSrc2 = read('src/renderer/js/lyric.js')
+      const { parseLrc: parse2 } = new Function(lyricSrc2 + '\nreturn { parseLrc }')()
+      const sample = '[ti:测试]\n[00:00.00]测试歌 - 某歌手\n[00:00.50]词：甲\n[00:01.00]曲：乙\n'
+        + '[00:01.50]编曲：丙\n[00:02.10]混音/母带：丁\n[00:05.00]第一句歌词\n[00:09.00]第二句歌词'
+      const sp = parse2(sample)
+      ok('歌词体检：开头制作信息整段脱同步（不再抢跑）',
+        sp.sync.creditSkip === true &&
+        sp.lines.filter((l) => l.skip).length === 5 &&
+        Math.abs(sp.sync.firstVocal - 5) < 1e-6 &&
+        sp.lines[sp.lines.length - 1].skip === undefined)
+      const np = parse2('[00:01.00]他说：别走\n[00:03.00]我没有说话')
+      ok('歌词体检：正常歌词里的冒号不被误判成制作信息',
+        np.sync.creditSkip === false && np.lines.every((l) => !l.credit))
+      ok('歌词体检：高亮索引跳过 skip 行 + 面板提示已接线',
+        /while \(idx >= 0 && st\.lines\[idx\] && st\.lines\[idx\]\.skip\) idx--/.test(uiSrc) &&
+        /setLyricDiag\(parsed && parsed\.sync, track\.duration\)/.test(read('src/renderer/js/app.js')) &&
+        /id="lpDiag"/.test(read('src/renderer/index.html')))
+      ok('测试静音覆盖 HTML5 audio（Chromium mute-audio，不再只静音 mpv）',
+        /appendSwitch\('mute-audio'\)/.test(read('src/main/main.js')))
+    }
+
   }
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
