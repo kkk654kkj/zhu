@@ -273,17 +273,22 @@ const AudioFx = {
     if (!this._ro && canvasEl && (canvasEl.clientWidth !== this._w || canvasEl.clientHeight !== this._h)) {
       this._resizeCanvas()
     }
-    // 歌词面板隐藏时画布宽度会缩到很小，直接跳过
-    if (this._w < 24 || this._h < 8) return
-
-    const w = this._w
-    const h = this._h
+    // v2.8.44：取数 + 附加画布 + 节拍光晕必须在主画布尺寸检查**之前**（不变量 #39）。
+    // 以前这四行排在下一条 return 之后，注释却写着「放在尺寸检查之前」—— 主画布一旦
+    // 缩到 24px 以下（歌词面板收起 / 窗口很窄），全屏页频谱与 --beat 会一起断掉。
     const bins = this._freq
+    if (!bins) return
     this.analyser.getByteFrequencyData(bins)
     // v3.3.29：附加画布与节拍光晕放在尺寸检查之前 —— 歌词面板收起时主画布虽小，
     // 全屏页仍应拿到同一份真实频谱数据。无 analyser 时 _loop 根本不会跑。
     this._drawExtra(bins)
     this._updateBeat(bins)
+
+    // 歌词面板隐藏时画布宽度会缩到很小，主画布直接跳过（附加画布已在上面画完）
+    if (this._w < 24 || this._h < 8) return
+
+    const w = this._w
+    const h = this._h
 
     // v3.3.16：帧间隔归一化 —— 峰值帽的落速以前写死「每帧 0.008*h」，
     // 120Hz 屏幕上落得比 60Hz 快一倍，窗口高度变化时步长还会跳变

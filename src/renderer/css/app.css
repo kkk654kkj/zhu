@@ -3238,3 +3238,32 @@ html[data-theme="light"] .lp-diag {
   background: color-mix(in srgb, var(--accent) 7%, #fff);
   color: var(--txt-2);
 }
+
+/* ---------- v2.8.44：频谱光效开关的可见态 ----------
+   这个开关会持久化（localStorage uix.fxOff）。以前误触后按钮毫无变化、界面上也
+   没有任何提示，用户看到的就是「频谱光效全部失效」。现在：关掉时按钮变暗 +
+   全屏页底部挂一条可点击的提示条。 */
+.uix-btn.off { opacity: .42; }
+.uix-btn.off:hover { opacity: .75; }
+#fsView .fs-fx-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 172px;
+  transform: translateX(-50%);
+  z-index: 7;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--tone-3, rgba(255, 255, 255, .16));
+  background: rgba(12, 14, 18, .62);
+  backdrop-filter: blur(8px);
+  color: var(--txt-2, #c9ced8);
+  font-size: 12px;
+  letter-spacing: .02em;
+  cursor: pointer;
+  transition: background .12s var(--ease, ease), color .12s var(--ease, ease);
+}
+#fsView .fs-fx-hint:hover { background: rgba(22, 26, 33, .8); color: var(--txt-1, #fff); }
+#fsView .fs-fx-hint[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  #fsView .fs-fx-hint { transition: none; }
+}

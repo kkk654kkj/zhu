@@ -500,6 +500,20 @@ function main() {
       ok('主进程子进程一律带 windowsHide（shutdown / taskkill / mpv / powershell 都不许闪控制台）',
         bad.length === 0, bad.join(' || '))
     }
+    // v2.8.44：频谱 —— 附加画布/节拍取数必须在主画布尺寸检查之前（不变量 #39），
+    // 否则主画布一缩小，全屏页频谱与 --beat 会一起断。
+    {
+      const fxSrc = read('src/renderer/js/audiofx.js')
+      const iExtra = fxSrc.indexOf('this._drawExtra(bins)')
+      const iBeat = fxSrc.indexOf('this._updateBeat(bins)')
+      const iSmall = fxSrc.indexOf('if (this._w < 24 || this._h < 8) return')
+      ok('频谱：附加画布 + --beat 在尺寸早退之前（全屏页不再随主画布一起断）',
+        iExtra > 0 && iBeat > 0 && iSmall > 0 && iExtra < iSmall && iBeat < iSmall)
+      const uSrc = read('src/renderer/js/uix.js')
+      ok('频谱光效开关：关闭时给可见提示 + aria-pressed（误触后能自己找回来）',
+        /id = 'fsFxHint'/.test(uSrc) && /setAttribute\('aria-pressed'/.test(uSrc) &&
+        /\.uix-btn\.off \{/.test(appCss))
+    }
     // v2.8.42 / v3.3.50：歌词同步体检 —— 直接跑解析器，断言语义而不是字面
     {
       const lyricSrc2 = read('src/renderer/js/lyric.js')
