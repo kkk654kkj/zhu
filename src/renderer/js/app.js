@@ -109,6 +109,16 @@ async function createAudioEngine(settings) {
     audio.preload = 'auto'
   }
 
+  /* v2.8.42：测试实例双保险静音。
+     主进程已加 Chromium 的 --mute-audio（管 <audio>/WebAudio/进程输出），
+     这里再按 appInfo.testMute 直接压 audio.muted —— 两道任意一道生效都不出声。
+     只在 LX_TEST_MUTE=1 的实例上触发，正常启动 true 也不受影响。 */
+  if (window.api && window.api.appInfo) {
+    window.api.appInfo().then((info) => {
+      if (info && info.testMute && audio) audio.muted = true
+    }).catch(() => {})
+  }
+
   player = new Player(audio, {
     volume: settings.volume ?? 0.8,
     muted: settings.muted ?? false,
