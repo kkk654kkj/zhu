@@ -527,6 +527,8 @@ function main() {
       ok('频谱光效开关：关闭时给可见提示 + aria-pressed（误触后能自己找回来）',
         /id = 'fsFxHint'/.test(uSrc) && /setAttribute\('aria-pressed'/.test(uSrc) &&
         /\.uix-btn\.off \{/.test(appCss))
+      ok('频谱：附加画布缓存为 0 时会补测尺寸（RO 没投递也能画出来）',
+        /if \(w < 24 \|\| h < 8\) \{/.test(fxSrc) && /item\.w = cw/.test(fxSrc))
     }
     // v2.8.42 / v3.3.50：歌词同步体检 —— 直接跑解析器，断言语义而不是字面
     {
