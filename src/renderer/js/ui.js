@@ -205,7 +205,8 @@ const UI = {
       if (!t) { cells.push('<div class="mc empty" aria-hidden="true"></div>'); continue }
       const isCur = t.id === curId
       const isSel = ctx.selected && ctx.selected.has(t.id)
-      const eq = isCur ? '<span class="eq-bars"><i></i><i></i><i></i></span>' : ''
+      // v2.8.41：音波节点常驻，靠 .playing 类显隐（切歌只切 class，不重画）
+      const eq = '<span class="eq-bars"><i></i><i></i><i></i></span>'
       cells.push(`<div class="mc${isCur ? ' playing' : ''}${isSel ? ' selected' : ''}" data-id="${esc(t.id)}" data-index="${idx}" title="${esc(t.title)}${t.artist ? ' — ' + esc(t.artist) : ''}">
         <div class="mc-cv">${t.cover ? `<img src="${esc(t.cover)}" decoding="async" draggable="false" alt="" />` : icon('music')}<span class="mc-play">${icon('play')}</span></div>
         <div class="mc-name">${eq}${esc(t.title)}</div>
@@ -232,7 +233,8 @@ const UI = {
     // error 捕获委托统一摘除，占位块天然兜底。
     // v2.8.27：去掉 loading="lazy" —— 自定义协议不参与 lazy 调度，滚动时反而多一帧空白。
     const cv = `<span class="cv-mini">${t.cover ? `<img src="${esc(t.cover)}" decoding="async" draggable="false" alt="" />` : ''}</span>`
-    const eq = isCur ? '<span class="eq-bars"><i></i><i></i><i></i></span>' : ''
+    // v2.8.41：同上 —— 常驻节点 + CSS 显隐，切歌时不用重画窗口
+    const eq = '<span class="eq-bars"><i></i><i></i><i></i></span>'
     // v2.8.26（追加清单 #7）：行内快捷钮（收藏/加入歌单），hover 浮现，覆盖在时长列上；
     // 点击走 tableBody 的委托（bindTrackListUi），复用右键菜单的动作管道
     const favOn = ctx.favorites && ctx.favorites.has(t.id) ? ' on' : ''
@@ -275,7 +277,10 @@ const UI = {
     if (playing) this._tCurrentId = id
     else if (this._tCurrentId === id) this._tCurrentId = null
     $$('#tableBody .tr, #tableBody .mc').forEach((el) => {
-      el.classList.toggle('playing', el.dataset.id === id)
+      const on = el.dataset.id === id
+      el.classList.toggle('playing', on)
+      // v2.8.41：非当前行必须把 paused 一起摘掉 —— 否则上一首会留下 tr.paused 脏类
+      if (!on) el.classList.remove('paused')
     })
   },
 
@@ -707,6 +712,13 @@ const UI = {
       fsBox.innerHTML = parsed.lines.map((l, i) =>
         `<div class="lyric-line" data-i="${i}">${esc(l.text || '♪')}</div>`).join('')
       fsBox.scrollTop = 0
+    }
+    // v2.8.41：渲染完立刻按当前播放时间落一次高亮。
+    // 以前只靠调用方（loadLyric 末尾 / timeupdate）触发，切歌瞬间会有一小段
+    // 「歌词出来了但一行都不亮」的空窗，看着像不跟随。
+    if (typeof audio !== 'undefined' && audio && typeof audio.currentTime === 'number') {
+      const off = (typeof state !== 'undefined' && state && state.lyricOffset) ? state.lyricOffset : 0
+      this.updateLyricIndex(audio.currentTime + off)
     }
   },
 

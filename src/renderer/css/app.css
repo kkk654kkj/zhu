@@ -516,14 +516,18 @@ body.win-dragging #galleryView { backdrop-filter: none !important; }
 .cv-mini img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 /* v2.8.25 UI 美化（A 方案）：正在播放行的「均衡器跳动」小动画，
-   渲染在标题前，一眼可辨当前曲。 */
+   渲染在标题前，一眼可辨当前曲。
+   v2.8.41：节点改成**常驻**（每行都渲染，默认 display:none），由 .playing 类控制显隐。
+   以前只在渲染时 isCur 才插入节点，切歌只切 class 不重画 → 上一首的音波图标留在原位
+   （用户报的「播放图标卡住」），新播放行反而不出现图标。 */
 .eq-bars {
-  display: inline-flex;
+  display: none;
   gap: 2px;
   align-items: flex-end;
   height: 12px;
   flex: 0 0 auto;
 }
+.tr.playing .eq-bars, .mc.playing .eq-bars { display: inline-flex; }
 .eq-bars i {
   width: 3px;
   background: var(--accent);
