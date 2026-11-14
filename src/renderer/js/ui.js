@@ -135,7 +135,11 @@ const UI = {
       if (typeof ResizeObserver === 'function' && !this._tResizeBound) {
         this._tResizeBound = true
         let raf2 = 0
-        new ResizeObserver(() => {
+        // 帧率轮：容器高度缓存起来，滚动帧不再读 clientHeight
+        this._tViewH = Math.max(1, body.clientHeight || 600)
+        new ResizeObserver((entries) => {
+          const r = entries && entries[0] && entries[0].contentRect
+          this._tViewH = Math.max(1, Math.round(r ? r.height : body.clientHeight))
           if (raf2) return
           raf2 = requestAnimationFrame(() => {
             raf2 = 0
@@ -157,9 +161,15 @@ const UI = {
     const tracks = this._tTracks
     if (!tracks || !tracks.length) return
     const n = tracks.length
-    const viewH = body.clientHeight || 600
-    const start = Math.max(0, Math.floor(body.scrollTop / TABLE_ROW_H) - TABLE_VBUF)
-    const end = Math.min(n, Math.ceil((body.scrollTop + viewH) / TABLE_ROW_H) + TABLE_VBUF)
+    /* 帧率轮：容器高度由 ResizeObserver 缓存。上一帧刚写过占位 div 的
+       style.height，滚动帧再读 clientHeight 会强制同步布局；有 RO 时改读缓存，
+       无 RO 的兜底路径保持原样。scrollTop 同帧只读一次。 */
+    const viewH = this._tResizeBound
+      ? (this._tViewH || (this._tViewH = body.clientHeight || 600))
+      : (body.clientHeight || 600)
+    const scrollTop = body.scrollTop
+    const start = Math.max(0, Math.floor(scrollTop / TABLE_ROW_H) - TABLE_VBUF)
+    const end = Math.min(n, Math.ceil((scrollTop + viewH) / TABLE_ROW_H) + TABLE_VBUF)
     const oldStart = this._tStart
     const oldEnd = this._tEnd
     // 首帧 / 强制（切视图·排序·搜索·收藏变化）→ 整块重建，上下带占位块
@@ -758,6 +768,11 @@ const UI = {
     // v2.8.25：全屏播放页同步当前句
     if (this.els.fsLyric && this.els.fsLyric.textContent !== cur) this.els.fsLyric.textContent = cur
     // v3.3.29（P3 #17）：全屏页多行歌词镜像高亮 + 当前行居中（瞬时定位，同 lpLyrics 口径）
+    /* 帧率轮：两处歌词面板的居中定位改成「先读完全部布局量、最后统一写 scrollTop」。
+       以前 fsBox.scrollTop 写完立刻读 box.getBoundingClientRect()，是一次强制同步布局。
+       居中算法与瞬时定位口径一字未改，视觉完全一致。 */
+    let fsScroll = null
+    let boxScroll = null
     const fsBox = this.els.fsLyrics
     if (fsBox && st.fsIndex !== idx) {
       const fn = fsBox.children
@@ -767,7 +782,7 @@ const UI = {
         const bRect = fsBox.getBoundingClientRect()
         const nRect = fn[idx].getBoundingClientRect()
         const d = (nRect.top - bRect.top) - (fsBox.clientHeight - nRect.height) / 2
-        fsBox.scrollTop = Math.min(Math.max(0, fsBox.scrollTop + d),
+        fsScroll = Math.min(Math.max(0, fsBox.scrollTop + d),
           Math.max(0, fsBox.scrollHeight - fsBox.clientHeight))
       }
       st.fsIndex = idx
@@ -780,8 +795,10 @@ const UI = {
       const delta = (nodeRect.top - boxRect.top) - (box.clientHeight - nodeRect.height) / 2
       // 必须瞬时定位：高亮约每 0.2s 切一次，smooth 动画会被下一次调用打断，滚动几乎不动
       const max = box.scrollHeight - box.clientHeight
-      box.scrollTop = Math.min(Math.max(0, box.scrollTop + delta), Math.max(0, max))
+      boxScroll = Math.min(Math.max(0, box.scrollTop + delta), Math.max(0, max))
     }
+    if (fsScroll !== null) fsBox.scrollTop = fsScroll
+    if (boxScroll !== null) box.scrollTop = boxScroll
   },
 
   setLyricOffset(sec) {

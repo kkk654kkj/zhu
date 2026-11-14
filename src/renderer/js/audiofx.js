@@ -158,6 +158,9 @@ const AudioFx = {
   // v3.3.29：全屏页第二画布（与歌词面板频谱共用同一个 Analyser，不新建音频链）
   _extra: [],
   _beatAt: 0,
+  // 帧率轮：--beat 上次写入值与 #fsView 元素缓存（避免每 100ms 重复写入/查询）
+  _beatVal: '',
+  _fsViewEl: null,
 
   /** 注册/注销附加频谱画布。没有 analyser 时也可提前注册，_draw 里自然不会绘制。 */
   addSpectrumTarget(canvas) {
@@ -258,6 +261,8 @@ const AudioFx = {
     this._canvas = null
     this._cctx = null
     this._extra = []
+    this._fsViewEl = null
+    this._beatVal = ''
   },
 
   _draw() {
@@ -300,7 +305,12 @@ const AudioFx = {
     // addColorStop 每帧抛 SyntaxError，频谱永久卡死
     // v3.3.16：主题色一秒取一次就够，getComputedStyle 会强制一次样式重算
     if (!this._accentAt || nowMs - this._accentAt > 1000) {
-      const raw = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#31c27c'
+      // 帧率轮：theme.js 把 accent 以 inline 变量写在根元素上，直接读 style 即可；
+      // 只有走 CSS 预设（html[data-accent=...]）时才退回 getComputedStyle，
+      // 省掉每秒一次的强制样式重算。取色结果与原来完全一致。
+      const root = document.documentElement
+      const raw = (root.style.getPropertyValue('--accent') ||
+        getComputedStyle(root).getPropertyValue('--accent')).trim() || '#31c27c'
       this._accent = /^#[0-9a-fA-F]{6}$/.test(raw) ? raw : '#31c27c'
       this._accentAt = nowMs
       this._accentGrad = null
@@ -360,8 +370,16 @@ const AudioFx = {
       if (!c || !c.isConnected) continue
       const w = item.ro ? item.w : c.clientWidth
       const h = item.ro ? item.h : c.clientHeight
-      if (w < 24 || h < 8) { c.style.visibility = 'hidden'; continue }
-      c.style.visibility = ''
+      /* 帧率轮：附加画布由 uix.js 的 c.hidden 控制显隐。以前 hidden 时仍每帧
+         画 56 根柱子（ResizeObserver 缓存的 w/h 还是旧值，绕过了尺寸早退），
+         且每帧重写一次 visibility。改成「目标不可见就零绘制」+ 状态变化才写
+         style；可见时的绘制内容与原来逐像素一致。 */
+      const wantHidden = c.hidden || w < 24 || h < 8
+      if (item._hidden !== wantHidden) {
+        c.style.visibility = wantHidden ? 'hidden' : ''
+        item._hidden = wantHidden
+      }
+      if (wantHidden) continue
       const pw = Math.round(w * dpr)
       const ph = Math.round(h * dpr)
       if (c.width !== pw || c.height !== ph) { c.width = pw; c.height = ph }
@@ -393,12 +411,18 @@ const AudioFx = {
     const now = performance.now()
     if (now - this._beatAt < 100) return
     this._beatAt = now
+    // 帧率轮：只在全屏页确实显示光晕时写 --beat。以前每 100ms 无条件写一次，
+    // 即使 #fsView 关着（或用户关了特效）也会触发 ::after 的 opacity 过渡重绘。
+    // 元素引用缓存，省掉每 100ms 一次 getElementById。
+    const fsView = this._fsViewEl || (this._fsViewEl = document.getElementById('fsView'))
+    if (!fsView || !fsView.classList.contains('open') || fsView.dataset.fxoff === '1') return
     const n = Math.min(24, bins.length)
     let s = 0
     for (let i = 0; i < n; i++) s += bins[i]
-    const v = Math.min(1, (s / n) / 200)
-    // 只被 #fsView::after 消费：写在根元素上会让整棵 DOM 的自定义属性继承链失效
-    const fsView = document.getElementById('fsView')
-    if (fsView) fsView.style.setProperty('--beat', v.toFixed(2))
+    const v = Math.min(1, (s / n) / 200).toFixed(2)
+    // 值未变就不写：避免重复触发 .12s opacity 过渡（只被 #fsView::after 消费）
+    if (this._beatVal === v) return
+    this._beatVal = v
+    fsView.style.setProperty('--beat', v)
   }
 }
