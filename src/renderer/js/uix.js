@@ -176,17 +176,42 @@ const UIX = (() => {
     if (alignBtn) alignBtn.addEventListener('click', () => { align = align === 'center' ? 'left' : 'center'; applyAlign() })
 
     let off = get(LS.fxoff, '0') === '1'
-    const applyOff = () => {
+    // v2.8.44：这个开关会持久化，误触之后界面上没有任何反馈 —— 用户只会觉得
+    // 「频谱光效全部失效」。除按钮态外，再挂一条可见提示，点一下就能开回来。
+    let fxHint = null
+    if (fs && !document.getElementById('fsFxHint')) {
+      fxHint = document.createElement('button')
+      fxHint.type = 'button'
+      fxHint.id = 'fsFxHint'
+      fxHint.className = 'fs-fx-hint'
+      fxHint.textContent = '频谱光效已关闭 · 点此开启'
+      fxHint.addEventListener('click', (e) => {
+        e.stopPropagation()
+        if (!off) return
+        off = false
+        applyOff()
+      })
+      fs.appendChild(fxHint)
+    }
+    const applyOff = (quiet) => {
       if (fs) fs.dataset.fxoff = off ? '1' : '0'
       set(LS.fxoff, off ? '1' : '0')
       const b = $('fsFxOff')
-      if (b) b.classList.toggle('on', !off)
-      toast(off ? '频谱光效已关闭' : '频谱光效已开启')
+      if (b) {
+        b.classList.toggle('on', !off)
+        b.classList.toggle('off', off)
+        b.setAttribute('aria-pressed', off ? 'false' : 'true')
+        b.title = off ? '频谱光效已关闭，点击开启' : '频谱光效已开启，点击关闭'
+        b.setAttribute('aria-label', b.title)
+      }
+      const hint = fxHint || document.getElementById('fsFxHint')
+      if (hint) hint.hidden = !off
+      if (!quiet) toast(off ? '频谱光效已关闭' : '频谱光效已开启')
     }
     if (fs) fs.dataset.fxoff = off ? '1' : '0'
     const offBtn = $('fsFxOff')
+    applyOff(true)
     if (offBtn) {
-      offBtn.classList.toggle('on', !off)
       offBtn.addEventListener('click', () => { off = !off; applyOff() })
     }
 
