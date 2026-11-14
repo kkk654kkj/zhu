@@ -373,8 +373,22 @@ const AudioFx = {
     for (const item of this._extra) {
       const c = item.canvas
       if (!c || !c.isConnected) continue
-      const w = item.ro ? item.w : c.clientWidth
-      const h = item.ro ? item.h : c.clientHeight
+      const w0 = item.ro ? item.w : c.clientWidth
+      const h0 = item.ro ? item.h : c.clientHeight
+      /* v2.8.44：ResizeObserver 在「窗口隐藏 / 刚显示的头几帧」不投递，缓存会一直停在
+         0×0 —— 于是全屏页频谱即使可见也永远不画。缓存为 0 而实际已有尺寸时补测一次
+         （只在 0 这个罕见分支读布局，不影响常态 60fps 的无强制布局口径）。 */
+      let w = w0
+      let h = h0
+      if (w < 24 || h < 8) {
+        const cw = c.clientWidth
+        const ch = c.clientHeight
+        if (cw >= 24 && ch >= 8) {
+          w = cw
+          h = ch
+          if (item.ro) { item.w = cw; item.h = ch }
+        }
+      }
       /* 帧率轮：附加画布由 uix.js 的 c.hidden 控制显隐。以前 hidden 时仍每帧
          画 56 根柱子（ResizeObserver 缓存的 w/h 还是旧值，绕过了尺寸早退），
          且每帧重写一次 visibility。改成「目标不可见就零绘制」+ 状态变化才写
