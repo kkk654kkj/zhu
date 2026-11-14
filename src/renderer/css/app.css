@@ -57,6 +57,10 @@ body::before {
   inset: 0;
   z-index: 0;
   pointer-events: none;
+  /* v2.8.39 / v3.3.47 帧率轮：整屏常驻 mesh 动画显式提到独立合成层，
+     布局/绘制与列表滚动隔离；滤镜、动画时长、透明度均不变 */
+  will-change: transform;
+  contain: layout paint;
   background:
     radial-gradient(52% 38% at 22% -6%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 70%),
     radial-gradient(44% 34% at 82% 108%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 70%);
@@ -138,9 +142,15 @@ body.win-dragging #titlebar, body.win-dragging .mv-head, body.win-dragging .mv-b
    v2.8.38 / v3.3.46：#fsView 在 v2.8.37 成了拖动源，用户拖的时候正看着全屏页；
    这里原先把封面铺底那层的 filter 也一起关成 none，blur / saturate / brightness
    瞬间全丢，专辑背景在拖动期间突然变清晰发白，看着就像「模糊层消失」。
-   全屏页的 filter 必须全程保留；只对迷你视图降级。 */
+   全屏页的 filter 必须全程保留；只对迷你视图降级。
+   v2.8.39 / v3.3.47 帧率轮：通配 * 收窄到真正带 backdrop-filter 的 4 个浮层，
+   拖动开始/结束不再对整棵 DOM 做一次全量样式重算；降级范围与视觉效果不变。
+   （dlyric.html 是独立窗口，不在这条规则的作用域内。） */
 body.win-dragging #miniView::before { filter: none; }
-body.win-dragging * { backdrop-filter: none !important; }
+body.win-dragging .scan-overlay,
+body.win-dragging .modal-mask,
+body.win-dragging #toast,
+body.win-dragging #galleryView { backdrop-filter: none !important; }
 /* 右上角整组：自身 + 所有子孙都显式 no-drag，双保险 */
 .tb-right, .tb-right * { -webkit-app-region: no-drag; }
 #titlebar { -webkit-user-select: none; }
@@ -518,6 +528,8 @@ body.win-dragging * { backdrop-filter: none !important; }
   width: 3px;
   background: var(--accent);
   border-radius: 1px;
+  /* 帧率轮：scaleY 动画独立成层，避免滚动时反复重绘正在播放行 */
+  will-change: transform;
   animation: eqjump 1s ease-in-out infinite;
   transform-origin: bottom;
 }
@@ -1300,6 +1312,8 @@ body.mini #playerbar { display: none; }
   background: var(--mv-bg, none) center / cover no-repeat;
   filter: blur(46px) saturate(1.4) brightness(.5);
   z-index: 0;
+  /* 帧率轮：同 #fsView::before，只提层不裁剪（blur 要溢出） */
+  will-change: transform;
 }
 #miniView > .mv-head,
 #miniView > .mv-body,
@@ -2291,6 +2305,10 @@ body.mini .hifi-badge { display: none; }
   background: var(--fs-bg, none) center / cover no-repeat;
   filter: blur(52px) saturate(1.35) brightness(.42);
   z-index: 0;
+  /* 帧率轮：整屏 blur 铺底独立成层，不再与歌词/频谱/光晕挤在同一绘制上下文。
+     这里刻意不做绘制裁剪 —— 那会裁掉 blur 溢出到 inset:-48px 之外的部分，
+     视觉会变。只提层，不动 filter 的任何值。 */
+  will-change: transform;
 }
 #fsView > .fs-head,
 #fsView > .fs-body,
@@ -2496,6 +2514,8 @@ body::before {
 @keyframes uixCoverPulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.018); } }
 #pbCover img, #lpCover img, #mvCover img, #fsCover img { animation: uixCoverIn .34s ease both; }
 body.uix-playing #pbCover img {
+  /* 帧率轮：播放时常驻 pulse 独立成层，不改动画时长与幅度 */
+  will-change: transform;
   animation: uixCoverIn .34s ease both, uixCoverPulse 5s ease-in-out .34s infinite;
 }
 body:not(.uix-playing) #fsCover[data-fx] img { animation-play-state: paused; }
@@ -2588,6 +2608,8 @@ body:not(.uix-playing) #fsCover[data-fx] img { animation-play-state: paused; }
   background: radial-gradient(70% 100% at 50% 100%, color-mix(in srgb, var(--accent) 24%, transparent), transparent 72%);
   opacity: calc(.18 + var(--beat) * .62);
   transition: opacity .12s linear;
+  /* 帧率轮：--beat 驱动的光晕层独立成层，避免每次亮度变化重绘整屏 */
+  will-change: opacity;
 }
 #fsView[data-fxoff="1"] #fsSpectrum, #fsView[data-fxoff="1"]::after { display: none; }
 
@@ -2603,7 +2625,7 @@ body:not(.uix-playing) #fsCover[data-fx] img { animation-play-state: paused; }
 #galleryView.open { opacity: 1; pointer-events: auto; }
 .gv-head { text-align: center; color: var(--txt-2); font-size: 12px; padding: 0 24px; }
 .gv-viewport { overflow: hidden; }
-.gv-track { display: flex; gap: 16px; width: max-content; animation: uixGallery 68s linear infinite; }
+.gv-track { display: flex; gap: 16px; width: max-content; will-change: transform; animation: uixGallery 68s linear infinite; }
 .gv-viewport:hover .gv-track { animation-play-state: paused; }
 .gv-item { flex: 0 0 auto; width: 118px; height: 118px; border-radius: 14px; overflow: hidden; background: var(--bg-panel); box-shadow: 0 12px 28px rgba(0,0,0,.35); }
 .gv-item img { width: 100%; height: 100%; object-fit: cover; }
