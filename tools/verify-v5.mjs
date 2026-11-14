@@ -395,5 +395,17 @@ try {
     /html\[data-theme="light"\] body\.fs-open #queuePanel/.test(css))
 } catch (e) { ok('全屏页拖动/队列单测组', false, e.message.slice(0, 200)) }
 
+// (l) v2.8.38 / v3.3.46：拖动时全屏页封面高斯模糊不能被关掉
+try {
+  const cssL = fs.readFileSync(path.join(REPO, 'src/renderer/css/app.css'), 'utf8')
+  ok('拖动时不再把 #fsView::before 的 filter 关成 none（专辑背景模糊全程保留）',
+    !/body\.win-dragging\s+#fsView::before/.test(cssL) &&
+    /#fsView::before\s*\{[\s\S]{0,300}?filter:\s*blur\(52px\)/.test(cssL) &&
+    !/html\[data-theme="light"\]\s+body\.win-dragging\s+#fsView::before/.test(cssL))
+  ok('仍保留迷你视图与 backdrop-filter 的拖动态降级（不牺牲性能口径）',
+    /body\.win-dragging #miniView::before\s*\{\s*filter:\s*none;\s*\}/.test(cssL) &&
+    /body\.win-dragging\s*\*\s*\{[^}]*backdrop-filter:\s*none/.test(cssL))
+} catch (e) { ok('全屏页模糊层单测组', false, e.message.slice(0, 200)) }
+
 console.log(`\n=== 汇总: ${pass} 通过 / ${fail} 失败 ===`)
 process.exit(fail ? 1 : 0)

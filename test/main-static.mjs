@@ -230,8 +230,10 @@ function main() {
   ok('渲染层 pointermove + rAF 节流 + 指针捕获驱动拖动',
     /pointermove/.test(dragSrc) && /requestAnimationFrame\(/.test(dragSrc) &&
     /setPointerCapture/.test(dragSrc) && /dragMove\(pendingDx, pendingDy\)/.test(dragSrc))
-  ok('拖动态关闭全屏 blur / backdrop-filter（降低移动重绘成本）',
-    /body\.win-dragging[\s\S]{0,400}?filter:\s*none/.test(appCss) &&
+  ok('拖动态保留全屏页封面模糊层（v2.8.38：#fsView 成拖动源后不能关 filter）',
+    !/body\.win-dragging\s+#fsView::before/.test(appCss) &&
+    /#fsView::before\s*\{[\s\S]{0,300}?filter:\s*blur\(/.test(appCss) &&
+    /body\.win-dragging #miniView::before\s*\{\s*filter:\s*none;/.test(appCss) &&
     /body\.win-dragging\s*\*\s*\{[^}]*backdrop-filter:\s*none/.test(appCss))
   // v3.3.40（master 2.8.36）：右上角按钮组整块带 no-drag 时，那 400px 宽的空白带
   // （按钮左侧到搜索框之间）全按不动窗口 —— 只留容器不排除，按钮本身仍由 button 规则挡住。
