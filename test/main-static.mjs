@@ -256,14 +256,18 @@ function main() {
   ok('「⋯」折叠菜单容器排除在拖动之外（点它开菜单）',
     /\.row-act,\s*\.tb-fold'/.test(dragSrc) || /,\s*\.tb-fold'/.test(dragSrc))
   const uiSrc = read('src/renderer/js/ui.js')
-  ok('虚拟滚动改为头尾增删（保留 _rowHtml 单一模板）',
-    /_rowHtml\(i\)/.test(uiSrc) && /data-sp="top"/.test(uiSrc))
+  // v3.3.48：虚拟滚动内核搬到 vlist.js（列表/网格共用），断言跟着内核走
+  const vlSrc = read('src/renderer/js/vlist.js')
+  ok('虚拟滚动改为头尾增删（行模板单点：列表 _rowHtml / 网格 _gridRowHtml）',
+    /_rowHtml\(i\)/.test(uiSrc) && /_gridRowHtml\(row\)/.test(uiSrc) &&
+    /data-sp="top"/.test(vlSrc) && /opts\.renderRow\(i\)/.test(vlSrc))
   // 旧断言要求 `<div ` 后紧跟 `style="height:${start`，而实际模板是
   // `<div data-sp="top" style=...`，全库零匹配 → 48/48 里有一项恒真空转。
   // 改为：跳跃分支必须走增量插入，且整块重建只允许首帧/强制分支那一处。
-  ok('滚动帧不再整块重建 tableBody',
-    /jumpBot\.insertAdjacentHTML\('beforebegin', html\)/.test(uiSrc) &&
-    (uiSrc.match(/body\.innerHTML\s*=\s*[\s\S]{0,80}<div data-sp="top"/g) || []).length === 1)
+  ok('滚动帧不再整块重建行容器（只有首帧/强制分支能整块重建一次）',
+    /b\.insertAdjacentHTML\('beforebegin', buildRows\(s, e\)\)/.test(vlSrc) &&
+    /t\.insertAdjacentHTML\('afterend', buildRows\(s, oldS\)\)/.test(vlSrc) &&
+    (vlSrc.match(/host\.innerHTML\s*=\s*[\s\S]{0,120}<div data-sp="top"/g) || []).length === 1)
   const fxSrc = read('src/renderer/js/audiofx.js')
   ok('帧率轮：--beat 只在全屏页显示时写、值未变不写；隐藏画布零绘制',
     /classList\.contains\('open'\)/.test(fxSrc) &&
@@ -271,12 +275,12 @@ function main() {
     /c\.hidden \|\| w < 24/.test(fxSrc) &&
     /_drawExtra\(bins\)/.test(fxSrc) && /_updateBeat\(bins\)/.test(fxSrc))
   ok('帧率轮：虚拟滚动缓存容器高度、滚动帧只读一次 scrollTop；歌词读写分离',
-    /_tViewH/.test(uiSrc) && /const scrollTop = body\.scrollTop/.test(uiSrc) &&
+    /let viewH = 0/.test(vlSrc) && /const st = scroller\.scrollTop/.test(vlSrc) &&
     /fsScroll !== null/.test(uiSrc) && /boxScroll !== null/.test(uiSrc) &&
-    /TABLE_ROW_H = 52/.test(uiSrc))
+    /TABLE_ROW_H = 52/.test(vlSrc))
   ok('帧率轮：虚拟滚动高度缓存只认 clientHeight，禁止用 contentRect.height',
-    /this\._tViewH = Math\.max\(1, body\.clientHeight \|\| 600\)/.test(uiSrc) &&
-    !/contentRect\.height/.test(uiSrc))
+    /viewH = Math\.max\(1, scroller\.clientHeight \|\| 600\)/.test(vlSrc) &&
+    !/contentRect/.test(vlSrc) && !/contentRect/.test(uiSrc))
   const dragSrc2 = read('src/renderer/js/dragwin.js')
   ok('双击标题栏只由 dblclick 处理（拖动链路不重复 toggleMaximize）',
     !/toggleMaximize/.test(dragSrc2) && /e\.detail === 2/.test(dragSrc2))
@@ -305,7 +309,8 @@ function main() {
     !/\.tr\s*\{[^}]*background:\s*#1a1f27/.test(appCss) &&
     /\.tr\s*\{[^}]*background:\s*transparent/.test(appCss))
   ok('CSS 行高与 TABLE_ROW_H 严格一致（52px，漂移即整屏错位）',
-    /\.tr\s*\{[^}]*height:\s*52px/.test(appCss) && /TABLE_ROW_H = 52/.test(uiSrc))
+    /\.tr\s*\{[^}]*height:\s*52px/.test(appCss) && /TABLE_ROW_H = 52/.test(vlSrc) &&
+    !/TABLE_ROW_H\s*=/.test(uiSrc))
   ok('浅色覆盖延伸到在线列表与队列抽屉',
     /html\[data-theme="light"\]\s*\.op-body\s*\.op-tr\s*\{/.test(appCss) &&
     /html\[data-theme="light"\]\s*\.qp-item\.active/.test(appCss))
@@ -404,6 +409,69 @@ function main() {
   } catch (e) { lyricBootErr = e.message }
   ok('桌面歌词浮窗在「G 无 debounce」下仍能创建（启动链不再崩）', !lyricBootErr, lyricBootErr)
 
+  /* === 9) 九条 UI 建议全实装（v2.8.40 / v3.3.48） === */
+  {
+    const html = read('src/renderer/index.html')
+    const thSrc = read('src/renderer/js/theme.js')
+    const mSrc = read('src/main/main.js')
+    const appJs = read('src/renderer/js/app.js')
+    const scSrc = read('src/renderer/js/shortcuts.js')
+    const plSrc = read('src/main/preload.js')
+
+    ok('九条·图标：线性描边体系（24 网格 + 1.5 描边，只有主控 4 枚实心）',
+      (html.match(/fill="currentColor"/g) || []).length === 4 &&
+      /stroke-width: 1\.5/.test(appCss) && /stroke-linecap: round/.test(appCss))
+    ok('九条·图标：列表/卡片两枚切换图标 + 全屏页文字钮全部图标化',
+      /id="i-grid"/.test(html) && /id="i-list-view"/.test(html) &&
+      !/>◉</.test(html) && !/>▦</.test(html) && !/>✦</.test(html))
+    ok('九条·网格：卡片视图按行虚拟化（列数按容器宽算，行高与 CSS 同源）',
+      /_gridRowHtml\(row\)/.test(uiSrc) && /function gridCols/.test(vlSrc) &&
+      /function gridRowHeight/.test(vlSrc) &&
+      /--gcols/.test(appCss) && /--growh/.test(appCss))
+    ok('九条·网格：视图模式持久化到 settings.viewMode（白名单已放行）',
+      /saveSettings\(\{ viewMode: next \}\)/.test(appJs) && /viewMode: 'list'/.test(mSrc))
+    ok('九条·sticky：单一滚动容器 + 表头吸顶',
+      /id="viewScroll"/.test(html) &&
+      /\.view-scroll\s*\{[\s\S]{0,220}?overflow-y: auto/.test(appCss) &&
+      /\.table-head\s*\{[\s\S]{0,160}?position: sticky[\s\S]{0,80}?top: 0/.test(appCss))
+    ok('九条·键盘：列表有焦点时方向键选行、Enter 播放、Ctrl+Enter 插播',
+      /function bindListKeyboard/.test(appJs) && /case 'ArrowDown'/.test(appJs) &&
+      /addToQueue\(t, \{ next: true \}\)/.test(appJs) &&
+      /activeElement !== document\.getElementById\('tableBody'\)/.test(appJs))
+    ok('九条·队列：右侧滑出侧栏（transform 过渡 + .show 两段式）',
+      /#queuePanel\s*\{[\s\S]{0,500}?transform: translateX/.test(appCss) &&
+      /#queuePanel\.show/.test(appCss) && /classList\.add\('show'\)/.test(uiSrc))
+    ok('九条·队列：Esc 收起 + 全屏页之上 z-index 60',
+      /queuePanel\.classList\.contains\('show'\)[\s\S]{0,160}?toggleQueue\(false\)/.test(scSrc) &&
+      /body\.fs-open #queuePanel[\s\S]{0,120}?z-index: 60/.test(appCss))
+    ok('九条·tonal：OKLCH 保色相派生 + on-accent 自动黑白',
+      /function rgbToOklab\(rgb\)/.test(thSrc) && /function oklabToRgb\(lab\)/.test(thSrc) &&
+      /function normalize/.test(thSrc) && /--on-accent/.test(thSrc))
+    ok('九条·tonal：默认跟随封面 + 存量裸色值一次性迁移',
+      /accent: 'auto'/.test(mSrc) && /accentAutoMigrated/.test(mSrc))
+    ok('九条·tonal：在线封面也取色（带 coverUrl 拉缓冲 + 限流兜底）',
+      /accentForTrack: \(trackId, coverUrl\)/.test(plSrc) &&
+      /function fetchCoverBuffer/.test(mSrc) && /512 \* 1024/.test(mSrc))
+    ok('九条·逐词：词级 clip-path 填充 + rAF 推进（无 words 仍整行高亮）',
+      /data-t="\$\{esc\(w\.text\)\}"/.test(uiSrc) &&
+      /clip-path: inset\(0 var\(--rest/.test(appCss) &&
+      /_ensureWordLoop/.test(uiSrc) && /--rest/.test(uiSrc))
+    ok('九条·交互态：hover/active/selected token + 全站 focus-visible',
+      /--state-hover/.test(appCss) && /--state-selected/.test(appCss) &&
+      /:focus-visible\s*\{/.test(appCss))
+    ok('九条·WCAG：三级文字达到 4.5:1（深 #8a92a0 / 浅 #5f6b7d）',
+      /--txt-3: #8a92a0/.test(appCss) && /--txt-3: #5f6b7d/.test(appCss))
+    ok('九条·reduced-motion：滚动/侧栏/卡片变换一并降级',
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]{0,900}?#queuePanel \{ transition: none; \}/.test(appCss) &&
+      /\.mc:hover \.mc-cv[\s\S]{0,80}?transform: none !important/.test(appCss))
+    ok('九条·aria：按钮均有可读标签（≥50 处）',
+      (html.match(/aria-label=/g) || []).length >= 50)
+    ok('九条·脚本顺序：vlist.js 必须先于 ui.js（ui.js 依赖内核与行高常量）',
+      html.indexOf('js/vlist.js') > 0 && html.indexOf('js/vlist.js') < html.indexOf('js/ui.js'))
+    ok('九条·不变量收窄：#fsView::before 的 blur 参数仍一字未改',
+      /blur\(52px\) saturate\(1\.35\) brightness\(\.42\)/.test(appCss) &&
+      /blur\(52px\) saturate\(1\.15\) brightness\(1\.02\)/.test(appCss))
+  }
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
 }

@@ -168,16 +168,25 @@ try {
       /removeEventListener\('abort', onAbort\)/.test(qseg))
   ok('全体等待者取消才中止共享领票',
       /qingTicketWaiters\.size === 0 && qingTicketCtrl/.test(qseg))
+  // v3.3.48（九条 UI 第 5 条）：逐词歌词源 —— 酷狗 krc 解出增强 LRC，
+  // 解不出来必须回退整行 lrc（不能把原本能拿到的歌词弄丢）
+  ok('逐词：酷狗 krc 解出词级时间轴，失败回退整行 lrc',
+      /function krcToEnhancedLrc/.test(o) && /KRC_KEY/.test(o) &&
+      /fmt=krc/.test(o) && /fmt=lrc/.test(o))
 } catch (e) { ok('online.js 单测组', false, e.message.slice(0, 200)) }
 
 // (g) v3.3.22：虚拟滚动 + 封面按需加载
 try {
   const u = fs.readFileSync(path.join(REPO, 'src/renderer/js/ui.js'), 'utf8')
-  ok('renderTable 走虚拟窗口（spacer + 缓冲）',
-      /_renderTableWindow/.test(u) && /TABLE_ROW_H = 52/.test(u) && /TABLE_VBUF/.test(u))
+  // v3.3.48：虚拟滚动内核抽到 vlist.js（列表 / 卡片网格 / 两个远程面板共用）
+  const vl = fs.readFileSync(path.join(REPO, 'src/renderer/js/vlist.js'), 'utf8')
+  ok('renderTable 走虚拟窗口（内核 + 占位块 + 缓冲）',
+      /_renderTableWindow/.test(u) && /createVList\(/.test(u) &&
+      /TABLE_ROW_H = 52/.test(vl) && /VLIST_OVERSCAN/.test(vl))
   ok('可视窗口重画带 playing/selected 态',
       /isSel \? ' selected'/.test(u) && /_tCurrentId/.test(u))
-  ok('滚动用 rAF 节流', /addEventListener\('scroll'[\s\S]{0,200}requestAnimationFrame/.test(u))
+  ok('滚动用 rAF 节流', /addEventListener\('scroll'[\s\S]{0,120}?onScroll/.test(vl) &&
+      /requestAnimationFrame\(\(\) => \{\s*\n\s*rafId = 0/.test(vl))
   ok('行数断言已改虚拟化语义', /spacers/.test(fs.readFileSync(path.join(REPO, 'test/smoke.mjs'), 'utf8')))
 
   const lib = fs.readFileSync(path.join(REPO, 'src/main/library.js'), 'utf8')
@@ -388,8 +397,9 @@ try {
     /\$\('fsQueue'\)/.test(fsjs) &&
     /e\.stopPropagation\(\)/.test(fsjs) &&
     /UI\.toggleQueue\(\)/.test(fsjs))
-  ok('按钮点亮态跟随抽屉 hidden 属性同步',
-    /attributeFilter: \['hidden'\]/.test(fsjs) && /classList\.toggle\('on', !queuePanel\.hidden\)/.test(fsjs))
+  ok('按钮点亮态跟随抽屉开态同步',
+    /attributeFilter: \['class', 'hidden'\]/.test(fsjs) &&
+    /classList\.toggle\('on', queuePanel\.classList\.contains\('show'\)\)/.test(fsjs))
   ok('抽屉在全屏页之上：body.fs-open 抬到 z-index 60 并重定位',
     /body\.fs-open #queuePanel \{[\s\S]*?z-index: 60;[\s\S]*?right: 32px;/.test(css) &&
     /html\[data-theme="light"\] body\.fs-open #queuePanel/.test(css))
@@ -413,7 +423,7 @@ try {
     /blur\(52px\) saturate\(1\.35\) brightness\(\.42\)/.test(cssL))
   ok('帧率轮：频谱调度与虚拟滚动读写分离（两版共享）',
     /_beatVal === v/.test(fs.readFileSync(path.join(REPO, 'src/renderer/js/audiofx.js'), 'utf8')) &&
-    /_tViewH/.test(fs.readFileSync(path.join(REPO, 'src/renderer/js/ui.js'), 'utf8')) &&
+    /let viewH = 0/.test(fs.readFileSync(path.join(REPO, 'src/renderer/js/vlist.js'), 'utf8')) &&
     /fsScroll !== null/.test(fs.readFileSync(path.join(REPO, 'src/renderer/js/ui.js'), 'utf8')))
 } catch (e) { ok('全屏页模糊层单测组', false, e.message.slice(0, 200)) }
 
