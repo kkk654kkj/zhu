@@ -25,6 +25,13 @@ const isDev = process.argv.includes('--dev')
  *  所有 show / focus / restore 路径统一走这个判据（ready-to-show、showMainWindow、
  *  second-instance、activate；桌面歌词浮窗在 dlyric-window.js 里单独判同名变量）。 */
 const TEST_HIDDEN = () => process.env.LX_TEST_HIDDEN === '1'
+/** v2.8.42：测试静音必须覆盖**整条链路**。
+ *  以前 LX_TEST_MUTE=1 只让 mpv 走 --ao=null，普通播放走 HTML5 <audio> 照样出声 ——
+ *  自动化实测/成品实测会真的放音乐。这里补一个 Chromium 层面的 mute-audio，
+ *  对 <audio>、WebAudio、mpv 三路一起静音，且只在测试实例上生效。 */
+if (process.env.LX_TEST_MUTE === '1') {
+  try { app.commandLine.appendSwitch('mute-audio') } catch { /* 拿不到 app 就退化成只静音 mpv */ }
+}
 const DEFAULT_MUSIC_DIR = 'D:\\音乐'
 // 应用显示名（窗口标题 / 托盘提示 / 任务栏分组）
 const APP_NAME = '猪专属播放器'

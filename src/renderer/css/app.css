@@ -3202,3 +3202,39 @@ body.fs-open #queuePanel {
     transition: none !important;
   }
 }
+
+/* =========================================================================
+   v2.8.42 歌词同步体检
+   -------------------------------------------------------------------------
+   76 首本地歌词里 53 首的「制作信息」被塞了 0~12 秒的时间戳（词/曲/编曲/
+   制作人/混音…），开头几秒歌词疯狂滚动、人声还没进来就"唱"完了。
+   解析层已把这类行标 skip 并整段脱同步，这里只负责「看起来是备注」。
+   ========================================================================= */
+
+/* 被脱同步的制作信息行：淡化 + 小一号，仍在原地（不删内容，随时能看） */
+.lyric-line.credit {
+  opacity: .32;
+  font-size: calc(var(--lyric-fs) * 0.86px);
+  letter-spacing: .2px;
+}
+.lyric-line.credit:hover { opacity: .62; }
+/* 脱同步行不参与高亮，也不该出现"当前句"那种字重 */
+.lyric-line.credit.active { font-weight: 400; color: var(--txt-3); }
+
+/* 同步体检提示：只报能确证的问题（歌词比音频短 / 时间轴对不上） */
+.lp-diag {
+  flex: 0 0 auto;
+  margin: 0 16px 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--txt-2);
+  font-size: 11.5px;
+  line-height: 1.45;
+  text-align: center;
+}
+html[data-theme="light"] .lp-diag {
+  background: color-mix(in srgb, var(--accent) 7%, #fff);
+  color: var(--txt-2);
+}
