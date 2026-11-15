@@ -2552,7 +2552,8 @@ body:not(.uix-playing) #fsCover[data-fx] img { animation-play-state: paused; }
 #fsView .fs-lyric { height: 34px; font-size: calc(var(--fs-lyric-fs) * .95); margin-top: 4px; }
 #fsLyrics {
   height: min(44vh, 340px);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   margin-top: 10px;
   padding: 6px 4px;
   text-align: var(--fs-lyric-align);
@@ -2565,6 +2566,24 @@ body:not(.uix-playing) #fsCover[data-fx] img { animation-play-state: paused; }
 #fsLyrics .lyric-line { padding: 2px 8px; border-radius: 6px; transition: color .18s ease, background-color .18s ease; }
 #fsLyrics .lyric-line.active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
 #fsLyrics .lyric-empty { color: var(--txt-3); font-size: 13px; padding-top: 24px; }
+/* v2.8.46 / v3.3.54: 全屏页歌词可用滚轮/触控板自由滚，滚动条仅悬停时着色。
+   scrollbar-gutter: stable 常驻预留槽位，悬停不引起歌词横向跳动。 */
+#fsLyrics::-webkit-scrollbar { width: 9px; }
+#fsLyrics::-webkit-scrollbar-track { background: transparent; }
+#fsLyrics::-webkit-scrollbar-thumb {
+  background: transparent;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+#fsLyrics:hover::-webkit-scrollbar-thumb,
+#fsLyrics:focus-within::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--txt-3) 42%, transparent);
+}
+#fsLyrics:hover::-webkit-scrollbar-thumb:hover,
+#fsLyrics:focus-within::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
 #fsHeadTools { display: flex; align-items: center; gap: 4px; }
 #fsHeadTools .uix-btn { font-size: 11px; }
 

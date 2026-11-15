@@ -731,7 +731,53 @@ const UI = {
 
   lyricState: { lines: [], plain: false, index: -2, wordsActive: false },
 
+  /* ---------------- 全屏页歌词滚轮（v2.8.46 / v3.3.54） ----------------
+     手动滚轮 / 拖动滚动条后 4 秒内不自动居中；到期主动回到当前行。
+     自动居中仍由 updateLyricIndex 每句触发，这里只管「暂停 + 复位」。 */
+  _fsHoldUntil: 0,
+  _fsHoldTimer: 0,
+  FS_HOLD_MS: 4000,
+
+  /** 用户手动浏览全屏歌词：续期 4 秒暂停，到期归位 */
+  noteFsLyricScroll() {
+    this._fsHoldUntil = Date.now() + this.FS_HOLD_MS
+    clearTimeout(this._fsHoldTimer)
+    this._fsHoldTimer = setTimeout(() => {
+      this._fsHoldTimer = 0
+      this._fsHoldUntil = 0
+      this._fsRecenterFs()
+    }, this.FS_HOLD_MS)
+  },
+
+  /** 切歌：立刻撤销暂停，新歌词从第一句开始照常跟随 */
+  clearFsLyricScrollHold() {
+    clearTimeout(this._fsHoldTimer)
+    this._fsHoldTimer = 0
+    this._fsHoldUntil = 0
+  },
+
+  /** 当前行在全屏歌词面板里居中时的 scrollTop（只读布局，返回数值） */
+  _fsCenterTop(box, idx) {
+    const node = box && idx >= 0 ? box.children[idx] : null
+    if (!node) return null
+    const bRect = box.getBoundingClientRect()
+    const nRect = node.getBoundingClientRect()
+    const d = (nRect.top - bRect.top) - (box.clientHeight - nRect.height) / 2
+    return Math.min(Math.max(0, box.scrollTop + d),
+      Math.max(0, box.scrollHeight - box.clientHeight))
+  },
+
+  /** 暂停到期后回到当前行：不改高亮 class，不碰侧栏歌词面板 */
+  _fsRecenterFs() {
+    const box = this.els.fsLyrics
+    const idx = this.lyricState.index
+    if (!box || idx < 0 || idx >= box.children.length) return
+    const top = this._fsCenterTop(box, idx)
+    if (top !== null) box.scrollTop = top
+  },
+
   renderLyric(parsed, trackTitle) {
+    this.clearFsLyricScrollHold()
     const box = this.els.lpLyrics
     const fsBox = this.els.fsLyrics
     this.lyricState.lines = parsed ? parsed.lines : []
@@ -862,11 +908,8 @@ const UI = {
       if (st.fsIndex >= 0 && fn[st.fsIndex]) fn[st.fsIndex].classList.remove('active')
       if (idx >= 0 && fn[idx]) {
         fn[idx].classList.add('active')
-        const bRect = fsBox.getBoundingClientRect()
-        const nRect = fn[idx].getBoundingClientRect()
-        const d = (nRect.top - bRect.top) - (fsBox.clientHeight - nRect.height) / 2
-        fsScroll = Math.min(Math.max(0, fsBox.scrollTop + d),
-          Math.max(0, fsBox.scrollHeight - fsBox.clientHeight))
+        // v2.8.46：用户手动浏览期间只换高亮，不抢滚动位置；到期由 _fsRecenterFs() 归位
+        if (Date.now() >= this._fsHoldUntil) fsScroll = this._fsCenterTop(fsBox, idx)
       }
       st.fsIndex = idx
     }

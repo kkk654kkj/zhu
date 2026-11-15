@@ -579,6 +579,76 @@ function main() {
       ok('toast 去重仍拦住自动循环的重复提示（防刷屏不回退）', autoDeduped)
     }
 
+    // v2.8.46 / v3.3.54：全屏页歌词滚轮滚动（用户实报「全屏页也加个滚轮条滚动歌词」）。
+    // 口径：滚轮可自由滚 + 滚动条悬停才着色；手动滚动后暂停自动居中 4 秒，到期归位。
+    {
+      const cssSrc = read('src/renderer/css/app.css')
+      const uiSrc = read('src/renderer/js/ui.js')
+      const appSrc = read('src/renderer/js/app.js')
+
+      ok('全屏歌词面板可滚轮滚动（overflow-y:auto / overflow-x:hidden）',
+        /#fsLyrics \{\r?\n  height: min\(44vh, 340px\);\r?\n  overflow-y: auto;\r?\n  overflow-x: hidden;/.test(cssSrc))
+
+      ok('滚动条默认透明、仅悬停/聚焦时着色，槽位常驻不引起横向跳动',
+        /#fsLyrics::-webkit-scrollbar-thumb \{\r?\n  background: transparent;/.test(cssSrc) &&
+        /#fsLyrics:hover::-webkit-scrollbar-thumb,/.test(cssSrc) &&
+        /#fsLyrics:focus-within::-webkit-scrollbar-thumb \{/.test(cssSrc) &&
+        /color-mix\(in srgb, var\(--txt-3\) 42%, transparent\)/.test(cssSrc) &&
+        /#playlistNav, \.qp-body, \.lp-lyrics, #fsLyrics \{ scrollbar-gutter: stable; \}/.test(cssSrc))
+
+      ok('滚轮 / 触控板 / 拖动滚动条都接了手动浏览（点歌词行不算）',
+        /box\.addEventListener\('wheel', note, \{ passive: true \}\)/.test(appSrc) &&
+        /box\.addEventListener\('touchstart', note, \{ passive: true \}\)/.test(appSrc) &&
+        /if \(e\.target === box\) note\(\)/.test(appSrc) &&
+        /e\.target === box && e\.buttons === 1/.test(appSrc) &&
+        /UI\.noteFsLyricScroll\(\)/.test(appSrc))
+
+      ok('手动浏览期间只换高亮不抢位置；4 秒到期归位；切歌清 hold',
+        /if \(Date\.now\(\) >= this\._fsHoldUntil\) fsScroll = this\._fsCenterTop\(fsBox, idx\)/.test(uiSrc) &&
+        /FS_HOLD_MS: 4000/.test(uiSrc) &&
+        /this\._fsRecenterFs\(\)/.test(uiSrc) &&
+        /renderLyric\(parsed, trackTitle\) \{\r?\n    this\.clearFsLyricScrollHold\(\)/.test(uiSrc))
+
+      // 真跑这组方法（打桩定时器 / DOM / 时间），断言语义而不是字面
+      const seg = uiSrc.slice(uiSrc.indexOf('  _fsHoldUntil: 0,'),
+        uiSrc.indexOf('  renderLyric(parsed, trackTitle)'))
+      const mkBox = () => ({
+        scrollTop: 500, clientHeight: 300, scrollHeight: 900,
+        children: [{}, {}, { getBoundingClientRect: () => ({ top: 100, height: 30 }) }, {}, {}],
+        getBoundingClientRect: () => ({ top: 0, height: 300 })
+      })
+      const mk = () => {
+        const box = mkBox(), timers = [], cleared = []
+        const obj = new Function('setTimeout', 'clearTimeout', 'Date', 'Math',
+          'return {' + seg + '}')(
+          (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+          (id) => { cleared.push(id) }, Date, Math)
+        obj.els = { fsLyrics: box }
+        obj.lyricState = { index: 2 }
+        return { obj, box, timers, cleared }
+      }
+
+      const a = mk()
+      a.obj.noteFsLyricScroll()
+      const held = a.obj._fsHoldUntil > Date.now() &&
+        a.timers.length === 1 && a.timers[0].ms === 4000
+      a.timers[0].fn()                       // 模拟 4 秒到期
+      const centered = a.obj._fsHoldUntil === 0 && a.box.scrollTop === 465
+      const b = mk()
+      b.obj.noteFsLyricScroll()
+      b.obj.clearFsLyricScrollHold()
+      ok('真跑：滚轮后暂停 4 秒、到期写回当前行居中位置；切歌立即撤销',
+        held && centered && b.obj._fsHoldUntil === 0 && b.cleared.includes(1),
+        'scrollTop=' + a.box.scrollTop)
+
+      const c = mk()
+      c.box.scrollTop = 900
+      ok('真跑：居中位置被夹在 [0, 可滚动上限]，没有当前行时安全返回 null',
+        c.obj._fsCenterTop(c.box, 2) === 600 &&
+        c.obj._fsCenterTop(c.box, -1) === null &&
+        c.obj._fsCenterTop(c.box, 99) === null)
+    }
+
   }
 
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
