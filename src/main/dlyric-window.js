@@ -79,9 +79,13 @@ function createLyricWindow() {
   if (dlyricWin && !dlyricWin.isDestroyed()) return dlyricWin
   const cfg = dlyricCfg()
   const b = cfg.bounds || {}
+  // v2.8.48 / v3.3.56：上下行放大到当前句 .6 倍后，三行在 120px 里放不下。
+  // 默认给 160px；已保存但偏矮的窗口一并补到 160（用户自己拖得更高则保留）。
+  const MIN_DLYRIC_H = 160
+  const winHeight = Number.isFinite(b.height) && b.height >= 150 ? b.height : MIN_DLYRIC_H
   dlyricWin = new BrowserWindow({
     width: b.width || 900,
-    height: b.height || 120,
+    height: winHeight,
     x: Number.isFinite(b.x) ? b.x : undefined,
     y: Number.isFinite(b.y) ? b.y : undefined,
     minWidth: 300,

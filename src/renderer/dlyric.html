@@ -14,6 +14,8 @@
     user-select: none;
   }
   #wrap {
+    /* v2.8.48：上下行字号 = 当前句字号 × .6，由 dlyric.js 按 cfg.fontSize 写入（A- / A+ 同步） */
+    --dl-side-fs: 20.4px;
     position: relative;
     height: 100%;
     display: flex;
@@ -81,14 +83,17 @@
     font-weight: 700;
     line-height: 1.25;
   }
-  /* v2.8.47 / v3.3.55：上中下三行景深 —— 中间当前句清晰，上下各一行 1px 轻糊 + 变淡 */
+  /* v2.8.47 / v3.3.55：上中下三行景深 —— 中间当前句清晰，上下各一行轻糊 + 变淡。
+     v2.8.48 / v3.3.56：原来 .55em 相对的是父容器默认 16px（实际仅 8.8px），几乎看不见；
+     改成按当前句字号 .6 倍计算，并提亮到 .8、模糊减到 .6px。 */
   #prev, #next {
-    font-size: .55em;
-    opacity: .55;
+    font-size: var(--dl-side-fs);
+    opacity: .8;
     font-weight: 400;
-    filter: blur(1px) drop-shadow(0 1px 2px rgba(0,0,0,.9)) drop-shadow(0 0 10px rgba(0,0,0,.6));
+    filter: blur(.6px) drop-shadow(0 1px 2px rgba(0,0,0,.9)) drop-shadow(0 0 10px rgba(0,0,0,.6));
   }
-  body.paused #line, body.paused #prev, body.paused #next { opacity: .45; }
+  body.paused #line { opacity: .45; }
+  body.paused #prev, body.paused #next { opacity: .6; }
   /* 用 visibility 而不是 display：没有上/下一句时占位仍在，歌词不会上下跳 */
   body.noprev #prev, body.nolyric #next { visibility: hidden; }
   /* v3.3.29 桌面歌词增强：系统毛玻璃 + 双行描边 + 锁定态区分。
