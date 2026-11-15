@@ -777,6 +777,21 @@ function main() {
         })())
     }
 
+    // v2.8.49：本地版同源带音频加载看门狗（在线流式链路为联网版专属，master 无 streamproxy）
+    {
+      const plSrc = read('src/renderer/js/player.js')
+      ok('加载看门狗：20 秒无数据明确报错，progress 续期，元数据收掉',
+        /_armLoadWatchdog = \(\) => \{/.test(plSrc) && /\}, 20000\)/.test(plSrc) &&
+        /音频加载超时（上游无数据）/.test(plSrc) &&
+        /audio\.addEventListener\('progress'/.test(plSrc) &&
+        /audio\.addEventListener\('canplay'/.test(plSrc) &&
+        /loadedmetadata', \(\) => \{\r?\n      this\._loadReady = true/.test(plSrc))
+      ok('切歌 / 停止时收掉旧看门狗，避免误报新曲',
+        /_loadCurrent\(autoplay = true\) \{[\s\S]{0,220}?this\._clearLoadWatchdog\(\)/.test(plSrc) &&
+        /stop\(\) \{\r?\n    this\._clearLoadWatchdog\(\)/.test(plSrc) &&
+        /this\.audio\.load\(\)\r?\n    this\._armLoadWatchdog\(\)/.test(plSrc))
+    }
+
   }
 
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
