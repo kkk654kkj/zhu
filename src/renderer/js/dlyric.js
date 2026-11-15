@@ -5,6 +5,7 @@ const COLORS = ['#ffffff', '#31c27c', '#ffd54a', '#64b5f6', '#ff9e80', '#f48fb1'
 
 const els = {
   wrap: document.getElementById('wrap'),
+  prev: document.getElementById('prev'),
   line: document.getElementById('line'),
   next: document.getElementById('next'),
   btnLock: document.getElementById('btnLock'),
@@ -20,6 +21,7 @@ function applyCfg() {
   els.wrap.classList.toggle('locked', !!cfg.locked)
   els.line.style.fontSize = Math.max(16, Math.min(80, cfg.fontSize || 34)) + 'px'
   els.line.style.color = cfg.color || COLORS[0]
+  els.prev.style.color = cfg.color || COLORS[0]
   els.next.style.color = cfg.color || COLORS[0]
 }
 
@@ -29,7 +31,10 @@ window.api.onDlyricData((d) => {
   else if (d.title) els.line.textContent = d.title + (d.artist ? ' — ' + d.artist : '')
   else els.line.textContent = '♪'
   document.body.classList.toggle('paused', d.playing === false)
+  // 没有上/下一句时用 visibility 隐藏（占位仍在，三行不会上下跳）
+  document.body.classList.toggle('noprev', !d.prev)
   document.body.classList.toggle('nolyric', !d.next)
+  els.prev.textContent = d.prev || ''
   els.next.textContent = d.next || ''
 })
 

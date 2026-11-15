@@ -750,6 +750,44 @@ body.win-dragging #galleryView { backdrop-filter: none !important; }
 }
 .lyric-empty { color: var(--txt-3); font-size: 12.5px; padding-top: 40px; }
 .lyric-line.plain { opacity: .8; }
+/* v2.8.47 / v3.3.55: 歌词景深 —— 当前句清晰，上下按距离渐糊渐淡。
+   容器里必须有 .active 才启用：前奏 / 纯文本歌词 / 暂无歌词一律不糊。
+   手动滚动浏览时容器挂 .lyric-browsing，4 秒内全部恢复清晰。 */
+.lp-lyrics, #fsLyrics {
+  --lyric-depth-1: .74; --lyric-depth-2: .55; --lyric-depth-3: .38;
+}
+html[data-theme="light"] .lp-lyrics,
+html[data-theme="light"] #fsLyrics {
+  --lyric-depth-1: .82; --lyric-depth-2: .66; --lyric-depth-3: .5;
+}
+.lp-lyrics:has(.lyric-line.active) .lyric-line,
+#fsLyrics:has(.lyric-line.active) .lyric-line {
+  filter: blur(3px);
+  opacity: var(--lyric-depth-3);
+  transition: color .2s, background-color .18s ease, filter .22s ease, opacity .22s ease;
+}
+.lp-lyrics:has(.lyric-line.active) .lyric-line.active,
+#fsLyrics:has(.lyric-line.active) .lyric-line.active { filter: none; opacity: 1; }
+/* ±1 行：轻糊 */
+.lp-lyrics:has(.lyric-line.active) .lyric-line.active + .lyric-line,
+#fsLyrics:has(.lyric-line.active) .lyric-line.active + .lyric-line,
+.lp-lyrics:has(.lyric-line.active) .lyric-line:has(+ .lyric-line.active),
+#fsLyrics:has(.lyric-line.active) .lyric-line:has(+ .lyric-line.active) {
+  filter: blur(1px); opacity: var(--lyric-depth-1);
+}
+/* ±2 行：中糊 */
+.lp-lyrics:has(.lyric-line.active) .lyric-line.active + .lyric-line + .lyric-line,
+#fsLyrics:has(.lyric-line.active) .lyric-line.active + .lyric-line + .lyric-line,
+.lp-lyrics:has(.lyric-line.active) .lyric-line:has(+ .lyric-line + .lyric-line.active),
+#fsLyrics:has(.lyric-line.active) .lyric-line:has(+ .lyric-line + .lyric-line.active) {
+  filter: blur(2px); opacity: var(--lyric-depth-2);
+}
+/* 鼠标悬停的行始终可读 */
+.lp-lyrics:has(.lyric-line.active) .lyric-line:hover,
+#fsLyrics:has(.lyric-line.active) .lyric-line:hover { filter: none; opacity: .92; }
+/* 浏览态：滚轮 / 触控板 / 拖滚动条期间全部清晰（4 秒后自动恢复） */
+.lp-lyrics.lyric-browsing .lyric-line,
+#fsLyrics.lyric-browsing .lyric-line { filter: none !important; opacity: 1 !important; }
 
 .lp-tools {
   flex: 0 0 auto;
@@ -3222,6 +3260,7 @@ body.fs-open #queuePanel {
 /* ---------- 9. reduced-motion：连 layout 动画与滚动都停 ---------- */
 @media (prefers-reduced-motion: reduce) {
   .view-scroll, .table-body, .lp-lyrics, #fsLyrics { scroll-behavior: auto !important; }
+  .lyric-line, .lyric-line .kw { transition: none !important; }
   .mc:hover .mc-cv, .tr:hover, .mc-cv { transform: none !important; }
   .mc-play { transition: none; }
   #queuePanel { transition: none; }

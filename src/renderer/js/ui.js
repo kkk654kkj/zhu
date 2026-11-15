@@ -736,11 +736,30 @@ const UI = {
      自动居中仍由 updateLyricIndex 每句触发，这里只管「暂停 + 复位」。 */
   _fsHoldUntil: 0,
   _fsHoldTimer: 0,
+  _lyricBrowseTimer: 0,
   FS_HOLD_MS: 4000,
 
-  /** 用户手动浏览全屏歌词：续期 4 秒暂停，到期归位 */
+  /** v2.8.47：两处歌词面板同步切「浏览态」（取消景深模糊，全部歌词清晰） */
+  _setLyricBrowsing(on) {
+    for (const el of [this.els.lpLyrics, this.els.fsLyrics]) {
+      if (el && el.classList) el.classList.toggle('lyric-browsing', on)
+    }
+  },
+
+  /** 侧栏歌词面板手动浏览：4 秒后恢复景深；不改自动跟随口径（不变量 #50） */
+  noteLyricBrowsing() {
+    this._setLyricBrowsing(true)
+    clearTimeout(this._lyricBrowseTimer)
+    this._lyricBrowseTimer = setTimeout(() => {
+      this._lyricBrowseTimer = 0
+      this._setLyricBrowsing(false)
+    }, this.FS_HOLD_MS)
+  },
+
+  /** 用户手动浏览全屏歌词：续期 4 秒暂停，到期归位；同时进入浏览态 */
   noteFsLyricScroll() {
     this._fsHoldUntil = Date.now() + this.FS_HOLD_MS
+    this.noteLyricBrowsing()
     clearTimeout(this._fsHoldTimer)
     this._fsHoldTimer = setTimeout(() => {
       this._fsHoldTimer = 0
@@ -749,11 +768,14 @@ const UI = {
     }, this.FS_HOLD_MS)
   },
 
-  /** 切歌：立刻撤销暂停，新歌词从第一句开始照常跟随 */
+  /** 切歌：立刻撤销暂停与浏览态，新歌词从第一句开始照常跟随 */
   clearFsLyricScrollHold() {
     clearTimeout(this._fsHoldTimer)
+    clearTimeout(this._lyricBrowseTimer)
     this._fsHoldTimer = 0
+    this._lyricBrowseTimer = 0
     this._fsHoldUntil = 0
+    this._setLyricBrowsing(false)
   },
 
   /** 当前行在全屏歌词面板里居中时的 scrollTop（只读布局，返回数值） */
