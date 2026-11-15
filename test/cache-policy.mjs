@@ -94,6 +94,27 @@ ok('不碰用户目录里的其它文件 / 其它下载器的 .part',
   fs.existsSync(other) && fs.existsSync(otherPart) && DC.cacheStats().count === 0,
   'count=' + DC.cacheStats().count)
 
+/* ---------- ④ 退出链先 cacheSave 再 cacheClear：索引不许被写空 ---------- */
+const DIR2 = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-cache-policy-exit-'))
+const mp3b = path.join(DIR2, 'bbbb.mp3')
+fs.writeFileSync(mp3b, 'y'.repeat(256))
+fs.writeFileSync(path.join(DIR2, 'index.json'), JSON.stringify({
+  k2: { file: 'bbbb.mp3', title: 'T2', artist: 'A', ext: 'mp3', size: 256, at: Date.now() }
+}), 'utf8')
+settings.onlineCacheDir = DIR2
+DC.cacheIdx = null              // 本次会话没碰过缓存，模拟退出链的真实状态
+DC.cacheSave()                 // finishQuit 无条件补的第一次写盘
+let idxAfter = null
+try { idxAfter = JSON.parse(fs.readFileSync(path.join(DIR2, 'index.json'), 'utf8')) } catch (e) { /* 忽略 */ }
+ok('退出链先 cacheSave（索引未加载）不会把 index.json 写成空表',
+  !!idxAfter && Object.keys(idxAfter).length === 1 && idxAfter.k2 && idxAfter.k2.size === 256,
+  JSON.stringify(idxAfter))
+DC.cacheIdx = null
+const r2 = DC.cacheClear()
+ok('紧接着 cacheClear 仍能删掉这首缓存（不再「删除 0 首」）',
+  r2.removed === 1 && !fs.existsSync(mp3b), 'removed=' + r2.removed)
+
 try { fs.rmSync(DIR, { recursive: true, force: true }) } catch (e) { /* 忽略 */ }
+try { fs.rmSync(DIR2, { recursive: true, force: true }) } catch (e) { /* 忽略 */ }
 console.log(fail ? `\n${pass} 通过 / ${fail} 失败` : `\n全部通过（${pass} 项）`)
 process.exit(fail ? 1 : 0)

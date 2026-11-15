@@ -876,7 +876,7 @@ function main() {
       const policy = spawnSync(process.execPath, ['test/cache-policy.mjs'], {
         cwd: ROOT, encoding: 'utf8'
       })
-      ok('缓存策略运行时单测 cache-policy（6 项：默认值 / 白名单 / 清理边界）',
+      ok('缓存策略运行时单测 cache-policy（8 项：默认值 / 白名单 / 清理边界 / 索引写空回归）',
         policy.status === 0, (policy.stdout || '').trim().split('\n').slice(-1)[0])
 
       ok('默认保留缓存：开关默认 false，退出链按开关才调用 cacheClear',
@@ -889,6 +889,10 @@ function main() {
         /clr\.checked = info\.clearOnExit === true/.test(cpSrc) &&
         /patchSettings\(\{ onlineCacheClearOnExit: on \}\)/.test(cpSrc) &&
         /id="cacheClearOnExit"/.test(htmlSrc4))
+
+      ok('退出链 cacheSave 先 load 再写：未加载的索引不许被写成空表',
+        /atomicWriteJson\(path\.join\(cacheDirPath\(\), CACHE_INDEX\), cacheLoad\(\)\)/.test(dcSrc) &&
+        !/cacheIdx \|\| \{\}/.test(dcSrc))
     }
 
   }

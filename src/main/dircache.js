@@ -71,7 +71,11 @@ function cacheLoad() {
 
 function cacheSave() {
   try {
-    atomicWriteJson(path.join(cacheDirPath(), CACHE_INDEX), cacheIdx || {})
+    // v3.3.58：cacheIdx 还没 load 过（本次会话没碰过缓存）时不能写空表。
+    // 退出链的 finishQuit 会无条件补一次 cacheSave，以前直接写 {}，把磁盘上
+    // 完好的 index.json 覆盖掉 —— 所有缓存文件变成永远命不中的孤儿，
+    // 「退出自动清除」也会因此删 0 首。先 load 再写，行为与已加载时完全一致。
+    atomicWriteJson(path.join(cacheDirPath(), CACHE_INDEX), cacheLoad())
   } catch (err) {
     G.logLine('[cache] 索引写入失败', err.message)
   }
