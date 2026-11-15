@@ -893,6 +893,33 @@ function main() {
       ok('退出链 cacheSave 先 load 再写：未加载的索引不许被写成空表',
         /atomicWriteJson\(path\.join\(cacheDirPath\(\), CACHE_INDEX\), cacheLoad\(\)\)/.test(dcSrc) &&
         !/cacheIdx \|\| \{\}/.test(dcSrc))
+
+      // v2.8.50 / v3.3.59：独占下切到坏 FLAC，AO 关掉后「下一首没声音但进程还在跑」。
+      const mvSrc = read('src/main/mpv.js')
+      const mgrSrc = read('src/main/mpv-manager.js')
+      const maSrc = read('src/renderer/js/mpvaudio.js')
+      const appSrc4 = read('src/renderer/js/app.js')
+      const wd = spawnSync(process.execPath, ['test/mpv-watchdog.mjs'], {
+        cwd: ROOT, encoding: 'utf8'
+      })
+      ok('独占看门狗运行时单测 mpv-watchdog（10 项：宽限边界 / 解码错误去重 / 误判防护）',
+        wd.status === 0, (wd.stdout || '').trim().split('\n').slice(-1)[0])
+
+      ok('file-loaded 不来时用 load 时刻兜底，起播宽限不再永久豁免',
+        /const graceBase = this\._fileLoadedAt \|\| this\._loadAt/.test(mvSrc) &&
+        /this\._loadAt = Date\.now\(\)/.test(mvSrc) &&
+        !/if \(this\._fileLoadedAt === 0 \|\|/.test(mvSrc))
+
+      ok('致命解码错误有失败终点：同 load 去重 + 主进程/渲染层接线成对',
+        /const DECODE_ERROR_RE = /.test(mvSrc) &&
+        /type: 'decode-error'/.test(mvSrc) &&
+        /type === 'decode-error'/.test(mgrSrc) &&
+        /case 'decode-error'/.test(maSrc) &&
+        /const decodeFailed = !!\(audio && audio\.decodeFailed\)/.test(appSrc4))
+
+      ok('仅解码错误放行独占下跳曲，声卡类错误仍保持 v3.3.18 不跳曲口径',
+        /if \(state\.exclusive && !state\.exclusiveFellBack && !decodeFailed\)/.test(appSrc4) &&
+        /toast\('音频输出失败：'/.test(appSrc4))
     }
 
   }

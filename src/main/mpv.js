@@ -26,6 +26,14 @@ const path = require('path')
  */
 const AO_ERROR_RE = /audio.?out|AUDCLNT|wasapi|audio device|Could not open/i
 
+/**
+ * v2.8.50 / v3.3.59：mpv 的「文件解码失败」日志。
+ * 这类错误只走 log-message，mpv 不发 end-file(error)、也不会自动 file-loaded，
+ * 于是渲染层既收不到 file-error 也没有任何失败终点：进度照走、AO 关掉、一声不响。
+ * 真机日志：flac: invalid sync code → decode_frame() failed → Error decoding audio.
+ */
+const DECODE_ERROR_RE = /invalid sync code|invalid frame header|decode_frame\(\) failed|Error decoding audio|Error while decoding|error while decoding|Invalid data found when processing input/i
+
 const PIPE_PREFIX = '\\\\.\\pipe\\lxmpv-'
 
 /**
@@ -79,6 +87,8 @@ class MpvEngine {
     // 上层只在 aoFailed 时回退共享，不能见一个 file-error 就永久降级。
     this._aoEverOpened = false
     this._fileLoadedAt = 0     // v3.3.20：看门狗的起播宽限基线（file-loaded 时置位）
+    this._loadAt = 0           // v2.8.50：load 时刻，file-loaded 不来时的兜底宽限基线
+    this._decodeErrFired = false // 同一次 load 的解码错误只上报一次
     // v3.3.20：进程 stderr / AO 日志的**序号时钟**。file-error 判性质时比较
     // 「本次 load 之后有没有出现过 AO 类错误」，用序号而不是滚动尾缓冲的下标。
     this._errSeq = 0
@@ -275,6 +285,8 @@ class MpvEngine {
     this._aoParams = null
     this._aoEverOpened = false   // 新进程 = 新 AO 状态（见 file-error 判性质）
     this._fileLoadedAt = 0
+    this._loadAt = 0
+    this._decodeErrFired = false
     this._errSeqAtLoad = this._errSeq
     this._eofAt = 0          // 新进程不继承旧曲的曲末配对标记
     this._paused = true
@@ -513,6 +525,14 @@ class MpvEngine {
             this._aoLogSeq = this._errSeq
           }
         }
+        // v2.8.50 / v3.3.59：解码失败只走日志时也要给渲染层一个失败终点。
+        // 同一 load 只发一次：mpv 对一帧坏数据会连报 4 条（sync / frame / decode / audio），
+        // 不去重会让自动跳曲一次跳掉 4 首。
+        if (!this._decodeErrFired && (msg.level === 'error' || msg.level === 'fatal' || msg.level === 'warn') &&
+            DECODE_ERROR_RE.test(text)) {
+          this._decodeErrFired = true
+          this.onEvent({ type: 'decode-error', message: text.slice(0, 200), file: this._lastFile || '' })
+        }
         this.onEvent({ type: 'log', level: msg.level, text })
         return
       }
@@ -535,6 +555,8 @@ class MpvEngine {
     this._errSeqAtLoad = this._errSeq
     this._aoEverOpened = false
     this._fileLoadedAt = 0   // 新 load 重置起播宽限
+    this._loadAt = Date.now() // file-loaded 不来时，看门狗用这个时刻兜底
+    this._decodeErrFired = false
     this._lastAoLog = ''
     this._lastLog = ''   // 同 AO 记忆一起清：否则坏文件的 toast 会带上上一首的 warn 文案
     if (paused) this._send(['set_property', 'pause', true])
@@ -808,7 +830,13 @@ class MpvEngine {
     // 可能要几秒 —— 以前从第一个 tick 就开始计 2.5 秒，慢起播的歌会被当成
     // 「AO 丢失」强杀重启引擎，重启后同样来不及出声，三轮后误报「声卡被占用」。
     // file-loaded 之后仍拿不到 AO 才是真丢失。
-    if (this._fileLoadedAt === 0 || Date.now() - this._fileLoadedAt < 4000) { this._aoLostAt = 0; return }
+    // v2.8.50 / v3.3.59：以前只认 _fileLoadedAt，且 === 0 直接 return。文件解码失败时
+    // mpv 根本不发 file-loaded，_fileLoadedAt 会一直停在 load() 重置的 0，看门狗被永久
+    // 豁免 —— 真机表现：切到坏 FLAC 后 audio-out-params=null，没有自动重启也没有提示，
+    // mpv 继续空转，用户看到「下一首没声音但进程还在跑」。
+    // 现在用 load 时刻兜底：起播宽限仍至少 4 秒，file-loaded 到了就以它为准。
+    const graceBase = this._fileLoadedAt || this._loadAt
+    if (!graceBase || Date.now() - graceBase < 4000) { this._aoLostAt = 0; return }
     if (!this._aoLostAt) { this._aoLostAt = Date.now(); return }
     const lostFor = Date.now() - this._aoLostAt
     if (lostFor < 2500) return
