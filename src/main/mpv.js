@@ -26,14 +26,6 @@ const path = require('path')
  */
 const AO_ERROR_RE = /audio.?out|AUDCLNT|wasapi|audio device|Could not open/i
 
-/**
- * v2.8.50 / v3.3.59：mpv 的「文件解码失败」日志。
- * 这类错误只走 log-message，mpv 不发 end-file(error)、也不会自动 file-loaded，
- * 于是渲染层既收不到 file-error 也没有任何失败终点：进度照走、AO 关掉、一声不响。
- * 真机日志：flac: invalid sync code → decode_frame() failed → Error decoding audio.
- */
-const DECODE_ERROR_RE = /invalid sync code|invalid frame header|decode_frame\(\) failed|Error decoding audio|Error while decoding|error while decoding|Invalid data found when processing input/i
-
 const PIPE_PREFIX = '\\\\.\\pipe\\lxmpv-'
 
 /**
@@ -88,7 +80,6 @@ class MpvEngine {
     this._aoEverOpened = false
     this._fileLoadedAt = 0     // v3.3.20：看门狗的起播宽限基线（file-loaded 时置位）
     this._loadAt = 0           // v2.8.50：load 时刻，file-loaded 不来时的兜底宽限基线
-    this._decodeErrFired = false // 同一次 load 的解码错误只上报一次
     // v3.3.20：进程 stderr / AO 日志的**序号时钟**。file-error 判性质时比较
     // 「本次 load 之后有没有出现过 AO 类错误」，用序号而不是滚动尾缓冲的下标。
     this._errSeq = 0
@@ -286,7 +277,6 @@ class MpvEngine {
     this._aoEverOpened = false   // 新进程 = 新 AO 状态（见 file-error 判性质）
     this._fileLoadedAt = 0
     this._loadAt = 0
-    this._decodeErrFired = false
     this._errSeqAtLoad = this._errSeq
     this._eofAt = 0          // 新进程不继承旧曲的曲末配对标记
     this._paused = true
@@ -525,14 +515,9 @@ class MpvEngine {
             this._aoLogSeq = this._errSeq
           }
         }
-        // v2.8.50 / v3.3.59：解码失败只走日志时也要给渲染层一个失败终点。
-        // 同一 load 只发一次：mpv 对一帧坏数据会连报 4 条（sync / frame / decode / audio），
-        // 不去重会让自动跳曲一次跳掉 4 首。
-        if (!this._decodeErrFired && (msg.level === 'error' || msg.level === 'fatal' || msg.level === 'warn') &&
-            DECODE_ERROR_RE.test(text)) {
-          this._decodeErrFired = true
-          this.onEvent({ type: 'decode-error', message: text.slice(0, 200), file: this._lastFile || '' })
-        }
+        // v2.8.51 / v3.3.60：坏帧解码警告是 mpv 可自行跳过的局部问题（实测整首只有
+        // 1 帧 / 约 93ms，rc=0 播完），只记日志，绝不上报失败终点 —— 上轮把它接进
+        // error 链后，单曲循环会被 skipToNext() 打断，用户反而没法接着听这一首。
         this.onEvent({ type: 'log', level: msg.level, text })
         return
       }
@@ -556,7 +541,6 @@ class MpvEngine {
     this._aoEverOpened = false
     this._fileLoadedAt = 0   // 新 load 重置起播宽限
     this._loadAt = Date.now() // file-loaded 不来时，看门狗用这个时刻兜底
-    this._decodeErrFired = false
     this._lastAoLog = ''
     this._lastLog = ''   // 同 AO 记忆一起清：否则坏文件的 toast 会带上上一首的 warn 文案
     if (paused) this._send(['set_property', 'pause', true])

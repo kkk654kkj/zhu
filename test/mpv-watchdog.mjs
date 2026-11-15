@@ -1,9 +1,10 @@
 'use strict'
 /**
- * 独占输出看门狗 + 解码错误终点运行时单测 · v2.8.50 / v3.3.59
+ * 独占输出看门狗 + 坏帧静默回归单测 · v2.8.51 / v3.3.60
  *
- * 真机日志：切到坏 FLAC → flac: invalid sync code → audio-out-params=null，
- * 之后既没有自动重启也没有任何提示，mpv 继续空转（「下一首没声音但进程还在跑」）。
+ * 保留：file-loaded 不来时用 _loadAt 兜底，AO 持续 null 仍能自动夺回独占。
+ * 撤销：把 flac 坏帧警告升级成失败终点（实测整首只有 1 帧 / 约 93ms，mpv 会跳过
+ * 继续播；升级后单曲循环被 skipToNext() 打断，用户反而没法接着听这一首）。
  * 这里不启动 mpv 进程，直接构造 MpvEngine 跑 _wdTick / _handleEvent。
  *
  * 用法：node test/mpv-watchdog.mjs
@@ -73,7 +74,7 @@ function makeEngine(events, over = {}) {
     !ev3.some((x) => x.type === 'ao-lost'))
 }
 
-/* ---------- ③ 解码错误：同一次 load 只上报一次 ---------- */
+/* ---------- ③ 坏帧日志保持静默：只记日志，不产生任何失败终点 ---------- */
 {
   const events = []
   const e = makeEngine(events)
@@ -84,30 +85,27 @@ function makeEngine(events, over = {}) {
     'Error decoding audio.'
   ]
   for (const t of logs) e._handleEvent({ event: 'log-message', level: 'error', text: t })
-  const dec = events.filter((x) => x.type === 'decode-error')
-  ok('4 条同帧解码日志只聚合成 1 个失败终点（不会一次跳掉 4 首）',
-    dec.length === 1 && /invalid sync code/.test(dec[0].message), 'count=' + dec.length)
+  ok('4 条坏帧日志只留下 log 事件，不产生 decode-error / error / file-error',
+    events.filter((x) => x.type === 'log').length === 4 &&
+    !events.some((x) => ['decode-error', 'error', 'file-error'].includes(x.type)),
+    JSON.stringify(events.map((x) => x.type)))
 
   e._send = () => {}
   const beforeLoad = e._loadAt
   e.load('D:/music/next.flac')
-  ok('load() 记下 load 时刻供看门狗兜底，并清掉上一首的去重标记',
-    e._loadAt > beforeLoad && Date.now() - e._loadAt < 1000 && e._decodeErrFired === false,
+  ok('load() 记下 load 时刻供看门狗兜底',
+    e._loadAt > beforeLoad && Date.now() - e._loadAt < 1000,
     'loadAt=' + e._loadAt + ' before=' + beforeLoad)
-  e._handleEvent({ event: 'log-message', level: 'error', text: 'Error decoding audio.' })
-  ok('换歌后解码错误可重新上报',
-    events.filter((x) => x.type === 'decode-error').length === 2,
-    'count=' + events.filter((x) => x.type === 'decode-error').length)
 }
 
-/* ---------- ④ 声卡类错误不许误判成「文件坏了」 ---------- */
+/* ---------- ④ 设备类错误同样只记日志，不误判成文件坏了 ---------- */
 {
   const events = []
   const e = makeEngine(events)
   e._handleEvent({ event: 'log-message', level: 'error',
     text: 'Error initializing device: AUDCLNT_E_DEVICE_IN_USE (0x8889000a)' })
-  ok('WASAPI 设备错误不产生 decode-error（仍走 v3.3.18 的不跳曲口径）',
-    !events.some((x) => x.type === 'decode-error'),
+  ok('WASAPI 设备错误不产生失败终点（仍走 v3.3.18 的不跳曲口径）',
+    !events.some((x) => ['decode-error', 'error', 'file-error'].includes(x.type)),
     JSON.stringify(events.map((x) => x.type)))
 }
 
