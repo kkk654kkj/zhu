@@ -692,10 +692,10 @@ function main() {
         /clearTimeout\(this\._lyricBrowseTimer\)/.test(uiSrc2) &&
         /this\._setLyricBrowsing\(false\)/.test(uiSrc2))
 
-      ok('桌面歌词浮窗改成上中下三行：上下 1px 模糊、缺句时占位隐藏',
+      ok('桌面歌词浮窗改成上中下三行：上下轻糊、缺句时占位隐藏',
         /<div id="prev"><\/div>/.test(dlHtml) &&
         /<div id="line">/.test(dlHtml) && /<div id="next"><\/div>/.test(dlHtml) &&
-        /#prev, #next \{[\s\S]*?filter: blur\(1px\) drop-shadow/.test(dlHtml) &&
+        /#prev, #next \{[\s\S]*?filter: blur\(\.6px\) drop-shadow/.test(dlHtml) &&
         /body\.noprev #prev, body\.nolyric #next \{ visibility: hidden; \}/.test(dlHtml) &&
         /#prev, #line, #next, #ctrl \{ transition: none !important; \}/.test(dlHtml))
 
@@ -730,6 +730,50 @@ function main() {
           if (timers[0]) timers[0].fn()
           return on && noHold && !box.classList.contains('lyric-browsing') &&
             !side.classList.contains('lyric-browsing')
+        })())
+    }
+
+    // v2.8.48 / v3.3.56：桌面歌词浮窗上下两行太小（用户实报「几乎不可见」）。
+    // 根因：.55em 相对的是父容器默认 16px（实际 8.8px），而当前句是 34px；
+    // 再叠 .55 透明度 + 1px 模糊。口径：字号按当前句 .6 倍、透明度 .8、模糊 .6px，
+    // 默认窗口 160px，已保存的矮窗口启动补到 160。
+    {
+      const dlHtml2 = read('src/renderer/dlyric.html')
+      const dlJs2 = read('src/renderer/js/dlyric.js')
+      const winSrc = read('src/main/dlyric-window.js')
+
+      ok('浮窗上下行字号改按当前句 .6 倍（CSS 变量），不再用相对父级的 .55em',
+        /#wrap \{[\s\S]{0,220}?--dl-side-fs: 20\.4px;/.test(dlHtml2) &&
+        /#prev, #next \{[\s\S]{0,320}?font-size: var\(--dl-side-fs\);/.test(dlHtml2) &&
+        !/font-size: \.55em/.test(dlHtml2))
+
+      ok('上下行提亮到 .8、模糊减到 .6px；暂停态单独提亮，不回到全暗',
+        /#prev, #next \{[\s\S]{0,420}?opacity: \.8;/.test(dlHtml2) &&
+        /filter: blur\(\.6px\) drop-shadow/.test(dlHtml2) &&
+        /body\.paused #line \{ opacity: \.45; \}/.test(dlHtml2) &&
+        /body\.paused #prev, body\.paused #next \{ opacity: \.6; \}/.test(dlHtml2) &&
+        !/filter: blur\(1px\) drop-shadow/.test(dlHtml2))
+
+      ok('A- / A+ 调字号时上下行同步（applyCfg 按 fs×.6 写变量）',
+        /const fs = Math\.max\(16, Math\.min\(80, cfg\.fontSize \|\| 34\)\)/.test(dlJs2) &&
+        /els\.wrap\.style\.setProperty\('--dl-side-fs', \(fs \* \.6\)\.toFixed\(1\) \+ 'px'\)/.test(dlJs2) &&
+        /els\.line\.style\.fontSize = fs \+ 'px'/.test(dlJs2))
+
+      ok('浮窗默认高度 160px；已保存的矮窗口启动时补到 160（拖更高则保留）',
+        /const MIN_DLYRIC_H = 160/.test(winSrc) &&
+        /const winHeight = Number\.isFinite\(b\.height\) && b\.height >= 150 \? b\.height : MIN_DLYRIC_H/.test(winSrc) &&
+        /height: winHeight,/.test(winSrc) &&
+        !/height: b\.height \|\| 120/.test(winSrc))
+
+      ok('真跑：窗口高度迁移（120→160 / 90→160 / 未保存→160 / 160→160 / 200→200）',
+        (() => {
+          const from = winSrc.indexOf('  const MIN_DLYRIC_H = 160')
+          const to = winSrc.indexOf('  dlyricWin = new BrowserWindow')
+          if (from < 0 || to < from) return false
+          const seg = winSrc.slice(from, to)
+          const calc = new Function('b', seg + '\nreturn winHeight')
+          return calc({ height: 120 }) === 160 && calc({ height: 90 }) === 160 &&
+            calc({}) === 160 && calc({ height: 160 }) === 160 && calc({ height: 200 }) === 200
         })())
     }
 

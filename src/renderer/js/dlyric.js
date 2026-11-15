@@ -19,7 +19,10 @@ let cfg = { locked: false, fontSize: 34, color: COLORS[0], colorIdx: 0 }
 
 function applyCfg() {
   els.wrap.classList.toggle('locked', !!cfg.locked)
-  els.line.style.fontSize = Math.max(16, Math.min(80, cfg.fontSize || 34)) + 'px'
+  const fs = Math.max(16, Math.min(80, cfg.fontSize || 34))
+  els.line.style.fontSize = fs + 'px'
+  // v2.8.48：上下行字号 = 当前句 × .6，写进 #wrap 的 CSS 变量（A- / A+ 一起变）
+  els.wrap.style.setProperty('--dl-side-fs', (fs * .6).toFixed(1) + 'px')
   els.line.style.color = cfg.color || COLORS[0]
   els.prev.style.color = cfg.color || COLORS[0]
   els.next.style.color = cfg.color || COLORS[0]
