@@ -293,11 +293,16 @@ async function handleStreamRequest(req, res) {
 
     // 只有「从头整段请求」才顺手存缓存；用户拖进度条发来的 Range 请求
     // 存下来的是一段残片，反而会把缓存搞脏。
+    // v3.3.58：Chromium / mpv 的首请求不只会发 bytes=0-，也会发 bytes=0-N
+    // 这类从 0 起的整段请求；以前只认精确字面，绝大多数歌曲直接不缓存。
+    // 上游若只回了其中一段，finishCache 的 Content-Range 校验仍会拦下残片。
     const rangeHdr = String(req.headers.range || '').trim()
-    const canCache = cacheOn && (!rangeHdr || /^bytes=0-$/.test(rangeHdr))
+    const canCache = cacheOn && (!rangeHdr || /^bytes=0-(\d*)$/.test(rangeHdr))
     const cKey = DC.cacheKeyOf(song, DC.cacheClassOf(info))
     // part：本次请求的缓存残片。stream=null 表示「不缓存」或「已收尾」
     const part = { path: null, stream: null, bytes: 0 }
+    // 后台写盘队列在 dropPart 之后创建；error 回调可能在创建前就触发，用 let 提前声明
+    let writer = null
 
     if (canCache) {
       try {
@@ -314,9 +319,11 @@ async function handleStreamRequest(req, res) {
         // v3.3.20：写流出错（盘满/目录被删）时，除了删残片还要把 part.stream 摘掉。
         // 以前只删文件、不清状态 —— 后续 chunk 还往这个已销毁的流 write()，
         // 每个字节都要等 3 秒的 drain 兜底，在线播放直接卡成「不动了」。
-        part.stream.on('error', () => {
+        part.stream.on('error', (err) => {
+          if (writer) writer.stop()
           if (part.stream === errS) part.stream = null
           if (part.path === errP) part.path = null
+          G.logLine('[cache] 写盘出错，放弃本次缓存', (err && err.message) || '')
           removePartFile(errP, errS)
         })
       } catch (err) {
@@ -325,12 +332,15 @@ async function handleStreamRequest(req, res) {
       }
     }
     dropPart = () => {
+      if (writer) writer.stop()
       const ps = part.stream
       const p = part.path
       part.stream = null
       part.path = null
       removePartFile(p, ps)
     }
+    // v3.3.58：写盘改走后台队列。主转发循环只做同步投递，磁盘再慢也不占着音频。
+    if (canCache && part.stream) writer = createCacheWriter(part, () => dropPart())
     // 上游是否给了「整段」的凭据：第四轮 §4.5.5 #2 指出只比 Content-Length 会被残片骗过 ——
     // 上游对 bytes=0- 回一段 206 时，bytes === Content-Length 成立，于是残片被 rename 成完整缓存，
     // 重播只听到开头。这里解析 Content-Range 的分母，只认「真的覆盖到 total-1」。
@@ -338,10 +348,19 @@ async function handleStreamRequest(req, res) {
     const crTotal = Number(crHdr.split('/')[1]) || 0
     const crEnd = Number((crHdr.match(/bytes\s+\d+-(\d+)/) || [])[1])
     const crCoversAll = !crTotal || (!Number.isNaN(crEnd) && crEnd === crTotal - 1)
-    // 收尾：字节数、Range 覆盖范围都一致才算缓存成功，半截的直接丢
-    const finishCache = () => {
+    // 收尾：字节数、Range 覆盖范围都一致才算缓存成功，半截的直接丢。
+    // v3.3.58：① 先等后台队列把排队的 chunk 写完再取字节数，否则会拿半截的
+    // part.bytes 去比对 Content-Length，明明写完了也被判残片删掉；
+    // ② 上游 chunked（无 Content-Length）时按实际收到的完整正文长度落盘，
+    // 以前直接静默丢弃，很多音源因此永远缓存不上；
+    // ③ 等写流真正 end 完再做 rename，finishCache 返回时缓存已确定可用。
+    const finishCache = async () => {
       if (!part.stream || !part.path) return
-      const expect = Number(out['Content-Length']) || 0
+      if (writer) await writer.flush()
+      if (!part.stream || !part.path) return
+      const declared = Number(out['Content-Length']) || 0
+      const bytes = part.bytes
+      const expect = declared || bytes
       const target = part.path
       const key = cKey
       const meta = {
@@ -350,40 +369,47 @@ async function handleStreamRequest(req, res) {
         ext: info.ext
       }
       const stream = part.stream
-      const bytes = part.bytes
       part.stream = null
       part.path = null
-      stream.end(() => {
-        if (!expect) {
-          // 第四轮 §4.5.2 #2：上游 chunked（无 Content-Length）时永远落不了盘，
-          // 以前是静默丢弃、也没有任何日志，排查时完全看不出「为什么缓存没生效」
-          G.logLine('[cache] 上游无 Content-Length（chunked），跳过缓存', key)
-          try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
-          return
+      await new Promise((resolve) => {
+        let done = false
+        let timer = null
+        const fin = () => {
+          if (done) return
+          done = true
+          if (timer) clearTimeout(timer)
+          stream.off('error', fin)
+          resolve()
         }
-        if (bytes !== expect || !crCoversAll) {
-          try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
-          return
-        }
-        // v3.3.13：ext 来自网络字段，只放行白名单扩展名，否则退回 mp3
-        const CACHE_EXTS = ['mp3', 'm4a', 'flac', 'ogg', 'aac']
-        const ext = String(meta.ext || '').toLowerCase()
-        const safeExt = CACHE_EXTS.includes(ext) ? ext : 'mp3'
-        const file = `${key}.${safeExt}`
-        try {
-          const target2 = path.join(DC.cacheDirPath(), file)
-          // 另一个并发请求可能已经先写完了，那就用它的
-          if (fs.existsSync(target2)) {
-            try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
-            return
-          }
-          fs.renameSync(target, target2)
-          DC.cachePut(key, file, meta, bytes)
-          G.logLine('[cache] 缓存完成', file, (bytes / 1048576).toFixed(1) + 'MB')
-        } catch (e) {
-          try { fs.unlinkSync(target) } catch (e2) { /* 忽略 */ }
-        }
+        timer = setTimeout(fin, 5000)   // 写流出错时 end 的回调可能永远不来
+        if (timer.unref) timer.unref()
+        stream.once('error', fin)
+        try { stream.end(fin) } catch (e) { fin() }
       })
+      if (!bytes || bytes !== expect || !crCoversAll) {
+        G.logLine('[cache] 正文不完整，丢弃缓存', key, bytes + '/' + expect)
+        try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
+        return
+      }
+      // v3.3.13：ext 来自网络字段，只放行白名单扩展名，否则退回 mp3
+      const CACHE_EXTS = ['mp3', 'm4a', 'flac', 'ogg', 'aac']
+      const ext = String(meta.ext || '').toLowerCase()
+      const safeExt = CACHE_EXTS.includes(ext) ? ext : 'mp3'
+      const file = `${key}.${safeExt}`
+      try {
+        const target2 = path.join(DC.cacheDirPath(), file)
+        // 另一个并发请求可能已经先写完了，那就用它的
+        if (fs.existsSync(target2)) {
+          try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
+          return
+        }
+        fs.renameSync(target, target2)
+        DC.cachePut(key, file, meta, bytes)
+        G.logLine('[cache] 缓存完成', file, (bytes / 1048576).toFixed(1) + 'MB' + (declared ? '' : '（chunked）'))
+      } catch (e) {
+        G.logLine('[cache] 缓存落盘失败', (e && e.message) || e)
+        try { fs.unlinkSync(target) } catch (e2) { /* 忽略 */ }
+      }
     }
 
     if (clientGone) { dropPart(); return }
@@ -409,7 +435,8 @@ async function handleStreamRequest(req, res) {
       ctrl: opened.ctrl,
       part,
       dropPart,
-      finishCache
+      finishCache,
+      cacheWrite: writer ? writer.write : null
     })
   } catch (err) {
     try { dropPart() } catch (e) { /* 忽略 */ }
@@ -505,7 +532,9 @@ function buildProxyHeaders(upstream) {
  * 约定（改之前务必读）：
  *  - 客户端断开（切歌/拖进度条）要同时收掉上游读者与写盘，否则请求会永远悬着；
  *  - 只有「正常读完」才落缓存，中途断开一律丢弃残片；
- *  - 无论成功/异常/断开，响应连接都必须收掉。
+ *  - 无论成功/异常/断开，响应连接都必须收掉；
+ *  - v3.3.58：缓存写盘只做同步投递，等磁盘的动作留在后台队列里。
+ *    主循环里除了网络背压（res）不允许等写盘，否则音频会「断一下」。
  *
  * @param {object} p
  * @param {ReadableStreamDefaultReader} p.reader 上游 body reader
@@ -513,9 +542,10 @@ function buildProxyHeaders(upstream) {
  * @param {AbortController} p.ctrl 正文空闲看门狗用
  * @param {{path:string|null, stream:fs.WriteStream|null, bytes:number}} p.part 缓存残片状态
  * @param {() => void} p.dropPart
- * @param {() => void} p.finishCache
+ * @param {() => Promise<void>} p.finishCache
+ * @param {((buf:Buffer)=>void)|null} p.cacheWrite 后台写盘队列的同步投递口
  */
-async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache }) {
+async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache, cacheWrite }) {
   // 正文阶段：可刷新的空闲看门狗 —— 每读到一个 chunk 就刷新 20 秒，
   // 慢速但持续的大文件不会被误杀，真正卡死的连接才会被 abort
   let idleTimer = null
@@ -561,14 +591,11 @@ async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache
       const buf = Buffer.from(value)
       rateBytes += buf.length
       // v2.8.49 / v3.3.57：先把音频数据送给 <audio>，缓存写盘绝不阻塞播放。
-      // 以前写盘 drain 的等待串在 res.write 前面，磁盘一忙音频就「断一下」。
+      // v3.3.58：以前一见写盘背压就丢掉整首缓存（WriteStream 16KB 水位，
+      // 第一个音频块就返回 false），结果在线播放永远缓存不上。改成同步投递到
+      // 后台队列，磁盘的 drain 由队列自己等，主循环这里一步都不停。
       if (!res.write(buf)) await waitDrain(res)
-      const ps = part.stream
-      if (ps) {
-        part.bytes += buf.length
-        // 写盘背压：不再等 drain，直接放弃本次缓存（残片由 dropPart 收掉），音频继续走
-        if (!ps.write(buf)) { try { dropPart() } catch (e) { /* 忽略 */ } }
-      }
+      if (cacheWrite) cacheWrite(buf)
     }
     complete = !aborted
   } catch (err) {
@@ -577,11 +604,11 @@ async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache
     clearTimeout(idleTimer)
     clearInterval(rateTimer)
     res.off('close', onClose)
-    // 正常读完才落缓存；中途断开就把残片丢掉
-    if (complete) finishCache()
-    else dropPart()
-    // v3.3.13：无论成功/异常/断开，连接都必须收掉
+    // v3.3.13：无论成功/异常/断开，连接都必须收掉。先 end，客户端不必等写盘收尾。
     try { if (!res.writableEnded) res.end() } catch (e) { /* 已断开 */ }
+    // 正常读完才落缓存；中途断开就把残片丢掉。finishCache 内部会等后台队列写完。
+    if (complete) await finishCache()
+    else dropPart()
   }
 }
 
@@ -605,6 +632,80 @@ function waitDrain(emitter) {
     emitter.on('close', go)
     timer = setTimeout(go, 3000)
   })
+}
+
+/**
+ * v3.3.58：在线播放缓存的后台写入队列。
+ *
+ * 音频转发是主角：主循环只把 Buffer 同步投递进来，磁盘的 drain 放在这个
+ * 独立协程里等。磁盘再慢，也只是队列变长，<audio> 该收的字节一个不少。
+ * 队列堆到 32MB 说明磁盘长期跟不上，就放弃本次缓存，别让内存被拖爆。
+ * 收尾必须先 flush()，否则 finishCache 拿到的是还没写完的字节数。
+ */
+function createCacheWriter(part, dropPart) {
+  const MAX_QUEUED = 32 * 1024 * 1024
+  const queue = []
+  let queued = 0
+  let running = false
+  let stopped = false
+  let wake = null
+
+  const stop = () => {
+    stopped = true
+    queue.length = 0
+    queued = 0
+    if (wake) { const w = wake; wake = null; w() }
+  }
+
+  const pumpQueue = async () => {
+    running = true
+    try {
+      while (!stopped && part.stream && queue.length) {
+        const b = queue.shift()
+        queued -= b.length
+        const w = part.stream
+        part.bytes += b.length
+        try {
+          if (!w.write(b)) await waitDrain(w)
+        } catch (e) {
+          stop()
+          break
+        }
+      }
+    } finally {
+      running = false
+      if (wake) { const w = wake; wake = null; w() }
+    }
+  }
+
+  const write = (buf) => {
+    if (stopped || !part.stream) return
+    queue.push(buf)
+    queued += buf.length
+    if (queued > MAX_QUEUED) {
+      G.logLine('[cache] 写盘长期跟不上，放弃本次缓存')
+      stop()
+      try { dropPart() } catch (e) { /* 忽略 */ }
+      return
+    }
+    if (!running) void pumpQueue().catch(() => {})
+  }
+
+  const flush = () => new Promise((resolve) => {
+    if (stopped || (!running && !queue.length)) { resolve(); return }
+    let timer = null
+    const fin = () => {
+      if (timer) clearTimeout(timer)
+      if (wake === fin) wake = null
+      resolve()
+    }
+    // 写流既不 drain 也不 close 时不能让收尾悬着（Promise 只会被 resolve 一次）
+    timer = setTimeout(fin, 5000)
+    if (timer.unref) timer.unref()
+    wake = fin
+  })
+
+  return { write, flush, stop }
 }
 
 /**
@@ -663,6 +764,7 @@ module.exports = {
   openUpstream,
   buildProxyHeaders,
   pumpUpstreamBody,
+  createCacheWriter,
   waitDrain,
   removePartFile,
 }

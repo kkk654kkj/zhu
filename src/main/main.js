@@ -311,6 +311,7 @@ const DEFAULT_SETTINGS = {
   onlineCacheOn: true,         // 播放时顺手把音频缓存到本地
   onlineCacheDir: '',          // 缓存目录，'' = 数据目录\music-cache
   onlineCacheLimitMB: 4096,    // 缓存上限（MB），0 = 不限；超了按最久没放的删
+  onlineCacheClearOnExit: false, // v3.3.58：退出时自动清空在线缓存（默认保留缓存，面板可切换）
   onlineChkszKey: ''           // 可选：ChKSz API 的 apikey，填了就能给 QQ/酷狗 的歌拿无损
 }
 
@@ -2776,6 +2777,15 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       try { DL.dlSaveNow() } catch (err) { /* 忽略 */ }   // 任何退出路径都不丢下载任务（幂等）
       // 缓存索引走 1s 去抖 + unref 定时器，退出时会随 app.quit() 被丢弃，必须补一次
       try { DC.cacheSave() } catch (err) { /* 忽略 */ }
+      // v3.3.58：缓存面板可切换「退出时自动清除在线缓存」，默认 false = 保留缓存。
+      // 放在 cacheSave 之后：cacheClear 内部会写回空索引，不会被旧索引覆盖回去。
+      try {
+        const st = store && store.get()
+        if (st && st.settings && st.settings.onlineCacheClearOnExit === true) {
+          const r = DC.cacheClear()
+          logLine('[cache] 退出自动清理缓存，删除', r.removed, '首')
+        }
+      } catch (err) { /* 忽略 */ }
       try { if (store) store.flush() } catch (err) { /* 忽略 */ }
       try { if (tray) tray.destroy() } catch (err) { /* 忽略 */ }
       app.quit()

@@ -442,6 +442,9 @@
     <label class="cp-check"><input type="checkbox" id="cacheOn" /><span>播放时自动缓存</span></label>
   </div>
   <div class="cp-row">
+    <label class="cp-check"><input type="checkbox" id="cacheClearOnExit" /><span>退出时自动清除在线缓存</span></label>
+  </div>
+  <div class="cp-row">
     <span class="cp-label">目录</span>
     <span class="cp-path" id="cachePath" title="">—</span>
   </div>
@@ -463,7 +466,7 @@
   <div class="sp-opts">
     <button class="sp-chip" id="cacheClear">清理缓存</button>
   </div>
-  <div class="sp-foot">放完整首才会缓存（中途切歌不留残片）；再放同一首不用等解析。超出上限按最久没放的自动删。</div>
+  <div class="sp-foot">放完整首才会缓存（中途切歌不留残片）；再放同一首不用等解析。超出上限按最久没放的自动删。开启「退出时自动清除」后，每次关闭联网版会清空缓存，下次播放重新边播边存。</div>
   <div class="cp-sep"></div>
   <div class="cp-row">
     <span class="cp-label">高级音源</span>

@@ -26,6 +26,9 @@ async function refreshCachePanel() {
   p.textContent = info.dir
   p.title = info.dir
   document.getElementById('cacheOn').checked = info.enabled
+  // v3.3.58：退出时自动清除在线缓存（默认关 = 一直保留缓存）
+  const clr = document.getElementById('cacheClearOnExit')
+  if (clr) clr.checked = info.clearOnExit === true
   const sel = document.getElementById('cacheLimit')
   const lim = String(info.limitMB || 0)
   if (!Array.from(sel.options).some((o) => o.value === lim)) {
@@ -49,6 +52,17 @@ function bindCachePanel() {
     if (!ok) { e.target.checked = prev !== false; toast('设置保存失败，缓存开关未生效'); return }
     state.settings.onlineCacheOn = on
     toast(on ? '已开启在线缓存' : '已关闭在线缓存')
+  })
+  // v3.3.58：与「播放时自动缓存」是两个独立开关 —— 这个只管退出时删不删。
+  // 同样先 await 判成败，写盘失败要回滚，不能界面显示成功而设置没落盘。
+  const exitClear = document.getElementById('cacheClearOnExit')
+  if (exitClear) exitClear.addEventListener('change', async (e) => {
+    const on = e.target.checked
+    const prev = state.settings.onlineCacheClearOnExit
+    const ok = await window.api.patchSettings({ onlineCacheClearOnExit: on }).then(() => true, () => false)
+    if (!ok) { e.target.checked = prev === true; toast('设置保存失败，退出清理开关未生效'); return }
+    state.settings.onlineCacheClearOnExit = on
+    toast(on ? '已开启：每次关闭联网版自动清除在线缓存' : '已关闭：在线缓存会一直保留')
   })
   document.getElementById('cacheLimit').addEventListener('change', async (e) => {
     const mb = Number(e.target.value) || 0

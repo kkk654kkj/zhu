@@ -794,6 +794,7 @@ function main() {
     // v2.8.49 / v3.3.57：在线播放「转圈加载不出来 / 概率断续」流式链路修复。
     // 真机日志：上游打开失败 This operation was aborted（母带档）→ 作废直链 → 502，
     // 界面没有加载失败终点就永久停在 0:00；断续来自缓存写盘背压串在 res.write 前。
+    // v3.3.58：上轮为躲开背压把整首缓存丢了，导致在线播放永远不落盘。
     {
       const spSrc = read('src/main/streamproxy.js')
       const plSrc = read('src/renderer/js/player.js')
@@ -802,13 +803,40 @@ function main() {
       const chain = spawnSync(process.execPath, ['test/stream-chain.mjs'], {
         cwd: ROOT, encoding: 'utf8'
       })
-      ok('流式链路运行时单测 stream-chain（10 项：降级 / 背压 / 低速看门狗）',
+      ok('流式链路运行时单测 stream-chain（16 项：降级 / 背压 / 低速 / 落盘 / 残片）',
         chain.status === 0, (chain.stdout || '').trim().split('\n').slice(-1)[0])
 
-      ok('转发顺序：先 res.write 给 <audio>，写盘背压不再 await waitDrain(ps)',
-        /if \(!res\.write\(buf\)\) await waitDrain\(res\)\r?\n      const ps = part\.stream/.test(spSrc) &&
-        !/await waitDrain\(ps\)/.test(spSrc) &&
-        /if \(!ps\.write\(buf\)\) \{ try \{ dropPart\(\) \}/.test(spSrc))
+      ok('转发顺序：先 res.write 给 <audio>，缓存只做同步投递，不再一见背压就丢',
+        /if \(!res\.write\(buf\)\) await waitDrain\(res\)\r?\n      if \(cacheWrite\) cacheWrite\(buf\)/.test(spSrc) &&
+        !/const ps = part\.stream\r?\n      if \(ps\)/.test(spSrc) &&
+        !/await waitDrain\(ps\)/.test(spSrc))
+
+      ok('主转发循环里没有写盘 drain 的 await（音频不被磁盘阻塞）',
+        (() => {
+          const from = spSrc.indexOf('async function pumpUpstreamBody(')
+          const to = spSrc.indexOf('function waitDrain(', from)
+          if (from < 0 || to < 0) return false
+          const seg = spSrc.slice(from, to)
+          const m = seg.match(/await waitDrain\([^)]*\)/g) || []
+          return m.length === 1 && m[0] === 'await waitDrain(res)'
+        })())
+
+      ok('缓存后台写盘队列：磁盘 drain 只在独立协程里等，32MB 上限保护内存',
+        /function createCacheWriter\(/.test(spSrc) &&
+        /MAX_QUEUED = 32 \* 1024 \* 1024/.test(spSrc) &&
+        /await waitDrain\(w\)/.test(spSrc) &&
+        /void pumpQueue\(\)\.catch/.test(spSrc) &&
+        /createCacheWriter,/.test(spSrc))
+
+      ok('收尾先等后台队列写完再校验，chunked 上游按实际正文长度落盘',
+        /if \(writer\) await writer\.flush\(\)/.test(spSrc) &&
+        /const expect = declared \|\| bytes/.test(spSrc) &&
+        /stream\.end\(fin\)/.test(spSrc) &&
+        !/上游无 Content-Length（chunked），跳过缓存/.test(spSrc))
+
+      ok('start=0 的 Range 首请求允许缓存，拖进度条的 Range 仍不写脏缓存',
+        spSrc.includes('/^bytes=0-(\\d*)$/') &&
+        /const canCache = cacheOn && \(!rangeHdr \|\|/.test(spSrc))
 
       ok('正文最低速率看门狗（20 秒窗口 / 32KB / 不被 chunk 刷新 / 收尾清掉）',
         /const RATE_MIN_BYTES = 32 \* 1024/.test(spSrc) &&
@@ -839,6 +867,28 @@ function main() {
         /const bad = cur && cur\.online/.test(appSrc3) &&
         /bad && bad\.source && bad\.id/.test(appSrc3) &&
         !/cur && cur\.online && cur\.source && cur\.id/.test(appSrc3))
+
+      // v3.3.58：「保留缓存 / 退出时自动清除」做成缓存面板可切换开关，默认保留。
+      const cpSrc = read('src/renderer/js/cache-panel.js')
+      const dcSrc = read('src/main/dircache.js')
+      const mjSrc = read('src/main/main.js')
+      const htmlSrc4 = read('src/renderer/index.html')
+      const policy = spawnSync(process.execPath, ['test/cache-policy.mjs'], {
+        cwd: ROOT, encoding: 'utf8'
+      })
+      ok('缓存策略运行时单测 cache-policy（6 项：默认值 / 白名单 / 清理边界）',
+        policy.status === 0, (policy.stdout || '').trim().split('\n').slice(-1)[0])
+
+      ok('默认保留缓存：开关默认 false，退出链按开关才调用 cacheClear',
+        /onlineCacheClearOnExit: false/.test(mjSrc) &&
+        /onlineCacheClearOnExit === true\)[\s\S]{0,180}?DC\.cacheClear\(\)/.test(mjSrc) &&
+        /退出自动清理缓存/.test(mjSrc))
+
+      ok('缓存面板开关接线：cacheStats 回传 + 回填 + patchSettings + HTML 控件成对',
+        /clearOnExit: G\.store\.get\(\)\.settings\.onlineCacheClearOnExit === true/.test(dcSrc) &&
+        /clr\.checked = info\.clearOnExit === true/.test(cpSrc) &&
+        /patchSettings\(\{ onlineCacheClearOnExit: on \}\)/.test(cpSrc) &&
+        /id="cacheClearOnExit"/.test(htmlSrc4))
     }
 
   }

@@ -272,7 +272,8 @@ function cacheStats() {
     count: items.length,
     size: items.reduce((s, x) => s + (Number(x.size) || 0), 0),
     limitMB: Number(G.store.get().settings.onlineCacheLimitMB) || 0,
-    enabled: G.store.get().settings.onlineCacheOn !== false
+    enabled: G.store.get().settings.onlineCacheOn !== false,
+    clearOnExit: G.store.get().settings.onlineCacheClearOnExit === true
   }
 }
 
