@@ -91,6 +91,12 @@ function onMpvEvent(evt) {
     G.logLine('[mpv][log] ' + evt.text)
     pushMpvLog(evt.level === 'fatal' ? 'error' : 'warn', '[' + evt.level + '] ' + evt.text)
   }
+  if (evt.type === 'decode-error') {
+    // v2.8.50 / v3.3.59：坏 FLAC 之类只报解码日志，以前既不进 file-error 也无提示。
+    // 单独留一条可检索的日志，事件继续下发让渲染层走失败链。
+    G.logLine('[mpv] 解码失败：' + (evt.message || ''))
+    pushMpvLog('error', 'decode-error: ' + (evt.message || ''))
+  }
   if (evt.type === 'engine-exit') {
     pushMpvLog('error', '引擎退出 code=' + evt.code + (evt.stderr ? ' stderr=' + evt.stderr : ''))
   }

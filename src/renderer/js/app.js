@@ -728,7 +728,12 @@ function bindPlayer() {
     // （v3.3.18 起回退共享只置 state.exclusiveFellBack，后端仍是 mpv，判据不变）
     // v3.3.20：已经回退共享时，mpv 后端本身能正常出声，这时的 error 就是「这一首坏了」，
     // 再按独占处理会把队列永久卡在这一首（audit-main 第 7 条）。
-    if (state.exclusive && !state.exclusiveFellBack) {
+    // v2.8.50：明确的解码错误（坏 FLAC / 假 FLAC）属于「文件坏了」，
+    // 不能套用「独占下多半是声卡问题，绝不跳曲」——否则队列卡在这首无声的歌上，
+    // 真机表现就是「下一首没声音但播放进程还在跑」。
+    // 声卡 / 设备类错误仍保持 v3.3.18 口径：暂停 + 提示，不自动跳曲。
+    const decodeFailed = !!(audio && audio.decodeFailed)
+    if (state.exclusive && !state.exclusiveFellBack && !decodeFailed) {
       toast('音频输出失败：' + ((audio && audio.lastError) || '设备不可用，已暂停'))
       player.pause()
       return

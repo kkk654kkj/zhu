@@ -792,6 +792,21 @@ function main() {
         /this\.audio\.load\(\)\r?\n    this\._armLoadWatchdog\(\)/.test(plSrc))
     }
 
+  // v2.8.50：独占下切到坏 FLAC 后「下一首没声音但进程还在跑」。
+  const mvSrc = read('src/main/mpv.js')
+  const maSrc = read('src/renderer/js/mpvaudio.js')
+  const appSrc4 = read('src/renderer/js/app.js')
+  const wd = spawnSync(process.execPath, ['test/mpv-watchdog.mjs'], {
+    cwd: ROOT, encoding: 'utf8'
+  })
+  ok('独占看门狗运行时单测 mpv-watchdog（10 项：宽限边界 / 解码错误去重 / 误判防护）',
+    wd.status === 0, (wd.stdout || '').trim().split('\n').slice(-1)[0])
+  ok('file-loaded 不来时用 load 时刻兜底 + 解码错误有失败终点',
+    /const graceBase = this\._fileLoadedAt \|\| this\._loadAt/.test(mvSrc) &&
+    /type: 'decode-error'/.test(mvSrc) &&
+    /case 'decode-error'/.test(maSrc) &&
+    /!decodeFailed\)/.test(appSrc4))
+
   }
 
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))

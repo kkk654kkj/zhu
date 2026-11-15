@@ -17,6 +17,7 @@ class MpvAudio {
     this.format = null          // mpv 的 audio-out-params：{samplerate, format:'s16', channels}
     this.fallbackMessage = ''
     this.lastError = null
+    this.decodeFailed = false   // v2.8.50：本次播放是否遇到明确的文件解码错误
     this.preload = 'auto'
 
     this._listeners = new Map()
@@ -92,6 +93,7 @@ class MpvAudio {
     if (!this._srcPath) return
     // v3.3.13：推进 load 代次并复位曲末去重状态，跨 load 的短曲目能正常触发 ended
     this._loadEpoch++
+    this.decodeFailed = false
     this._ended = false
     this._endedFired = false
     this._lastEndedAt = 0
@@ -126,6 +128,7 @@ class MpvAudio {
 
   play() {
     this._wantPlaying = true
+    this.decodeFailed = false
     // v3.3.9：整队播完停在曲末后再点播放，要真的从头播 ——
     // 以前只翻状态位，界面「播放中」、进度条顶死、无声
     if (this._ended && this._srcPath) {
@@ -343,6 +346,16 @@ class MpvAudio {
       }
       case 'error': {
         this.lastError = e.message || 'mpv 错误'
+        console.error('[mpvaudio]', this.lastError)
+        this._emit('error')
+        break
+      }
+      case 'decode-error': {
+        // v2.8.50 / v3.3.59：mpv 的解码失败只走 log-message，没有 end-file(error)。
+        // 打上「文件坏了」标记再走既有 error 链，让界面明确提示 / 跳到下一首，
+        // 而不是「AO 关掉、进度照走、一声不响」。
+        this.decodeFailed = true
+        this.lastError = e.message || '音频解码失败'
         console.error('[mpvaudio]', this.lastError)
         this._emit('error')
         break
