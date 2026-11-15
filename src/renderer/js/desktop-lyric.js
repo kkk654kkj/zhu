@@ -11,11 +11,17 @@ function pushDesktopLyric(force) {
   const t = player && player.current
   let line = ''
   let next = ''
+  let prev = ''
   if (t) {
     const st = UI.lyricState
     if (!st.plain && st.lines.length) {
       const idx = st.index
       if (idx >= 0 && st.lines[idx]) line = st.lines[idx].text || ''
+      // v2.8.47：浮窗改成上中下三行。前奏（idx<0）或首句时不预告上一句/下一句，
+      // 否则会拿错行当预览；与下一句同样只认带时间戳的正式行。
+      if (idx > 0 && st.lines[idx - 1] && st.lines[idx - 1].t != null) {
+        prev = st.lines[idx - 1].text || ''
+      }
       // 还没进第一句时不要预告"下一句"（否则会拿 lines[-1] 之类的错行当预览）
       if (idx >= 0 && idx + 1 < st.lines.length && st.lines[idx + 1] && st.lines[idx + 1].t != null) {
         next = st.lines[idx + 1].text || ''
@@ -24,11 +30,11 @@ function pushDesktopLyric(force) {
     if (!line) line = t.title + (t.artist ? ' — ' + t.artist : '')
   }
   const playing = !!(player && player.isPlaying)
-  const key = (t ? t.id : '') + '|' + line + '|' + next + '|' + (playing ? 1 : 0)
+  const key = (t ? t.id : '') + '|' + line + '|' + next + '|' + prev + '|' + (playing ? 1 : 0)
   if (!force && key === _dlKey) return
   _dlKey = key
   window.api.dlyricState({
-    line, next,
+    line, next, prev,
     title: t ? t.title : '',
     artist: t ? (t.artist || '') : '',
     playing

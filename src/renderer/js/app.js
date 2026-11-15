@@ -1355,19 +1355,18 @@ function bindLyricUi() {
     const box = document.getElementById(id)
     if (!box) continue
     box.addEventListener('click', seekByLyricLine)
-    if (id === 'fsLyrics') {
-      // v2.8.46 / v3.3.54：滚轮 / 触控板 / 拖滚动条 → 暂停自动居中 4 秒。
-      // 只认明确的用户手势，程序写 scrollTop 不会被误判成手动浏览。
-      const note = () => UI.noteFsLyricScroll()
-      box.addEventListener('wheel', note, { passive: true })
-      box.addEventListener('touchstart', note, { passive: true })
-      box.addEventListener('pointerdown', (e) => {
-        if (e.target === box) note()   // 命中右侧滚动条槽（歌词行的 target 是 .lyric-line）
-      }, { passive: true })
-      box.addEventListener('pointermove', (e) => {
-        if (e.target === box && e.buttons === 1) note()  // 拖动过程中持续续期
-      }, { passive: true })
-    }
+    // v2.8.46 / v3.3.54：滚轮 / 触控板 / 拖滚动条 → 全屏页暂停自动居中 4 秒。
+    // v2.8.47 / v3.3.55：两处面板同步进入「浏览态」，4 秒内取消歌词景深模糊。
+    // 只认明确的用户手势，程序写 scrollTop 不会被误判成手动浏览。
+    const note = () => id === 'fsLyrics' ? UI.noteFsLyricScroll() : UI.noteLyricBrowsing()
+    box.addEventListener('wheel', note, { passive: true })
+    box.addEventListener('touchstart', note, { passive: true })
+    box.addEventListener('pointerdown', (e) => {
+      if (e.target === box) note()   // 命中右侧滚动条槽（歌词行的 target 是 .lyric-line）
+    }, { passive: true })
+    box.addEventListener('pointermove', (e) => {
+      if (e.target === box && e.buttons === 1) note()  // 拖动过程中持续续期
+    }, { passive: true })
   }
 
 }

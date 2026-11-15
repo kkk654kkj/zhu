@@ -629,30 +629,40 @@ function main() {
       const mkBox = () => ({
         scrollTop: 500, clientHeight: 300, scrollHeight: 900,
         children: [{}, {}, { getBoundingClientRect: () => ({ top: 100, height: 30 }) }, {}, {}],
-        getBoundingClientRect: () => ({ top: 0, height: 300 })
+        getBoundingClientRect: () => ({ top: 0, height: 300 }),
+        classList: {
+          s: new Set(),
+          toggle(c, on) { on ? this.s.add(c) : this.s.delete(c) },
+          contains(c) { return this.s.has(c) }
+        }
       })
       const mk = () => {
-        const box = mkBox(), timers = [], cleared = []
+        const box = mkBox(), side = mkBox(), timers = [], cleared = []
         const obj = new Function('setTimeout', 'clearTimeout', 'Date', 'Math',
           'return {' + seg + '}')(
           (fn, ms) => { timers.push({ fn, ms }); return timers.length },
           (id) => { cleared.push(id) }, Date, Math)
-        obj.els = { fsLyrics: box }
+        obj.els = { fsLyrics: box, lpLyrics: side }
         obj.lyricState = { index: 2 }
-        return { obj, box, timers, cleared }
+        return { obj, box, side, timers, cleared }
       }
 
       const a = mk()
       a.obj.noteFsLyricScroll()
       const held = a.obj._fsHoldUntil > Date.now() &&
-        a.timers.length === 1 && a.timers[0].ms === 4000
-      a.timers[0].fn()                       // 模拟 4 秒到期
+        a.timers.length === 2 && a.timers.every((t) => t.ms === 4000) &&
+        a.box.classList.contains('lyric-browsing') && a.side.classList.contains('lyric-browsing')
+      if (a.timers[0]) a.timers[0].fn()     // 浏览态 4 秒到期
+      const browseCleared = !a.box.classList.contains('lyric-browsing') &&
+        !a.side.classList.contains('lyric-browsing')
+      if (a.timers[1]) a.timers[1].fn()     // 自动跟随 4 秒到期 → 归位
       const centered = a.obj._fsHoldUntil === 0 && a.box.scrollTop === 465
       const b = mk()
       b.obj.noteFsLyricScroll()
       b.obj.clearFsLyricScrollHold()
-      ok('真跑：滚轮后暂停 4 秒、到期写回当前行居中位置；切歌立即撤销',
-        held && centered && b.obj._fsHoldUntil === 0 && b.cleared.includes(1),
+      ok('真跑：滚轮后暂停 4 秒、浏览态全清晰、到期写回当前行居中位置；切歌立即撤销',
+        held && browseCleared && centered && b.obj._fsHoldUntil === 0 &&
+        !b.box.classList.contains('lyric-browsing') && b.cleared.includes(1),
         'scrollTop=' + a.box.scrollTop)
 
       const c = mk()
@@ -661,6 +671,80 @@ function main() {
         c.obj._fsCenterTop(c.box, 2) === 600 &&
         c.obj._fsCenterTop(c.box, -1) === null &&
         c.obj._fsCenterTop(c.box, 99) === null)
+    }
+
+    // v2.8.47 / v3.3.55：歌词景深模糊（参考 Apple Music / Salt Player）。
+    // 口径：当前句清晰，±1/±2/≥3 行按 1/2/3px 渐糊渐淡；手动滚动 4 秒全清晰；
+    // 桌面浮窗改上中下三行、上下两行轻糊。无高亮行（前奏/纯文本）不糊。
+    {
+      const cssSrc = read('src/renderer/css/app.css')
+      const uiSrc2 = read('src/renderer/js/ui.js')
+      const appSrc2 = read('src/renderer/js/app.js')
+      const dlHtml = read('src/renderer/dlyric.html')
+      const dlJs = read('src/renderer/js/dlyric.js')
+      const pushJs = read('src/renderer/js/desktop-lyric.js')
+
+      ok('景深只在有高亮行时启用，三档模糊半径与透明度渐变齐全',
+        /\.lp-lyrics:has\(\.lyric-line\.active\) \.lyric-line,/.test(cssSrc) &&
+        /#fsLyrics:has\(\.lyric-line\.active\) \.lyric-line \{/.test(cssSrc) &&
+        /filter: blur\(3px\)/.test(cssSrc) &&
+        /filter: blur\(1px\); opacity: var\(--lyric-depth-1\)/.test(cssSrc) &&
+        /filter: blur\(2px\); opacity: var\(--lyric-depth-2\)/.test(cssSrc) &&
+        /:has\(\+ \.lyric-line\.active\)/.test(cssSrc) &&
+        /--lyric-depth-3: \.38/.test(cssSrc) && /--lyric-depth-3: \.5/.test(cssSrc))
+
+      ok('浏览态全部清晰（!important 覆盖三档）+ reduced-motion 关过渡',
+        /\.lp-lyrics\.lyric-browsing \.lyric-line,/.test(cssSrc) &&
+        /#fsLyrics\.lyric-browsing \.lyric-line \{ filter: none !important; opacity: 1 !important; \}/.test(cssSrc) &&
+        /\.lyric-line, \.lyric-line \.kw \{ transition: none !important; \}/.test(cssSrc))
+
+      ok('两处歌词面板都绑了浏览态手势；全屏页仍走 4 秒 hold',
+        /const note = \(\) => id === 'fsLyrics' \? UI\.noteFsLyricScroll\(\) : UI\.noteLyricBrowsing\(\)/.test(appSrc2) &&
+        /box\.addEventListener\('wheel', note, \{ passive: true \}\)/.test(appSrc2) &&
+        /_setLyricBrowsing\(on\)/.test(uiSrc2) && /noteLyricBrowsing\(\)/.test(uiSrc2) &&
+        /this\.noteLyricBrowsing\(\)/.test(uiSrc2) &&
+        /clearTimeout\(this\._lyricBrowseTimer\)/.test(uiSrc2) &&
+        /this\._setLyricBrowsing\(false\)/.test(uiSrc2))
+
+      ok('桌面歌词浮窗改成上中下三行：上下 1px 模糊、缺句时占位隐藏',
+        /<div id="prev"><\/div>/.test(dlHtml) &&
+        /<div id="line">/.test(dlHtml) && /<div id="next"><\/div>/.test(dlHtml) &&
+        /#prev, #next \{[\s\S]*?filter: blur\(1px\) drop-shadow/.test(dlHtml) &&
+        /body\.noprev #prev, body\.nolyric #next \{ visibility: hidden; \}/.test(dlHtml) &&
+        /#prev, #line, #next, #ctrl \{ transition: none !important; \}/.test(dlHtml))
+
+      ok('浮窗三行数据链路：主窗口发 prev（含 idx>0 守卫）→ 浮窗写 prev + noprev 类',
+        /if \(idx > 0 && st\.lines\[idx - 1\] && st\.lines\[idx - 1\]\.t != null\)/.test(pushJs) &&
+        /const key = .*\+ prev \+/.test(pushJs) &&
+        /line, next, prev,/.test(pushJs) &&
+        /els\.prev\.textContent = d\.prev \|\| ''/.test(dlJs) &&
+        /document\.body\.classList\.toggle\('noprev', !d\.prev\)/.test(dlJs) &&
+        /els\.prev\.style\.color/.test(dlJs))
+
+      ok('真跑：侧栏浏览只切景深，不动全屏自动跟随 hold（不变量 #50）',
+        (() => {
+          const seg2 = uiSrc2.slice(uiSrc2.indexOf('  _fsHoldUntil: 0,'),
+            uiSrc2.indexOf('  renderLyric(parsed, trackTitle)'))
+          const mkCls = () => ({
+            s: new Set(),
+            toggle(c, on) { on ? this.s.add(c) : this.s.delete(c) },
+            contains(c) { return this.s.has(c) }
+          })
+          const box = { classList: mkCls() }, side = { classList: mkCls() }
+          const timers = []
+          const obj = new Function('setTimeout', 'clearTimeout', 'Date', 'Math',
+            'return {' + seg2 + '}')(
+            (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+            () => {}, Date, Math)
+          obj.els = { lpLyrics: side, fsLyrics: box }
+          obj.lyricState = { index: 2 }
+          obj.noteLyricBrowsing()
+          const on = box.classList.contains('lyric-browsing') && side.classList.contains('lyric-browsing')
+          const noHold = obj._fsHoldUntil === 0 && timers.length === 1 && timers[0].ms === 4000
+          if (timers[0]) timers[0].fn()
+          return on && noHold && !box.classList.contains('lyric-browsing') &&
+            !side.classList.contains('lyric-browsing')
+        })())
     }
 
   }
