@@ -781,8 +781,11 @@ function bindPlayer() {
     // v3.3.18（第四轮 P1 #7）：在线曲放不出来 = 这条直链多半已经失效。
     // 以前只有 mpv **独占**下的 file-error 会让主进程作废直链缓存；默认共享输出时
     // <audio> 的 error 到不了主进程，死链在 20 分钟缓存里被反复命中，换源永不触发。
-    if (cur && cur.online && cur.source && cur.id) {
-      window.api.onlineInvalidate({ source: cur.source, id: cur.id }).catch(() => {})
+    // v2.8.49 / v3.3.57：Online.toTrack() 产物没有 source 字段，原来的 cur.source
+    // 判据恒假，作废直链的 IPC 一次都没发出去。真正的 song 在 cur.online 里。
+    const bad = cur && cur.online
+    if (bad && bad.source && bad.id) {
+      window.api.onlineInvalidate({ source: bad.source, id: bad.id }).catch(() => {})
     }
 
     // 独占模式下多半是声卡/引擎问题，不是文件坏了：绝不自动跳曲。

@@ -791,6 +791,56 @@ function main() {
         })())
     }
 
+    // v2.8.49 / v3.3.57：在线播放「转圈加载不出来 / 概率断续」流式链路修复。
+    // 真机日志：上游打开失败 This operation was aborted（母带档）→ 作废直链 → 502，
+    // 界面没有加载失败终点就永久停在 0:00；断续来自缓存写盘背压串在 res.write 前。
+    {
+      const spSrc = read('src/main/streamproxy.js')
+      const plSrc = read('src/renderer/js/player.js')
+      const appSrc3 = read('src/renderer/js/app.js')
+
+      const chain = spawnSync(process.execPath, ['test/stream-chain.mjs'], {
+        cwd: ROOT, encoding: 'utf8'
+      })
+      ok('流式链路运行时单测 stream-chain（10 项：降级 / 背压 / 低速看门狗）',
+        chain.status === 0, (chain.stdout || '').trim().split('\n').slice(-1)[0])
+
+      ok('转发顺序：先 res.write 给 <audio>，写盘背压不再 await waitDrain(ps)',
+        /if \(!res\.write\(buf\)\) await waitDrain\(res\)\r?\n      const ps = part\.stream/.test(spSrc) &&
+        !/await waitDrain\(ps\)/.test(spSrc) &&
+        /if \(!ps\.write\(buf\)\) \{ try \{ dropPart\(\) \}/.test(spSrc))
+
+      ok('正文最低速率看门狗（20 秒窗口 / 32KB / 不被 chunk 刷新 / 收尾清掉）',
+        /const RATE_MIN_BYTES = 32 \* 1024/.test(spSrc) &&
+        /rateTimer = setInterval\(/.test(spSrc) && /\}, 20000\)/.test(spSrc) &&
+        /rateBytes \+= buf\.length/.test(spSrc) && /clearInterval\(rateTimer\)/.test(spSrc) &&
+        /上游速率过低，终止取流/.test(spSrc))
+
+      ok('母带 / 无损上游失败：作废坏链 + 降级 best 只重试一次 + 客户端断开不重试',
+        /let info = await G\.online\.getPlayable/.test(spSrc) &&
+        /!clientGone && \(prefer === 'master' \|\| prefer === 'lossless'\)/.test(spSrc) &&
+        /getPlayable\(song, 'best', \{ signal: reqCtrl\.signal \}\)/.test(spSrc) &&
+        /if \(!opened\) \{\r?\n        if \(!res\.writableEnded\) res\.writeHead\(502\)/.test(spSrc) &&
+        /上游降级重试成功/.test(spSrc))
+
+      ok('渲染层加载看门狗：20 秒无数据明确报错，progress 续期，元数据到达收掉',
+        /_armLoadWatchdog = \(\) => \{/.test(plSrc) && /\}, 20000\)/.test(plSrc) &&
+        /音频加载超时（上游无数据）/.test(plSrc) &&
+        /audio\.addEventListener\('progress'/.test(plSrc) &&
+        /audio\.addEventListener\('canplay'/.test(plSrc) &&
+        /loadedmetadata', \(\) => \{\r?\n      this\._loadReady = true/.test(plSrc))
+
+      ok('切歌 / 停止时收掉旧看门狗，避免误报新曲',
+        /_loadCurrent\(autoplay = true\) \{[\s\S]{0,220}?this\._clearLoadWatchdog\(\)/.test(plSrc) &&
+        /stop\(\) \{\r?\n    this\._clearLoadWatchdog\(\)/.test(plSrc) &&
+        /this\.audio\.load\(\)\r?\n    this\._armLoadWatchdog\(\)/.test(plSrc))
+
+      ok('作废直链不再走恒假的 cur.source（真正的 song 在 cur.online）',
+        /const bad = cur && cur\.online/.test(appSrc3) &&
+        /bad && bad\.source && bad\.id/.test(appSrc3) &&
+        !/cur && cur\.online && cur\.source && cur\.id/.test(appSrc3))
+    }
+
   }
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)

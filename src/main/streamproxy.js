@@ -227,7 +227,7 @@ async function handleStreamRequest(req, res) {
       if (hit) { sendCachedStream(req, res, song, hit, null); return }
     }
 
-    const info = await G.online.getPlayable(song, prefer, { signal: reqCtrl.signal })
+    let info = await G.online.getPlayable(song, prefer, { signal: reqCtrl.signal })
     if (clientGone) return
     if (!info || !info.url) {
       G.logLine('[online] 代理无地址', source, id)
@@ -241,7 +241,7 @@ async function handleStreamRequest(req, res) {
       if (hit2) { sendCachedStream(req, res, song, hit2, info); return }
     }
 
-    const headers = buildUpstreamHeaders(info, req)
+    let headers = buildUpstreamHeaders(info, req)
     let opened
     try {
       opened = await openUpstream(info, headers, reqCtrl.signal)
@@ -250,8 +250,26 @@ async function handleStreamRequest(req, res) {
       // 既不回 502 也不作废直链缓存 —— 死链会继续在 20 分钟缓存里被反复命中。
       G.logLine('[online] 上游打开失败', (err && err.message) || err)
       try { G.online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
-      if (!res.writableEnded) res.writeHead(502).end('upstream error')
-      return
+      // v2.8.49 / v3.3.57：母带 / 无损档的上游打不开（真机日志里的
+      // 「上游打开失败 This operation was aborted」）以前直接 502，界面卡在 0:00。
+      // 这里作废坏链后降级到普通档再取一次：只试一次，客户端已断开就不试。
+      if (!clientGone && (prefer === 'master' || prefer === 'lossless')) {
+        try {
+          const alt = await G.online.getPlayable(song, 'best', { signal: reqCtrl.signal })
+          if (alt && alt.url && !clientGone) {
+            info = alt
+            headers = buildUpstreamHeaders(alt, req)
+            opened = await openUpstream(alt, headers, reqCtrl.signal)
+            G.logLine('[online] 上游降级重试成功', source, id)
+          }
+        } catch (e2) {
+          G.logLine('[online] 上游降级重试失败', (e2 && e2.message) || e2)
+        }
+      }
+      if (!opened) {
+        if (!res.writableEnded) res.writeHead(502).end('upstream error')
+        return
+      }
     }
     const upstream = opened.upstream
     if (clientGone) {
@@ -507,6 +525,20 @@ async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache
   }
   touch()   // 启动正文空闲看门狗（首字节也要限时）
 
+  // v2.8.49 / v3.3.57：固定 20 秒窗口内至少要有 32KB 正文。
+  // 上面那个「每来一个 chunk 就刷新」的空闲看门狗，会被「每 19 秒滴 1 字节」的上游
+  // 永远续住，音频凑不满一帧、界面永远 0:00。这个窗口不被 chunk 刷新；
+  // 正常码率（128k ≈ 16KB/s）远高于阈值，不会被误杀。
+  let rateBytes = 0
+  const RATE_MIN_BYTES = 32 * 1024
+  const rateTimer = setInterval(() => {
+    if (rateBytes < RATE_MIN_BYTES) {
+      G.logLine('[online] 上游速率过低，终止取流', rateBytes)
+      try { ctrl.abort() } catch (e) { /* 忽略 */ }
+    }
+    rateBytes = 0
+  }, 20000)
+
   // 客户端一断开（切歌、拖进度条）就把上游和写盘一起收掉。
   // 只等 'drain' 是不够的：连接没了就没有 drain，这个请求会永远悬着。
   let aborted = false
@@ -527,19 +559,23 @@ async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache
       if (aborted) break
       touch()   // 每读到一个 chunk 就刷新空闲看门狗
       const buf = Buffer.from(value)
+      rateBytes += buf.length
+      // v2.8.49 / v3.3.57：先把音频数据送给 <audio>，缓存写盘绝不阻塞播放。
+      // 以前写盘 drain 的等待串在 res.write 前面，磁盘一忙音频就「断一下」。
+      if (!res.write(buf)) await waitDrain(res)
       const ps = part.stream
       if (ps) {
         part.bytes += buf.length
-        // 磁盘跟不上就先等写盘，否则 100MB 的 flac 会在内存里堆起来
-        if (!ps.write(buf)) await waitDrain(ps)
+        // 写盘背压：不再等 drain，直接放弃本次缓存（残片由 dropPart 收掉），音频继续走
+        if (!ps.write(buf)) { try { dropPart() } catch (e) { /* 忽略 */ } }
       }
-      if (!res.write(buf)) await waitDrain(res)
     }
     complete = !aborted
   } catch (err) {
     complete = false
   } finally {
     clearTimeout(idleTimer)
+    clearInterval(rateTimer)
     res.off('close', onClose)
     // 正常读完才落缓存；中途断开就把残片丢掉
     if (complete) finishCache()

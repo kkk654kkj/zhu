@@ -23,6 +23,26 @@ class Player extends Emitter {
     this._endingHandled = false
     this._loadedTrack = null     // 上一次真正 load 进 audio 的曲目（用于切歌时上报播放位置）
 
+    // v2.8.49 / v3.3.57：加载看门狗。上游响应头已发、正文却不来时，<audio>
+    // 既不触发 error 也不 reject play()，底栏会永久停在「播放态 + 0:00 / --:--」。
+    // 只要 20 秒内没有任何缓冲数据 / 元数据，就明确报错交给既有跳曲链。
+    // progress / loadedmetadata / canplay 都会续期或收掉它，慢速但真在传的流不会被误杀。
+    this._loadTimer = null
+    this._loadReady = false
+    this._clearLoadWatchdog = () => {
+      if (this._loadTimer) clearTimeout(this._loadTimer)
+      this._loadTimer = null
+    }
+    this._armLoadWatchdog = () => {
+      if (this._loadReady) return
+      this._clearLoadWatchdog()
+      this._loadTimer = setTimeout(() => {
+        this._loadTimer = null
+        if (this._loadReady || !audio.src) return
+        this.emit('error', new Error('音频加载超时（上游无数据）'))
+      }, 20000)
+    }
+
     audio.preload = 'auto'
     audio.volume = this.muted ? 0 : this.volume
 
@@ -33,16 +53,26 @@ class Player extends Emitter {
       this.emit('time', audio.currentTime, audio.duration || 0)
     })
     audio.addEventListener('loadedmetadata', () => {
+      this._loadReady = true
+      this._clearLoadWatchdog()
       if (this._pendingSeek != null) {
         try { audio.currentTime = this._pendingSeek } catch {}
         this._pendingSeek = null
       }
       this.emit('time', audio.currentTime, audio.duration || 0)
     })
+    audio.addEventListener('canplay', () => {
+      this._loadReady = true
+      this._clearLoadWatchdog()
+    })
+    audio.addEventListener('progress', () => {
+      if (!this._loadReady) this._armLoadWatchdog()
+    })
     audio.addEventListener('play', () => this.emit('state-change', true))
     audio.addEventListener('pause', () => this.emit('state-change', false))
     audio.addEventListener('ended', () => this._onEnded())
     audio.addEventListener('error', () => {
+      this._clearLoadWatchdog()
       const err = audio.error
       console.error('[player] 音频错误:', err && err.code, err && err.message)
       this.emit('error', err)
@@ -176,6 +206,9 @@ class Player extends Emitter {
   _loadCurrent(autoplay = true) {
     const track = this.current
     if (!track) { this.stop(); return }
+    // v2.8.49：每次换源都先收掉上一首的看门狗，避免旧定时器误报新曲
+    this._clearLoadWatchdog()
+    this._loadReady = false
     // 切走之前把上一首的播放位置报出去（长音轨断点续播要靠它）
     if (this._loadedTrack && this._loadedTrack.id !== track.id) {
       this.emit('track-leave', this._loadedTrack, this.audio.currentTime || 0)
@@ -187,6 +220,7 @@ class Player extends Emitter {
     this._pendingSeek = null
     this.audio.src = track.audio
     this.audio.load()
+    this._armLoadWatchdog()
     this.emit('track-change', track)
     if (autoplay) this.play()
     else this.audio.pause()
@@ -232,6 +266,8 @@ class Player extends Emitter {
    *  (d) MpvAudio.removeAttribute 推进 load 代次时也要同步 _endedEpoch（见 mpvaudio.js）。
    */
   stop() {
+    this._clearLoadWatchdog()
+    this._loadReady = false
     this._clearFade()
     const prev = this._loadedTrack
     let pos = 0
