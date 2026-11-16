@@ -1,6 +1,6 @@
 'use strict'
 /**
- * 独占输出看门狗 + 坏帧静默回归单测 · v2.8.51 / v3.3.60
+ * 独占输出看门狗 + 坏帧静默 + 曲末循环回归单测 · v2.8.52 / v3.3.61
  *
  * 保留：file-loaded 不来时用 _loadAt 兜底，AO 持续 null 仍能自动夺回独占。
  * 撤销：把 flac 坏帧警告升级成失败终点（实测整首只有 1 帧 / 约 93ms，mpv 会跳过
@@ -147,17 +147,36 @@ function makeEngine(events, over = {}) {
     JSON.stringify({ afterLoad, st, afterPause, afterStop: e._wantPlaying }))
 }
 
-/* ---------- ⑧ 异常 idle 单独标注（判定仍不变） ---------- */
+/* ---------- ⑧ 曲末异常 idle 必须能自动恢复出声 ---------- */
 {
   const events = []
-  const e = makeEngine(events, { _idle: true, _paused: false, _aoLostAt: 0 })
+  const e = makeEngine(events, { _idle: true, _paused: false, _aoLostAt: Date.now() - 3000 })
   e._wantPlaying = true
   e._lastFile = 'D:/music/x.flac'
   e._wdTick()
-  ok('想播却 idle 时日志标 idle-while-want-playing，且 aoLostAt 仍被清零（判定未改）',
-    events.some((x) => x.type === 'wd-diag' && x.reason === 'idle-while-want-playing') &&
-    e._aoLostAt === 0,
-    JSON.stringify(events.map((x) => x.reason)))
+  ok('end-file(eof) 进 idle 但 wantPlaying=true 时不再静默跳过，2.5 秒后触发 ao-lost',
+    events.some((x) => x.type === 'ao-lost') &&
+    events.some((x) => x.reason === 'idle-while-want-playing'),
+    JSON.stringify(events.map((x) => x.type + ':' + (x.reason || ''))))
+
+  const ev2 = []
+  const e2 = makeEngine(ev2, { _idle: true, _paused: false, _aoLostAt: Date.now() - 3000 })
+  e2._wantPlaying = false
+  e2._lastFile = 'D:/music/x.flac'
+  e2._wdTick()
+  ok('用户主动停止后的 idle 仍不触发恢复（不误杀正常空闲）',
+    !ev2.some((x) => x.type === 'ao-lost') &&
+    ev2.some((x) => x.reason === 'idle-after-stop'),
+    JSON.stringify(ev2.map((x) => x.type + ':' + (x.reason || ''))))
+
+  const ev3 = []
+  const e3 = makeEngine(ev3, { _idle: true, _paused: false, _aoLostAt: Date.now() - 3000,
+    _fileLoadedAt: Date.now() - 9000, _loadAt: Date.now() - 500 })
+  e3._wantPlaying = true
+  e3._wdTick()
+  ok('渲染层刚发 reload 的 2 秒窗口内不抢跑 restart（宽限已过仍不误触发）',
+    !ev3.some((x) => x.type === 'ao-lost') && e3._aoLostAt === 0,
+    JSON.stringify(ev3.map((x) => x.reason)))
 }
 
 /* ---------- ⑨ EOF 诊断：pos/dur/seek 写进快照 ---------- */

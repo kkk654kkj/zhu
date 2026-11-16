@@ -310,8 +310,12 @@ class Player extends Emitter {
   next(auto = false, fromError = false) {
     if (!this.tracks.length) return
     if (this.mode === 'single' && auto) {
-      this.seek(0)
-      this.play()
+      // v2.8.52 / v3.3.61：独占下 mpv 曲末会 end-file(eof) 卸载文件进 idle。
+      // 先 seek(0) 会把 MpvAudio._ended 复位，紧接着 play() 就退化成「对 idle
+      // 的 mpv 发 pause=false」，文件永远载不回来 → 界面播放中但永久无声。
+      // ended 态必须直接 play()，让独占后端走重新 load() 的分支。
+      if (this.audio.ended) this.play()
+      else { this.seek(0); this.play() }
       return
     }
     if (this.mode === 'shuffle') {
@@ -378,8 +382,9 @@ class Player extends Emitter {
       // v3.3.9：必须把 _endingHandled 复位 —— 以前只有第一遍能触发 ended，
       // 第二遍播完事件被吞，单曲循环卡在曲末（不循环、不切歌）
       this._endingHandled = false
-      this.seek(0)
-      this.play()
+      // v2.8.52 / v3.3.61：同上，曲末不能先 seek(0) 再 play()。
+      if (this.audio.ended) this.play()
+      else { this.seek(0); this.play() }
       return
     }
     if (this.mode === 'order' && this.index >= this.tracks.length - 1) {
