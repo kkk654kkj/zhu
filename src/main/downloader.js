@@ -361,7 +361,17 @@ async function dlRun(task) {
     if (ended && ended.timeout) throw new Error('写盘收尾超时')
     ws = null
     if (task.deleted) throw Object.assign(new Error('__deleted'), { name: 'AbortError' })
-    if (task.total && task.received + 1024 < task.total) throw new Error('下载不完整（连接中断）')
+    // v2.8.53 / v3.3.62：total=0（上游 chunked，既无 Content-Length 也无 Content-Range）
+    // 时原来被 `task.total &&` 短路 —— 整条完整性校验静默跳过，半截文件照样 rename 成
+    // 成品并标 done（本轮审查 P1）。这里把「校验通过」与「无从校验」分开：
+    // 无从校验的仍允许完成（否则大量音源永远下不了），但必须留下可见标记。
+    if (!task.total) {
+      task.unverified = true
+      G.logLine('[dl] 上游未给长度，无法校验完整性', path.basename(task.path || ''))
+    } else {
+      task.unverified = false
+      if (task.received + 1024 < task.total) throw new Error('下载不完整（连接中断）')
+    }
     fs.renameSync(part, task.path)
     task.status = 'done'
     task.speed = 0

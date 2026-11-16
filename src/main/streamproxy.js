@@ -347,7 +347,14 @@ async function handleStreamRequest(req, res) {
     const crHdr = String((upstream.headers && upstream.headers.get && upstream.headers.get('content-range')) || '')
     const crTotal = Number(crHdr.split('/')[1]) || 0
     const crEnd = Number((crHdr.match(/bytes\s+\d+-(\d+)/) || [])[1])
-    const crCoversAll = !crTotal || (!Number.isNaN(crEnd) && crEnd === crTotal - 1)
+    // v2.8.53 / v3.3.62：206 必须凭 Content-Range **证明**覆盖到 total-1 才算整段。
+    // 以前 `!crTotal` 直接判真（缺头 / `bytes 0-1023/*` 让 Number('*') 得 0），
+    // 配合下面 expect = declared || bytes 的自证，1KB 探针残片会被 rename 成完整缓存，
+    // 此后每次播放都命中这个坏缓存（只播开头几秒，且不自愈）——本轮审查 P1。
+    // 200 才允许「没有 Content-Range」：整段响应本来就不带它，那属于正常形态。
+    const crCoversAll = upstream.status === 206
+      ? (crTotal > 0 && !Number.isNaN(crEnd) && crEnd === crTotal - 1)
+      : (!crTotal || (!Number.isNaN(crEnd) && crEnd === crTotal - 1))
     // 收尾：字节数、Range 覆盖范围都一致才算缓存成功，半截的直接丢。
     // v3.3.58：① 先等后台队列把排队的 chunk 写完再取字节数，否则会拿半截的
     // part.bytes 去比对 Content-Length，明明写完了也被判残片删掉；
@@ -398,11 +405,17 @@ async function handleStreamRequest(req, res) {
       const file = `${key}.${safeExt}`
       try {
         const target2 = path.join(DC.cacheDirPath(), file)
-        // 另一个并发请求可能已经先写完了，那就用它的
-        if (fs.existsSync(target2)) {
+        // 另一个并发请求可能已经先写完了，那就用它的 —— 但**必须索引里真有这条**。
+        // v2.8.53 / v3.3.62：以前只判文件在不在。清缓存时文件被占用删不掉、索引
+        // 却被清空之后，这里会把此后每一份新数据都丢掉且不 cachePut，于是该曲
+        // 永久无索引、永远命中不到、每次播放都完整重下一遍（本轮审查 P1 的自锁环）。
+        const idxNow = DC.cacheLoad()
+        if (fs.existsSync(target2) && idxNow && idxNow[key]) {
           try { fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
           return
         }
+        // 索引里没有（孤儿文件）→ 覆盖它并重建索引；占用中删不掉就让 rename 覆盖
+        try { if (fs.existsSync(target2)) fs.unlinkSync(target2) } catch (e) { /* 忽略 */ }
         fs.renameSync(target, target2)
         DC.cachePut(key, file, meta, bytes)
         G.logLine('[cache] 缓存完成', file, (bytes / 1048576).toFixed(1) + 'MB' + (declared ? '' : '（chunked）'))
