@@ -22,6 +22,7 @@ const SCHEMA = require('./settings-schema')
 const DLYW = require('./dlyric-window')
 const MPVM = require('./mpv-manager')
 const DL = require('./downloader')
+const OMETA = require('./online-meta')   // v3.3.64：在线曲目元数据的校验 / 按引用清理
 const DC = require('./dircache')
 const SP = require('./streamproxy')
 
@@ -1378,6 +1379,25 @@ function registerSettingsIpc() {
 
 }
 
+/**
+ * v3.3.64：在线曲目元数据表（收藏 / 歌单里的在线曲靠它重播）。
+ *
+ * 为什么必须单独存：favorites / playlists[].trackIds 只有字符串 id，
+ * 渲染层拿 `state.byId` 反查本地曲库。在线曲不在曲库里，id 反查必然落空，
+ * 结果就是「收藏了但我的收藏里看不见」。所以收藏/入歌单的在线曲要把
+ * 标题/歌手/时长/原音源一起落盘，重播时按记录重新解析取流。
+ *
+ * 清理规则：只留「仍被收藏或被任一歌单引用」的条目。收藏与歌单的每次变更
+ * 都调一次 pruneOnlineTracks()，表不会随使用时间无限膨胀。
+ */
+function pruneOnlineTracks() {
+  const g = store.get()
+  const r = OMETA.pruneToRefs(g.onlineTracks, g.favorites, g.playlists)
+  // 必须 setKey 不能 patch：patch 走 deepMerge，它只「增/覆盖」不删键 ——
+  // 传一个更小的表进去，被清掉的条目会原样留下（实测：移出歌单后记录永不消失）。
+  if (r.dropped) store.setKey('onlineTracks', r.out)
+}
+
 /** 歌单：增删改 + m3u/m3u8 导入导出 */
 function registerPlaylistIpc() {
   // —— 歌单 ——
@@ -1404,6 +1424,7 @@ function registerPlaylistIpc() {
   })
   ipcMain.handle('playlists:remove', (e, id) => {
     store.patch({ playlists: (store.get().playlists || []).filter((p) => p.id !== id) })
+    pruneOnlineTracks()
     return true
   })
   ipcMain.handle('playlists:addTracks', (e, { id, trackIds }) => {
@@ -1412,6 +1433,7 @@ function registerPlaylistIpc() {
     if (!pl) return null
     for (const t of trackIds) if (!pl.trackIds.includes(t)) pl.trackIds.push(t)
     store.patch({ playlists: list })
+    pruneOnlineTracks()
     return pl
   })
   ipcMain.handle('playlists:removeTracks', (e, { id, trackIds }) => {
@@ -1421,6 +1443,7 @@ function registerPlaylistIpc() {
     const set = new Set(trackIds)
     pl.trackIds = pl.trackIds.filter((t) => !set.has(t))
     store.patch({ playlists: list })
+    pruneOnlineTracks()
     return pl
   })
 
@@ -1504,6 +1527,7 @@ function registerUserDataIpc() {
     if (i >= 0) favs.splice(i, 1)
     else favs.unshift(trackId)
     store.patch({ favorites: favs })
+    pruneOnlineTracks()
     return favs
   })
   /**
@@ -1520,6 +1544,40 @@ function registerUserDataIpc() {
     for (const id of list) { if (fav) set.add(id); else set.delete(id) }
     const out = Array.from(set)
     store.patch({ favorites: out })
+    pruneOnlineTracks()
+    return out
+  })
+
+  /* ---- v3.3.64：在线曲目元数据（收藏 / 歌单持久化 + 重播） ---- */
+
+  /** 全表（渲染层启动时取一次，用来把收藏/歌单里的在线 id 还原成可播放曲目） */
+  ipcMain.handle('online:tracksGet', () => store.get().onlineTracks || {})
+
+  /**
+   * 记住若干在线曲目。只收「长得像曲目」的条目：渲染层传来的对象不可信，
+   * 字段类型不对就跳过（否则一个畸形条目会让整表反序列化后渲染层崩）。
+   */
+  ipcMain.handle('online:tracksRemember', (e, metas) => {
+    const list = OMETA.sanitizeMetas(metas)
+    const cur = store.get().onlineTracks || {}
+    if (!list.length) return cur
+    const out = Object.assign({}, cur)
+    for (const m of list) out[m.id] = m
+    store.setKey('onlineTracks', out)   // 同上：整表替换，别用会合并旧键的 patch
+    return out
+  })
+
+  /** 忘掉若干在线曲目（取消收藏 / 移出歌单后兜底清理） */
+  ipcMain.handle('online:tracksForget', (e, ids) => {
+    const list = Array.isArray(ids) ? ids : [ids]
+    const cur = store.get().onlineTracks || {}
+    const out = Object.assign({}, cur)
+    let changed = 0
+    for (const id of list) {
+      if (typeof id === 'string' && out[id]) { delete out[id]; changed++ }
+    }
+    if (changed) store.setKey('onlineTracks', out)
+    else pruneOnlineTracks()
     return out
   })
 
@@ -2690,6 +2748,8 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       settings: DEFAULT_SETTINGS,
       playlists: [],
       favorites: [],
+      // v3.3.64：在线曲目元数据 { 'on:<src>:<id>': meta }，收藏/歌单里的在线曲靠它重播
+      onlineTracks: {},
       history: [],
       playCounts: {},
       session: null,

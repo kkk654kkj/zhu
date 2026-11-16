@@ -72,6 +72,10 @@ contextBridge.exposeInMainWorld('api', {
 
   /* ---- 联网版（v3.0）：在线音乐 ---- */
   onlineSources: () => invoke('online:sources'),
+  /** v3.3.64：在线曲目元数据（收藏/歌单里的在线曲靠它重播） */
+  onlineTracksGet: () => invoke('online:tracksGet'),
+  onlineTracksRemember: (metas) => invoke('online:tracksRemember', metas),
+  onlineTracksForget: (ids) => invoke('online:tracksForget', ids),
   onlineProxyBase: () => invoke('online:proxyBase'),
   onlineSearch: (opts) => invoke('online:search', opts),
   /** 解析播放地址：{ ok, song, fallback, partial, lossless, level, bitrate, ext, error } */
