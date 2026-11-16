@@ -104,6 +104,7 @@ class MpvEngine {
     // 否则 kill 之后重试还会继续去连（可能顶到一个没人管的 socket）。
     this._retryTimer = null
     this._wdLogAt = new Map()   // 诊断轮：按原因节流 _wdDiag
+    this._wantPlaying = false   // 诊断轮：播放意图（区分主动停止与异常 idle）
     // v3.3.13：load() 代次与「等 file-loaded」的续播等待者集合。
     // 用集合代替「临时替换 this.onEvent」的 wrapper，避免并发 restart 残留包装函数。
     this._loadSeq = 0
@@ -495,6 +496,7 @@ class MpvEngine {
           )
           this.onEvent({ type: 'file-error', message: detail, aoFailed })
         } else if (reason === 'eof') {
+          this._wdDiag('end-file-eof')
           // 与刚刚上报的 eof-reached 属于同一对（含切歌后才迟到的情况）→ 吞掉，
           // 只让渲染层收到一次曲末事件，避免一次曲末跳两首。
           // 700ms 之外的 end-file(eof) 视为独立事件上报（例如极慢的尾包 / 未观察到 eof-reached）。
@@ -528,6 +530,7 @@ class MpvEngine {
         return
       }
       case 'start-file':
+        this._wdDiag('start-file')
         this.onEvent({ type: 'start-file' })
         return
     }
@@ -536,6 +539,7 @@ class MpvEngine {
   /* ---------------- 播放控制 ---------------- */
 
   load(filePath, { paused = false } = {}) {
+    this._wantPlaying = !paused
     this._lastFile = filePath
     this._lastPos = 0
     this._idle = false
@@ -553,9 +557,9 @@ class MpvEngine {
     this._send(['loadfile', filePath, 'replace'])
   }
 
-  play() { this._send(['set_property', 'pause', false]) }
-  pause() { this._send(['set_property', 'pause', true]) }
-  stop() { this._send(['stop']) }
+  play() { this._wantPlaying = true; this._send(['set_property', 'pause', false]) }
+  pause() { this._wantPlaying = false; this._send(['set_property', 'pause', true]) }
+  stop() { this._wantPlaying = false; this._send(['stop']) }
   seek(sec) { this._send(['seek', Math.max(0, sec), 'absolute']) }
   setVolume(v01) {
     this._send(['set_property', 'volume', clamp01(v01) * 100])
@@ -819,6 +823,7 @@ class MpvEngine {
       state: {
         ready: this.ready, exclusive: this.exclusive, disposed: this._disposed,
         paused: this._paused, idle: this._idle, hasFile: !!this._lastFile,
+        wantPlaying: !!this._wantPlaying,
         ao: this._aoParams ? 'open' : 'null',
         fileLoadedAt: this._fileLoadedAt, loadAt: this._loadAt,
         aoLostAt: this._aoLostAt, attempts: this._recoverAttempts,
@@ -833,7 +838,12 @@ class MpvEngine {
     if (!this.ready || !this.exclusive || this._disposed) { this._wdDiag('engine-not-ready'); return }
     // v3.3.13：测试静音（--ao=null）不参与独占判定
     if (process.env.LX_TEST_MUTE === '1') return
-    if (this._idle || this._paused || !this._lastFile) { this._wdDiag('paused-or-idle'); this._aoLostAt = 0; return }
+    if (this._idle || this._paused || !this._lastFile) {
+      this._wdDiag(this._idle && this._wantPlaying && this._lastFile
+        ? 'idle-while-want-playing' : 'paused-or-idle')
+      this._aoLostAt = 0
+      return
+    }
     // 主动状态判定：AO 参数回来就清零计数（H2 的关键）
     if (this._aoParams) {
       this._aoLostAt = 0
