@@ -103,6 +103,7 @@ class MpvEngine {
     // v3.3.13：_connectWithRetry 的重试定时器句柄，kill() 时要清掉，
     // 否则 kill 之后重试还会继续去连（可能顶到一个没人管的 socket）。
     this._retryTimer = null
+    this._wdLogAt = new Map()   // 诊断轮：按原因节流 _wdDiag
     // v3.3.13：load() 代次与「等 file-loaded」的续播等待者集合。
     // 用集合代替「临时替换 this.onEvent」的 wrapper，避免并发 restart 残留包装函数。
     this._loadSeq = 0
@@ -282,6 +283,7 @@ class MpvEngine {
     this._paused = true
     this._idle = true
     if (this._wdTimer) clearInterval(this._wdTimer)
+    if (this._wdLogAt) this._wdLogAt.clear()
     this._wdTimer = setInterval(() => this._wdTick(), 1000)
     if (this._wdTimer.unref) this._wdTimer.unref()
   }
@@ -421,6 +423,7 @@ class MpvEngine {
         break
       case 'pause':
         this._paused = data !== false
+        this._wdDiag('pause-state')
         this.onEvent({ type: 'pause', paused: data !== false })
         break
       case 'eof-reached':
@@ -435,7 +438,8 @@ class MpvEngine {
         // 若「重启后 AO 从头就打不开」则不会再有 null 跳变事件——
         // 所以判定必须由 _wdTick 主动轮询这个缓存，不能靠事件跳变
         this._aoParams = data || null
-        if (data) this._aoEverOpened = true   // v3.3.20：本引擎成功开出过 AO
+        if (data) this._aoEverOpened = true
+        this._wdDiag(data ? 'ao-open' : 'ao-null')   // v3.3.20：本引擎成功开出过 AO
         this.onEvent({ type: 'format', params: data || null })
         break
       case 'volume':
@@ -446,6 +450,7 @@ class MpvEngine {
         break
       case 'idle-active':
         this._idle = data === true
+        this._wdDiag('idle-state')
         this.onEvent({ type: 'idle', idle: data === true })
         break
     }
@@ -458,6 +463,7 @@ class MpvEngine {
         this._idle = false
         // v3.3.20：看门狗的起播宽限基线（见 _wdTick）
         this._fileLoadedAt = Date.now()
+        this._wdDiag('file-loaded')
         // v3.3.13：唤醒所有等 file-loaded 的续播等待者（集合方式，不包 onEvent）
         const waiters = this._loadedWaiters
         this._loadedWaiters = []
@@ -799,11 +805,35 @@ class MpvEngine {
    * （说明设备真被别的程序长期占用，比如游戏也开了独占——这时该用户自己决定）。
    * 参数恢复非 null（或暂停/空闲）会清零计数。
    */
+  /**
+   * 诊断轮：把「看门狗为什么没动作」写进主进程日志。
+   * 同一原因 5 秒内只记一条，避免每秒刷屏；只观测，不改变任何恢复判定。
+   */
+  _wdDiag(reason) {
+    if (!this._wdLogAt) this._wdLogAt = new Map()
+    const now = Date.now()
+    if (now - (this._wdLogAt.get(reason) || 0) < 5000) return
+    this._wdLogAt.set(reason, now)
+    this.onEvent({
+      type: 'wd-diag', reason,
+      state: {
+        ready: this.ready, exclusive: this.exclusive, disposed: this._disposed,
+        paused: this._paused, idle: this._idle, hasFile: !!this._lastFile,
+        ao: this._aoParams ? 'open' : 'null',
+        fileLoadedAt: this._fileLoadedAt, loadAt: this._loadAt,
+        aoLostAt: this._aoLostAt, attempts: this._recoverAttempts,
+        lastRecoverAt: this._lastRecoverAt,
+        recovering: this._recovering, restarting: this._restarting,
+        fellBack: this.fellBack
+      }
+    })
+  }
+
   _wdTick() {
-    if (!this.ready || !this.exclusive || this._disposed) return
+    if (!this.ready || !this.exclusive || this._disposed) { this._wdDiag('engine-not-ready'); return }
     // v3.3.13：测试静音（--ao=null）不参与独占判定
     if (process.env.LX_TEST_MUTE === '1') return
-    if (this._idle || this._paused || !this._lastFile) { this._aoLostAt = 0; return }
+    if (this._idle || this._paused || !this._lastFile) { this._wdDiag('paused-or-idle'); this._aoLostAt = 0; return }
     // 主动状态判定：AO 参数回来就清零计数（H2 的关键）
     if (this._aoParams) {
       this._aoLostAt = 0
@@ -820,13 +850,14 @@ class MpvEngine {
     // mpv 继续空转，用户看到「下一首没声音但进程还在跑」。
     // 现在用 load 时刻兜底：起播宽限仍至少 4 秒，file-loaded 到了就以它为准。
     const graceBase = this._fileLoadedAt || this._loadAt
-    if (!graceBase || Date.now() - graceBase < 4000) { this._aoLostAt = 0; return }
-    if (!this._aoLostAt) { this._aoLostAt = Date.now(); return }
+    if (!graceBase || Date.now() - graceBase < 4000) { this._wdDiag('grace-window'); this._aoLostAt = 0; return }
+    if (!this._aoLostAt) { this._wdDiag('first-null-tick'); this._aoLostAt = Date.now(); return }
     const lostFor = Date.now() - this._aoLostAt
-    if (lostFor < 2500) return
-    if (this._recovering || this._restarting) return
-    if (Date.now() - this._lastRecoverAt < 12000) return
-    if (this._recoverAttempts >= 3) return
+    if (lostFor < 2500) { this._wdDiag('waiting-2.5s'); return }
+    if (this._recovering || this._restarting) { this._wdDiag('recovery-in-flight'); return }
+    if (Date.now() - this._lastRecoverAt < 12000) { this._wdDiag('cooldown'); return }
+    if (this._recoverAttempts >= 3) { this._wdDiag('max-attempts'); return }
+    this._wdDiag('firing-recovery')
     this._recovering = true
     this._lastRecoverAt = Date.now()
     this._recoverAttempts++

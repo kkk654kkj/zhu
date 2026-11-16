@@ -53,6 +53,11 @@ function mpvExePath() {
 }
 
 function onMpvEvent(evt) {
+  // 诊断轮：看门狗早退原因 + 状态快照，只进主进程日志，不改任何行为
+  if (evt.type === 'wd-diag') {
+    G.logLine('[wd] ' + evt.reason + ' ' + JSON.stringify(evt.state))
+    return
+  }
   // 独占打不开（设备不支持该格式/被别的程序独占）→ 自动回退共享一次并告知界面
   // v3.3.20：只有 mpv 判定为「AO 打不开」时才回退共享。
   // 以前只要有 fellBack=false 就回退 —— 一个坏文件（404 / 不支持的编码）就能让整个
