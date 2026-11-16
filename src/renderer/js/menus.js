@@ -116,13 +116,17 @@ async function handleCtxAction(act, arg) {
       break
     case 'fav': {
       const targets = currentMenuTracks.length ? currentMenuTracks : [track]
-      // 全已收藏 → 整批取消；否则只把没收藏的补上（v1.7 支持多选）
+      // 全已收藏 → 整批取消；否则整批收藏（与「只补没收藏的」等价）
       const allFav = targets.every((t) => state.favorites.has(t.id))
-      for (const t of targets) {
-        if (allFav === state.favorites.has(t.id)) {
-          const favs = await window.api.toggleFavorite(t.id)
-          state.favorites = new Set(favs)
-        }
+      // v3.3.63：以前是 for + await 串行 N 次 favorites:toggle —— 每首一次 IPC 往返，
+      // 且每次 store.patch 都要 fsync 整份 settings.json。全选几十首点收藏，右键菜单
+      // 看着像卡死，还只写进去一半。现在一次批量接口、一次落盘。
+      try {
+        const favs = await window.api.setFavoritesMany(targets.map((t) => t.id), !allFav)
+        state.favorites = new Set(favs)
+      } catch (err) {
+        toast('操作失败：' + ((err && err.message) || err), 2500)
+        break
       }
       updateNavCounts()
       if (state.currentId) UI.setFavorite(state.favorites.has(state.currentId))

@@ -17,6 +17,9 @@ function handleShortcut(action) {
 
 function bindGlobalKeys() {
   window.addEventListener('keydown', (e) => {
+    // v3.3.63：按住不放会以 ~30Hz 重复触发。空格会在播放/暂停之间来回切（松开后
+    // 是哪个状态取决于次数奇偶），音量键一口气打到 0 或 100，都是可感知的怪现象。
+    if (e.repeat) return
     // v3.3.20：<select> 也算输入控件。以前只认 INPUT/TEXTAREA，
     // 焦点在「音质偏好」「缓存上限」下拉上时，↓ 被当成音量 -5%、空格被当成播放/暂停，
     // 两个下拉完全没法用键盘操作。

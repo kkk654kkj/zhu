@@ -347,7 +347,22 @@ class MpvEngine {
   }
 
   _write(line) {
-    if (!this.sock || !this.ready) { this._queue.push(line); return }
+    if (!this.sock || !this.ready) {
+      // v3.3.63：引擎起不来时命令只进这个队列，而队列没有上限 —— 拖音量/拖进度条
+      // 一分钟能堆几百条，长期占内存。超过上限先丢瞬态命令，再不行丢最老的；
+      // loadfile / stop 这类「决定放什么」的命令尽量留住。
+      if (this._queue.length >= 200) {
+        const transient = /"(volume|pause|mute|seek)"/
+        const i = this._queue.findIndex((q) => transient.test(q))
+        if (i >= 0) {
+          this._queue.splice(i, 1)
+        } else {
+          this._queue.shift()
+        }
+      }
+      this._queue.push(line)
+      return
+    }
     try { this.sock.write(line) } catch { this._queue.push(line) }
   }
 
@@ -571,7 +586,9 @@ class MpvEngine {
 
   play() { this._wantPlaying = true; this._send(['set_property', 'pause', false]) }
   pause() { this._wantPlaying = false; this._send(['set_property', 'pause', true]) }
-  stop() { this._wantPlaying = false; this._send(['stop']) }
+  // v3.3.63：这里曾有一个只发 ['stop'] 的 stop()，与后面的 async stop()（释放引擎）同名。
+  // JS 类不支持同名方法重载，那个版本从来没被执行过 —— 而按它的语义误调后面那个会
+  // 直接 _disposed=true 报废引擎。停止播放请用 reset()。
   seek(sec) { this._lastSeek = sec; this._wdDiag('seek'); this._send(['seek', Math.max(0, sec), 'absolute']) }
   setVolume(v01) {
     this._send(['set_property', 'volume', clamp01(v01) * 100])
@@ -613,7 +630,9 @@ class MpvEngine {
     // v2.8.53 / v3.3.62：拿不到回执时不能默认「没在播」—— 引擎忙 / 半死时那会把
     // 「切设备后应该续播」退化成停在原地（用户看到「切了设备就不播了」，位置却是对的）。
     let wasPlaying = false
-    try { wasPlaying = (await this.request(['get_property', 'pause'], 800)) === false } catch { wasPlaying = !this._paused }
+    // v3.3.63：回执超时时只能认「播放意图」，不能拿 _paused 顶替 —— mpv 的 observe 事件
+    // 可能还没回来，用户刚点的暂停会因此被当成「在播」，重启后又自己响起来。
+    try { wasPlaying = (await this.request(['get_property', 'pause'], 800)) === false } catch { wasPlaying = false }
     // 播放意图优先：restart 窗口里用户可能刚点过 play（那条命令已被队列过滤丢掉），
     // 只看 mpv 回报会把它算成「不需要续播」。这里必须在 load() 之前取值，
     // 因为 load(paused) 会按参数改写 _wantPlaying。
@@ -727,9 +746,12 @@ class MpvEngine {
     // 免得留下一个还在出声的孤儿进程（独占时它会把设备一直占着）
     // v3.3.18：句柄存下来并 unref —— 未追踪的 800ms 定时器会在快速 kill→start
     // 序列里留到下一轮，退出时还会白挂住进程
+    // v3.3.63：补刀条件以前是 `p.exitCode === null && !p.killed`，而上一行刚调过 p.kill()，
+    // Node 会把 killed 置 true —— 这一刀永远不会落。Windows 上两次调用都是 TerminateProcess，
+    // 但卡在 WASAPI 里时第二次才真的生效，所以必须让它能落。
     this._killTimer = setTimeout(() => {
       this._killTimer = null
-      try { if (p.exitCode === null && !p.killed) p.kill('SIGKILL') } catch (err) { /* 忽略 */ }
+      try { if (p.exitCode === null) p.kill('SIGKILL') } catch (err) { /* 忽略 */ }
     }, 800)
     if (this._killTimer.unref) this._killTimer.unref()
   }

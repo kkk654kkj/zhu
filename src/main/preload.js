@@ -55,6 +55,8 @@ contextBridge.exposeInMainWorld('api', {
   // 收藏 / 历史 / 次数 / 会话
   getFavorites: () => invoke('favorites:get'),
   toggleFavorite: (trackId) => invoke('favorites:toggle', trackId),
+  /** v2.8.54：批量收藏/取消（多选时一次 IPC，避免 N 次串行 + N 次整份 settings fsync） */
+  setFavoritesMany: (ids, fav) => invoke('favorites:setMany', { ids, fav }),
   getHistory: () => invoke('history:get'),
   addHistory: (trackId) => invoke('history:add', trackId),
   getPlayCounts: () => invoke('playcount:get'),

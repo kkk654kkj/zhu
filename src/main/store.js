@@ -89,7 +89,10 @@ class Store {
         this.data._v = SCHEMA_VERSION
       }
     } catch (err) {
-      console.error('[store] 读取失败，使用默认值:', err.message)
+      // v3.3.63：这里原来用 console.error —— 打包后没有控制台，消息既不进 lx-player.log
+      // 也不进任何可见位置，用户只看到「歌单全没了」且事后无从排查。统一走 onError。
+      this._recovered = true
+      this.onError('[store] 读取失败，使用默认值: ' + ((err && err.message) || err))
       // v3.3.20：读取失败（杀软/索引器占用、EACCES、JSON 损坏）以前直接回落默认值，
       // 而 save() 250ms 内就会拿默认值覆盖同一路径 —— playlists / favorites / 设置
       // 就此永久消失，且没有任何备份（.tmp 有 quarantine，正式文件反而没有）。
@@ -138,9 +141,11 @@ class Store {
     const bak = this.file + '.unreadable-' + Date.now()
     try {
       fs.renameSync(this.file, bak)
-      console.error('[store] 原文件已备份为 ' + bak)
+      // v3.3.63：同上，console.error 在打包后不可见 → 走 onError 落日志
+      this.onError('[store] 原文件已备份为 ' + bak)
+      this._unreadableBackup = bak
     } catch (e) {
-      console.error('[store] 原文件备份失败（' + (e.message || e) + '），请手工保留 ' + this.file)
+      this.onError('[store] 原文件备份失败（' + (e.message || e) + '），请手工保留 ' + this.file)
     }
   }
 

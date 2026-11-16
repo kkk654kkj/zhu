@@ -320,6 +320,10 @@ class Player extends Emitter {
     }
     if (this.mode === 'shuffle') {
       this.index = this._nextShuffleIndex(1)
+      // v3.3.63：随机模式放完一轮也必须算「整队播完」—— 以前只有 list 绕回与 order 停在
+      // 末曲才会 emit('queue-end')，随机模式下「播放结束后关机」永远等不到，挂着睡觉
+      // 指望自动关机的用户会一直放到天亮。prev() 不消费这个标记，不会被误触发。
+      if (this._shuffleWrapped && auto && !fromError) this.emit('queue-end')
     } else {
       // 列表循环绕过一圈也算"播完一轮"——「播放结束后关机」要的就是这个时刻；
       // 但坏盘连续跳曲（fromError）绕回不算，别误触发关机。next(true) 行为不变。
@@ -358,6 +362,9 @@ class Player extends Emitter {
 
   _nextShuffleIndex(dir) {
     if (!this._shufflePool.length) this._buildShufflePool()
+    // v3.3.63：把「这一轮洗牌是否绕回」记在实例上，供 next() 判 queue-end。
+    // 不改返回值，prev() 与其它调用点行为不变。
+    this._shuffleWrapped = false
     const pos = this._shufflePool.indexOf(this.index)
     let p = pos + dir
     if (p < 0) p = this._shufflePool.length - 1
@@ -367,6 +374,7 @@ class Player extends Emitter {
       const np = this._shufflePool.indexOf(this.index)
       p = np >= 0 ? np + 1 : 0
       if (p >= this._shufflePool.length) p = 0
+      this._shuffleWrapped = true
     }
     const target = this._shufflePool[p]
     return target >= 0 && target < this.tracks.length ? target : 0
