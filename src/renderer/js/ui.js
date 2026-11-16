@@ -275,6 +275,7 @@ const UI = {
           <div class="c-title">${cv}${eq}
             <span class="tt">${esc(t.title)}</span>
             ${t.hasLyric ? '<span class="tag-lyric">词</span>' : ''}
+            ${t.online ? '<span class="tag-online" title="在线曲目：播放时按原音源重新解析取流">在线</span>' : ''}
             ${ctx.showCounts && ctx.playCounts && ctx.playCounts[t.id]
               ? `<span class="pc" title="播放 ${ctx.playCounts[t.id]} 次">${ctx.playCounts[t.id]}</span>` : ''}
           </div>

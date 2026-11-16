@@ -43,7 +43,8 @@ function selectRange(index) {
 
 /** 当前选中的曲目（右键批量操作 / 拖拽用） */
 function selectedTracks() {
-  return Array.from(state.selected).map((id) => state.byId.get(id)).filter(Boolean)
+  // v3.3.64：resolveTrack 兼容「收藏/歌单里的在线曲」（本地曲库查不到，走在线元数据）
+  return Array.from(state.selected).map((id) => resolveTrack(id)).filter(Boolean)
 }
 
 function applySettings() {

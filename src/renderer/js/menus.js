@@ -6,7 +6,7 @@ function showTrackMenu(x, y, track) {
   // 右键落在「已选中的行」上 → 菜单作用于整批（v1.7）
   const multi = state.selected.has(track.id) && state.selected.size > 1
   const targets = multi
-    ? Array.from(state.selected).map((id) => state.byId.get(id)).filter(Boolean)
+    ? Array.from(state.selected).map((id) => resolveTrack(id)).filter(Boolean)
     : [track]
   const isFav = targets.every((t) => state.favorites.has(t.id))
   // 只有真正的歌单视图才有「移除」；最近播放/专辑/最常播放都不是歌单

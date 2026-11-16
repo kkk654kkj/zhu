@@ -11,6 +11,9 @@ const state = {
   tracks: [],            // 全部曲目（client 结构）
   byId: new Map(),
   favorites: new Set(),
+  // v3.3.64：在线曲目元数据 { 'on:<src>:<id>': meta } —— 收藏/歌单里的在线曲靠它还原成可播曲目
+  onlineMeta: new Map(),
+  fallbackTried: new Set(),   // 本轮已换源重试过的在线曲 id（一次播放只试一次）
   history: [],           // [{id, at}]
   playlists: [],
   playCounts: {},
@@ -53,14 +56,18 @@ let maxIntent = 0   // btnMax 图标的状态意图 token（启动异步回调�
  */
 async function loadInitialData() {
   const slowTimer = setTimeout(() => UI.showScan('正在载入音乐库…'), 400)
-  const [settings, tracks, favs, hist, playlists, counts, session] = await Promise.all([
+  const [settings, tracks, favs, hist, playlists, counts, session, onlineMeta] = await Promise.all([
     window.api.getSettings(),
     window.api.listTracks(),
     window.api.getFavorites(),
     window.api.getHistory(),
     window.api.getPlaylists(),
     window.api.getPlayCounts(),
-    window.api.getSession()
+    window.api.getSession(),
+    // v3.3.64：本地版没有这个接口 —— 缺了就当空的，不影响启动
+    typeof window.api.onlineTracksGet === 'function'
+      ? window.api.onlineTracksGet().catch(() => ({}))
+      : Promise.resolve({})
   ])
   clearTimeout(slowTimer)
   UI.hideScan()
@@ -68,6 +75,7 @@ async function loadInitialData() {
   state.settings = settings || {}
   state.resumePos = Object.assign({}, (settings && settings.resumePos) || {})
   state.favorites = new Set(favs || [])
+  state.onlineMeta = new Map(Object.entries(onlineMeta || {}))
   state.history = hist || []
   state.playlists = playlists || []
   state.playCounts = counts || {}
@@ -145,7 +153,7 @@ async function createAudioEngine(settings) {
  */
 function restoreSession(session) {
   if (!session || !Array.isArray(session.queueIds) || !session.queueIds.length) return
-  const queue = session.queueIds.map((id) => state.byId.get(id)).filter(Boolean)
+  const queue = session.queueIds.map((id) => resolveTrack(id)).filter(Boolean)
   if (!queue.length) return
   // v3.3.17：优先按 currentId 定位。队列里有被过滤掉的在线曲时，index 已经错位，
   // 按 index 取会让「当前曲」变成别的歌，currentTime 也被 seek 进错误的文件。
@@ -203,6 +211,11 @@ async function boot() {
   const { tracks, session } = await loadInitialData()
   await createAudioEngine(state.settings)
   setTracks(tracks)
+  // v3.3.64：收藏/歌单里有在线曲就先取代理基地址 —— 否则首屏列表里那些在线行
+  // 拼不出可播地址（点播放会直接报错），用户以为收藏坏了
+  if (state.onlineMeta.size && typeof Online !== 'undefined') {
+    await Online.ensureBase().catch(() => '')
+  }
 
   bindPlayer()
   bindUI()
@@ -345,13 +358,29 @@ function offsetFor(id) {
 
 /* ================= 视图 ================= */
 
+/**
+ * v3.3.64：id → 可播曲目。先查本地曲库，再查在线元数据表。
+ *
+ * 收藏 / 歌单 / 最近播放 / 上次会话里可能混着在线曲的 id（`on:<src>:<id>`），
+ * 这些 id 在本地曲库里查不到。以前一律 `.filter(Boolean)` 掉，用户看到的
+ * 就是「收藏了但列表里没有」。
+ */
+function resolveTrack(id) {
+  if (!id) return null
+  const local = state.byId.get(id)
+  if (local) return local
+  const meta = state.onlineMeta.get(id)
+  if (meta && typeof Online !== 'undefined') return Online.trackFromMeta(meta)
+  return null
+}
+
 function computedList() {
   let list = []
 
   if (state.view === 'all') list = state.tracks.slice()
-  else if (state.view === 'fav') list = Array.from(state.favorites).map((id) => state.byId.get(id)).filter(Boolean)
+  else if (state.view === 'fav') list = Array.from(state.favorites).map((id) => resolveTrack(id)).filter(Boolean)
   else if (state.view === 'recent') {
-    list = state.history.map((h) => state.byId.get(h.id)).filter(Boolean)
+    list = state.history.map((h) => resolveTrack(h.id)).filter(Boolean)
   } else if (state.view === 'added') {
     // 最近添加（v1.9）：全部曲目按入库时间倒序，新歌永远在最上面。
     // 不设时间窗口——窗口会让"上个月整理的那批歌"凭空消失，用户只会觉得是 bug
@@ -371,7 +400,7 @@ function computedList() {
     list = state.tracks.filter((t) => (t.album || '未知专辑') === name)
   } else {
     const pl = state.playlists.find((p) => p.id === state.view)
-    if (pl) list = pl.trackIds.map((id) => state.byId.get(id)).filter(Boolean)
+    if (pl) list = pl.trackIds.map((id) => resolveTrack(id)).filter(Boolean)
   }
 
   if (state.query) list = list.filter((t) => matchQuery(t, state.query))
@@ -665,6 +694,7 @@ function bindPlayer() {
     if (!state.autoSkipping && state.consecutiveFails) state.consecutiveFails = 0
     cancelSkipTimer()
     state.lastErrKey = null        // 换曲后允许重新记错误
+    state.fallbackTried.delete(track.id)   // v3.3.64：换曲后允许再做一次在线换源重试
     if (track.online) Online.markPlaying(track.id)
     resetAb()                       // A-B 是"这一首之内"的事，换歌就作废
     updateMediaSession(track)
@@ -800,34 +830,78 @@ function bindPlayer() {
       return
     }
 
-    // 在线 / 本地统一计数：连续 3 首放不出来就停，防止移动硬盘掉线、
-    // 格式不支持时每 400ms 一首无限连跳。跳曲一律走 skipToNext()：
-    // 它强制 index+1、忽略 single 模式、且不会 emit queue-end 误触发「播完关机」。
-    state.consecutiveFails = (state.consecutiveFails || 0) + 1
-    if (state.consecutiveFails >= 3) {
-      cancelSkipTimer()
-      // force 绕过全局 toast 的 30s 同类去重：手动切歌清零后再次连败也要提示
-      if (state.consecutiveFails === 3) toast('连续多首无法播放，已停止自动跳过', 4000, true)
-      player.pause()
+    // v3.3.64：这条是在线曲、且带着落盘元数据（从「我的收藏 / 歌单」点开的）
+    // → 原音源失效时先换源重试一次，成功就接着放，失败才走下面的跳曲链。
+    // 一次播放只试一次（state.fallbackTried），避免「换到的源也坏」时来回弹。
+    if (cur && cur.onlineMeta && !state.fallbackTried.has(cur.id)) {
+      state.fallbackTried.add(cur.id)
+      recoverOnlineTrack(cur)
       return
     }
 
-    toast(cur && cur.online
-      ? '这首在线歌曲放不出来（版权或音源失效），已跳过'
-      : (cur && cur.isDsd
-        ? 'DSD 文件需要独占输出才能播放：点标题栏波形按钮开启（已跳过）'
-        : '该歌曲无法播放，已跳过'),
-      cur && cur.isDsd ? 4000 : (cur && cur.online ? 2500 : 1800))
-
-    // 排定时器前先清掉旧的，避免多次失败叠加多个定时器
-    cancelSkipTimer()
-    state.skipTimer = setTimeout(() => {
-      state.skipTimer = null
-      if (!player.isPlaying) return    // 用户在等待窗口里暂停了就别再强跳
-      state.autoSkipping = true
-      try { player.skipToNext() } finally { state.autoSkipping = false }
-    }, cur && cur.online ? 500 : 400)
+    notePlaybackFailure(cur)
   })
+}
+
+/**
+ * 在线曲的换源兜底（v3.3.64）。
+ *
+ * 收藏 / 歌单里存的只有标题、歌手和原音源，直链是现拼的 —— 平台下架或改签名后
+ * 这条地址就会 404/502。这里按「标题 + 歌手」全源重搜，命中就替换队列里这一首
+ * 接着播（曲目 id 保持不变，队列位置、断点、收藏关系都不动）。
+ */
+async function recoverOnlineTrack(cur) {
+  const meta = cur && cur.onlineMeta
+  if (!meta || typeof Online === 'undefined') { notePlaybackFailure(cur); return }
+  toast('原音源放不出来，正在换源重试…', 2000)
+  const song = await Online.recoverFromSources(meta).catch(() => null)
+  if (!song) { toast('换源也没找到「' + (meta.title || '这首') + '」，已跳过', 3000); notePlaybackFailure(cur); return }
+  const fresh = Online.toTrack(song, null)
+  // 保持原 id：队列按 id 定位，换 id 会让当前曲在队列里「消失」并多出一条
+  fresh.id = cur.id
+  fresh.onlineMeta = meta
+  const tracks = player.tracks.slice()
+  const idx = tracks.findIndex((t) => t.id === cur.id)
+  if (idx < 0) { notePlaybackFailure(cur); return }
+  tracks[idx] = fresh
+  const name = (Online.sources.find((s) => s.id === song.source) || {}).short || song.source
+  toast('已换源到「' + name + '」继续播放', 2500)
+  state.fallbackTried.add(cur.id)
+  player.setQueue(tracks, idx, true)
+}
+
+/**
+ * 播放失败的统一收尾（v3.3.64 从 error 回调里原样抽出，供换源失败时复用）：
+ * 计数 → 连败 3 首就停 → 提示 → 400/500ms 后跳下一首。
+ */
+function notePlaybackFailure(cur) {
+  // 在线 / 本地统一计数：连续 3 首放不出来就停，防止移动硬盘掉线、
+  // 格式不支持时每 400ms 一首无限连跳。跳曲一律走 skipToNext()：
+  // 它强制 index+1、忽略 single 模式、且不会 emit queue-end 误触发「播完关机」。
+  state.consecutiveFails = (state.consecutiveFails || 0) + 1
+  if (state.consecutiveFails >= 3) {
+    cancelSkipTimer()
+    // force 绕过全局 toast 的 30s 同类去重：手动切歌清零后再次连败也要提示
+    if (state.consecutiveFails === 3) toast('连续多首无法播放，已停止自动跳过', 4000, true)
+    player.pause()
+    return
+  }
+
+  toast(cur && cur.online
+    ? '这首在线歌曲放不出来（版权或音源失效），已跳过'
+    : (cur && cur.isDsd
+      ? 'DSD 文件需要独占输出才能播放：点标题栏波形按钮开启（已跳过）'
+      : '该歌曲无法播放，已跳过'),
+    cur && cur.isDsd ? 4000 : (cur && cur.online ? 2500 : 1800))
+
+  // 排定时器前先清掉旧的，避免多次失败叠加多个定时器
+  cancelSkipTimer()
+  state.skipTimer = setTimeout(() => {
+    state.skipTimer = null
+    if (!player.isPlaying) return    // 用户在等待窗口里暂停了就别再强跳
+    state.autoSkipping = true
+    try { player.skipToNext() } finally { state.autoSkipping = false }
+  }, cur && cur.online ? 500 : 400)
 }
 
 function playFromVisible(track) {
@@ -1003,7 +1077,7 @@ function bindTrackListUi() {
     const tb = document.getElementById('tableBody')
     if (tb && document.activeElement !== tb) tb.focus({ preventScroll: true })
     const id = row.dataset.id
-    const track = state.byId.get(id)
+    const track = resolveTrack(id)
     if (!track) return
     // 网格卡片的播放浮层：直接播，不切换选中
     if (e.target.closest('.mc-play')) {
@@ -1041,7 +1115,7 @@ function bindTrackListUi() {
     const row = pickRow(e)
     if (!row) return
     e.preventDefault()
-    const track = state.byId.get(row.dataset.id)
+    const track = resolveTrack(row.dataset.id)
     if (track) showTrackMenu(e.clientX, e.clientY, track)
   })
 

@@ -1,0 +1,36 @@
+/* ================= 联网版专属：在线列表 收藏 / 歌单（v3.3.64） =================
+ *
+ * 为什么单独一个文件：`app.css` 是两侧共享文件（master 也必须保持一致），
+ * 而收藏在线曲、在线行尾的 ♥ / ＋ 只有联网版有 —— 放这里就不会给本地版带进死规则。
+ *
+ * 行尾按钮从 3 个（播放 / 队列 / 下载）变成 5 个（+ 收藏 + 加入歌单）：
+ *   26px × 5 + 4px × 4 = 146px，所以末列由 92px 放宽到 150px，
+ *   其余列沿用 app.css 的 `.op-tr` 定义，只覆盖末列。
+ */
+
+#onlinePane .op-tr {
+  grid-template-columns: 38px minmax(160px, 1.6fr) minmax(90px, 1fr) 78px 76px 60px 150px;
+}
+
+/* 已收藏的心：与本地列表 `.row-act.on` 同一口径（danger 色），不做填充避免视觉过重 */
+.op-act-btn.on { color: var(--danger); }
+.op-act-btn.on:hover { color: var(--danger); }
+
+/* 「在线」标记：混在「我的收藏 / 歌单」里时，一眼能认出这条不是本地文件 */
+.tr .c-title .tag-online {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--txt-2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 3px;
+  line-height: 13px;
+  opacity: .85;
+  white-space: nowrap;
+}
+
+html[data-theme="light"] .tr .c-title .tag-online {
+  color: var(--row-ink);
+  border-color: color-mix(in srgb, var(--row-ink) 32%, transparent);
+  opacity: 1;
+}

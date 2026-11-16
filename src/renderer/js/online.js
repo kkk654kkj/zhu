@@ -199,6 +199,8 @@ const Online = {
         if (act.dataset.act === 'play') this.playAt(i)
         else if (act.dataset.act === 'download') this.downloadAt(i)
         else if (act.dataset.act === 'queue') this.addQueueAt(i)
+        else if (act.dataset.act === 'fav') this.toggleFavAt(i)
+        else if (act.dataset.act === 'addpl') this.addPlaylistAt(i, act)
         return
       }
       if (e.target.closest('.btn-play-row')) { this.playAt(Number(row.dataset.index)); return }
@@ -227,6 +229,8 @@ const Online = {
       const s = this.list[i]
       const id = `on:${s.source}:${s.id}`
       const cur = this.playingId === id
+      // v3.3.64：收藏状态与本地列表同一口径（state.favorites 里存的就是这个 id）
+      const favOn = state.favorites && state.favorites.has(id) ? ' on' : ''
       html += `<div class="op-tr${cur ? ' playing' : ''}" data-index="${i}" data-id="${esc(id)}">
         <div class="c-idx">
           <span class="num">${i + 1}</span>
@@ -241,7 +245,9 @@ const Online = {
         <div class="op-c-dur">${fmtDuration(s.duration)}</div>
         <div class="op-c-act">
           <button class="op-act-btn" data-act="play" title="播放">${icon('play')}</button>
-          <button class="op-act-btn" data-act="queue" title="加入播放队列">${icon('plus')}</button>
+          <button class="op-act-btn" data-act="queue" title="加入播放队列">${icon('queue')}</button>
+          <button class="op-act-btn${favOn}" data-act="fav" aria-pressed="${favOn ? 'true' : 'false'}" title="${favOn ? '取消收藏' : '加入收藏'}">${icon('heart')}</button>
+          <button class="op-act-btn" data-act="addpl" title="加入歌单" aria-label="加入歌单">${icon('plus')}</button>
           <button class="op-act-btn" data-act="download" title="下载到本地">${icon('download')}</button>
         </div>
       </div>`
@@ -491,6 +497,202 @@ const Online = {
       onlineBitrate: resolved ? resolved.bitrate : 0,
       path: null
     }
+  },
+
+  /* ---------------- 收藏 / 歌单（v3.3.64） ---------------- */
+
+  /** 曲目在 state.favorites / playlists 里的 id 口径（与 toTrack 一致） */
+  keyOf(song) {
+    return `on:${song.source}:${song.id}`
+  },
+
+  /**
+   * OnlineSong → 可落盘的元数据。
+   * 只留「重播必须的最小集」：标题/歌手/时长/原音源/封面/标称音质。
+   * 直链绝对不能存：签名分钟级过期，存下来只会让下次重播必然失败。
+   */
+  metaOf(song) {
+    return {
+      id: this.keyOf(song),
+      source: song.source,
+      songId: String(song.id),
+      title: song.title || '',
+      artist: song.artist || '',
+      album: song.album || '',
+      duration: Number(song.duration) || 0,
+      cover: song.cover || '',
+      quality: song.quality || '',
+      at: Date.now()
+    }
+  },
+
+  /** 落盘元数据 → OnlineSong（喂给 toTrack / onlinePlayable 的形状） */
+  songFromMeta(meta) {
+    if (!meta || !meta.source) return null
+    return {
+      source: meta.source,
+      id: String(meta.songId || ''),
+      title: meta.title || '',
+      artist: meta.artist || '',
+      album: meta.album || '',
+      duration: Number(meta.duration) || 0,
+      cover: meta.cover || null,
+      quality: meta.quality || ''
+    }
+  },
+
+  /**
+   * 落盘元数据 → player 能吃的 ClientTrack。
+   * 这就是「我的收藏 / 歌单里的在线曲」能被点开播放的全部秘密：
+   * 代理地址按记录里的 src + 平台 id 现拼，播到才解析；已缓存的曲子
+   * 连解析都省了（/stream 先查缓存），所以重播常常是秒开的。
+   */
+  trackFromMeta(meta) {
+    const song = this.songFromMeta(meta)
+    if (!song || !song.id) return null
+    const t = this.toTrack(song, null)
+    t.onlineMeta = meta          // 换源失败时 error 链要靠它重搜
+    return t
+  },
+
+  /**
+   * 把主进程返回的元数据整表同步到渲染层。
+   * 不同步的后果是实测出来的：「我的收藏」要重启一次才看得见刚收藏的在线曲
+   * —— 渲染层的 state.onlineMeta 只在启动时读了一次。
+   */
+  syncOnlineMeta(map) {
+    if (!map || typeof map !== 'object') return
+    state.onlineMeta = new Map(Object.entries(map))
+  },
+
+  /** 只补代理基地址（不渲染界面、不绑事件）：启动时给收藏/歌单里的在线曲铺路 */
+  async ensureBase() {
+    if (this.proxyBase) return this.proxyBase
+    try { this.proxyBase = await window.api.onlineProxyBase() } catch (err) { this.proxyBase = '' }
+    return this.proxyBase
+  },
+
+  /** 行内 ♥：收藏 / 取消收藏，走与本地列表同一条动作管道 */
+  async toggleFavAt(i) {
+    const song = this.list[i]
+    if (!song) return
+    const id = this.keyOf(song)
+    const on = state.favorites.has(id)
+    // 顺序不能反：主进程写完收藏会立刻按「仍被引用」清理元数据表，
+    // 先收藏后存元数据会把这条刚加的记录当场剪掉。
+    if (!on) {
+      const map = await window.api.onlineTracksRemember([this.metaOf(song)]).catch(() => null)
+      if (!map) { toast('收藏失败：在线曲目信息保存失败', 2500); return }
+      this.syncOnlineMeta(map)
+    }
+    currentMenuTrack = this.pseudoTrack(song)
+    currentMenuTracks = [currentMenuTrack]
+    try { await handleCtxAction('fav') }
+    catch (err) { toast('操作失败：' + ((err && err.message) || err), 2500) }
+    // 取消收藏后主进程会顺手清理元数据表，这里同步一次，免得渲染层留着已失效的条目
+    if (on) await window.api.onlineTracksGet().then((m) => this.syncOnlineMeta(m)).catch(() => {})
+    this.paintFavRows()
+  },
+
+  /** 行内 ＋：加入歌单（菜单与本地列表同款，选中后走 add-pl 管道） */
+  async addPlaylistAt(i, btn) {
+    const song = this.list[i]
+    if (!song) return
+    if (!state.playlists.length) { toast('还没有歌单：先在左侧「新建歌单」', 2500); return }
+    const map = await window.api.onlineTracksRemember([this.metaOf(song)]).catch(() => null)
+    if (!map) { toast('加入歌单失败：在线曲目信息保存失败', 2500); return }
+    this.syncOnlineMeta(map)
+    currentMenuTrack = this.pseudoTrack(song)
+    currentMenuTracks = [currentMenuTrack]
+    const box = btn && btn.getBoundingClientRect ? btn.getBoundingClientRect() : null
+    UI.showContextMenu(
+      box ? box.left : 0,
+      box ? box.bottom + 6 : 0,
+      state.playlists.map((p) => ({ label: p.name, act: 'add-pl', arg: p.id }))
+    )
+  },
+
+  /** 在线行冒充本地 track，只为复用 handleCtxAction（它只用到 id / title / artist） */
+  pseudoTrack(song) {
+    return {
+      id: this.keyOf(song),
+      title: song.title || '',
+      artist: song.artist || '',
+      album: song.album || '',
+      duration: Number(song.duration) || 0,
+      online: { source: song.source, id: String(song.id) }
+    }
+  },
+
+  /** 收藏动作后把行内 ♥ 就地翻过来（opBody 不走 UI.syncFavMarks 的 .tr 选择器） */
+  paintFavRows() {
+    document.querySelectorAll('#opBody .op-tr').forEach((row) => {
+      const btn = row.querySelector('.op-act-btn[data-act="fav"]')
+      if (!btn) return
+      const on = state.favorites.has(row.dataset.id)
+      btn.classList.toggle('on', on)
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false')
+      btn.title = on ? '取消收藏' : '加入收藏'
+    })
+  },
+
+  /**
+   * 原音源失效时的换源兜底（error 链调用）。
+   * 用「标题 + 歌手」在全部音源里重搜，按标题/歌手/时长打分挑一条；
+   * 分数不够就返回 null（宁可说找不到，也不拿一首别的歌糊弄用户）。
+   */
+  async recoverFromSources(meta) {
+    if (!meta) return null
+    const kw = ((meta.title || '') + ' ' + (meta.artist || '')).trim()
+    if (!kw) return null
+    try { await this.init() } catch (err) { /* 下面按 proxyBase 判断 */ }
+    if (!this.proxyBase) return null
+    const sources = this.sources.map((s) => s.id)
+    if (!sources.length) return null
+    const r = await window.api.onlineSearch({ keyword: kw, page: 1, limit: 15, sources }).catch(() => null)
+    const list = (r && r.list) || []
+    let best = null
+    let bestScore = 0
+    for (const s of list) {
+      const score = this.matchScore(s, meta)
+      if (score > bestScore) { bestScore = score; best = s }
+    }
+    return bestScore >= 60 ? best : null
+  },
+
+  /**
+   * 换源候选打分（阈值 60）。
+   *
+   * 标题全等 45 / 标题包含 30（Live、伴奏这类后缀靠它进来）；歌手全等 +25、包含 +12；
+   * 时长差 ≤3 秒 +15、≤8 秒 +8、超过 40 秒 -20。
+   *
+   * 标题对不上直接 0 分 —— 不参与竞争。这样 60 分的门槛实际含义是
+   * 「标题命中 + 至少一条佐证（歌手或时长）」，同名的翻唱、同名不同曲进不来。
+   */
+  matchScore(song, meta) {
+    const norm = (x) => String(x || '').toLowerCase().replace(/[\s\-_()（）\[\]【】·,，.。'"!！?？&+]/g, '')
+    const t1 = norm(song.title)
+    const t2 = norm(meta.title)
+    if (!t1 || !t2) return 0
+    let score
+    if (t1 === t2) score = 45
+    else if (t1.includes(t2) || t2.includes(t1)) score = 30
+    else return 0
+    const a1 = norm(song.artist)
+    const a2 = norm(meta.artist)
+    if (a1 && a2) {
+      if (a1 === a2) score += 25
+      else if (a1.includes(a2) || a2.includes(a1)) score += 12
+    }
+    const d1 = Number(meta.duration) || 0
+    const d2 = Number(song.duration) || 0
+    if (d1 && d2) {
+      const d = Math.abs(d1 - d2)
+      if (d <= 3) score += 15
+      else if (d <= 8) score += 8
+      else if (d > 40) score -= 20
+    }
+    return score
   },
 
   /** 加入队列（不打断当前播放） */
