@@ -800,7 +800,7 @@ function main() {
   const wd = spawnSync(process.execPath, ['test/mpv-watchdog.mjs'], {
     cwd: ROOT, encoding: 'utf8'
   })
-  ok('独占看门狗运行时单测 mpv-watchdog（17 项：AO 兜底 / 坏帧静默 / 曲末 idle 恢复）',
+  ok('独占看门狗运行时单测 mpv-watchdog（19 项：AO 兜底 / 坏帧静默 / 曲末 idle 恢复 / pause 轴）',
     wd.status === 0, (wd.stdout || '').trim().split('\n').slice(-1)[0])
   ok('file-loaded 不来时用 load 时刻兜底，起播宽限不再永久豁免',
     /const graceBase = this\._fileLoadedAt \|\| this\._loadAt/.test(mvSrc) &&
@@ -842,6 +842,13 @@ function main() {
     /if \(this\._idle && !this\._wantPlaying\)/.test(mvSrc) &&
     /if \(this\._idle\) \{[\s\S]{0,500}Date\.now\(\) - this\._loadAt < 2000/.test(mvSrc) &&
     !/if \(this\._idle \|\| this\._paused \|\| !this\._lastFile\)/.test(mvSrc))
+
+  // v2.8.53 / v3.3.62：pause 轴不能再单看 _paused，否则「想播 + mpv 报 paused」永久无声
+  ok('v2.8.53：pause 轴早退必须同时看播放意图（想播时不许静默跳过）',
+    /if \(\(this\._paused && !this\._wantPlaying\) \|\| !this\._lastFile\)/.test(mvSrc) &&
+    !/if \(this\._paused \|\| !this\._lastFile\)/.test(mvSrc) &&
+    /if \(this\._wantPlaying\) this\._send\(\['set_property', 'pause', false\]\)/.test(mvSrc) &&
+    /const wantResume = wasPlaying \|\| this\._wantPlaying/.test(mvSrc))
 
   }
 
