@@ -274,6 +274,10 @@ class MpvEngine {
     this.ready = true
     this._observe()
     this._flush()
+    // v2.8.53 / v3.3.62：start() 的队列过滤会丢掉启动期间排队的 pause 命令，
+    // 用户那句「继续播」就此蒸发。这里按播放意图补发一次 unpause；
+    // 之后若 _restartBody 要按暂停加载，load() 会再显式下发 pause 属性，不会打架。
+    if (this._wantPlaying) this._send(['set_property', 'pause', false])
     // v3.3.13：看门狗（每秒检查一次）。注意不要把 _recoverAttempts/_lastRecoverAt
     // 清零——restart() 必经 start()，清零会让「连续 3 次失败停手」永远失效，
     // 设备真被别的程序占着时会无限重启 + 反复弹「已恢复」
@@ -606,8 +610,14 @@ class MpvEngine {
   }
 
   async _restartBody({ exclusive, audioDevice = this._audioDevice || '', volume = null } = {}) {
+    // v2.8.53 / v3.3.62：拿不到回执时不能默认「没在播」—— 引擎忙 / 半死时那会把
+    // 「切设备后应该续播」退化成停在原地（用户看到「切了设备就不播了」，位置却是对的）。
     let wasPlaying = false
-    try { wasPlaying = (await this.request(['get_property', 'pause'], 800)) === false } catch {}
+    try { wasPlaying = (await this.request(['get_property', 'pause'], 800)) === false } catch { wasPlaying = !this._paused }
+    // 播放意图优先：restart 窗口里用户可能刚点过 play（那条命令已被队列过滤丢掉），
+    // 只看 mpv 回报会把它算成「不需要续播」。这里必须在 load() 之前取值，
+    // 因为 load(paused) 会按参数改写 _wantPlaying。
+    const wantResume = wasPlaying || this._wantPlaying
     const file = this._lastFile
     const pos = this._lastPos
     const prevDevice = this._audioDevice || ''
@@ -637,8 +647,8 @@ class MpvEngine {
         if (!still()) return
         if (pos > 0.3 && loaded) {
           this.seek(pos)
-          if (wasPlaying) setTimeout(() => { if (still()) this.play() }, 80)
-        } else if (wasPlaying) {
+          if (wantResume) setTimeout(() => { if (still()) this.play() }, 80)
+        } else if (wantResume) {
           this.play()
         }
       })
@@ -849,7 +859,13 @@ class MpvEngine {
     if (!this.ready || !this.exclusive || this._disposed) { this._wdDiag('engine-not-ready'); return }
     // v3.3.13：测试静音（--ao=null）不参与独占判定
     if (process.env.LX_TEST_MUTE === '1') return
-    if (this._paused || !this._lastFile) {
+    // v2.8.53 / v3.3.62：早退判据必须成对看「mpv 回报的 pause」与「播放意图」。
+    // 以前只看 _paused：restart 窗口里用户点的 play() 会把 pause=false 排进 _queue，
+    // 而 start() 的队列过滤只保留 loadfile/stop，这条命令被丢掉 →
+    // 新进程按 paused 起播、_paused 恒为 true，看门狗每秒在这一行清零 _aoLostAt，
+    // 于是「界面播放中 + 永久无声」且永不恢复（与 v2.8.52 修的曲末 idle 同一类，
+    // 只是换了一条轴）。只有「既暂停、又没播放意图」才是正常暂停。
+    if ((this._paused && !this._wantPlaying) || !this._lastFile) {
       this._wdDiag('paused-or-idle')
       this._aoLostAt = 0
       return
