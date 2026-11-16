@@ -160,6 +160,39 @@ function makeEngine(events, over = {}) {
     JSON.stringify(events.map((x) => x.reason)))
 }
 
+/* ---------- ⑨ EOF 诊断：pos/dur/seek 写进快照 ---------- */
+{
+  const events = []
+  const e = makeEngine(events)
+  e._handleProperty({ name: 'duration', data: 263.4 })
+  e._handleProperty({ name: 'time-pos', data: 19.4 })
+  e.seek(19.4)
+  const diag = events.filter((x) => x.type === 'wd-diag')
+  const st = (diag.find((x) => x.reason === 'seek') || {}).state || {}
+  ok('duration / time-pos / seek 目标都写进诊断快照',
+    st.dur === 263.4 && st.pos === 19.4 && st.seek === 19.4,
+    JSON.stringify(st))
+}
+
+/* ---------- ⑩ end-file(eof) 配对结果可区分 ---------- */
+{
+  const events = []
+  const e = makeEngine(events)
+  e._handleProperty({ name: 'eof-reached', data: true })
+  e._handleEvent({ event: 'end-file', reason: 'eof' })
+  ok('700ms 内 eof-reached + end-file(eof) 记为 paired',
+    events.some((x) => x.reason === 'end-file-eof-paired') &&
+    !events.some((x) => x.reason === 'end-file-eof-standalone'),
+    JSON.stringify(events.filter((x) => x.type === 'wd-diag').map((x) => x.reason)))
+
+  const ev2 = []
+  const e2 = makeEngine(ev2)
+  e2._handleEvent({ event: 'end-file', reason: 'eof' })
+  ok('无 eof-reached 的独立 end-file(eof) 记为 standalone',
+    ev2.some((x) => x.reason === 'end-file-eof-standalone'),
+    JSON.stringify(ev2.filter((x) => x.type === 'wd-diag').map((x) => x.reason)))
+}
+
 if (savedMute === undefined) delete process.env.LX_TEST_MUTE
 else process.env.LX_TEST_MUTE = savedMute
 
