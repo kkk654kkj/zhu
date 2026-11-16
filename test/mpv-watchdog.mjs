@@ -212,6 +212,30 @@ function makeEngine(events, over = {}) {
     JSON.stringify(ev2.filter((x) => x.type === 'wd-diag').map((x) => x.reason)))
 }
 
+/* ---------- ⑪ pause 轴：想播但 mpv 报 paused，仍必须能恢复 ---------- */
+{
+  const events = []
+  // _paused=true（mpv 回报暂停 / 属性一时为 null）+ _wantPlaying=true（用户点了播放）
+  // 旧写法 `if (this._paused || !this._lastFile) return` 会每秒清零 _aoLostAt → 永久无声
+  const e = makeEngine(events, { _paused: true, _idle: false, _aoParams: null, _aoLostAt: 0 })
+  e._wantPlaying = true
+  e._lastFile = 'D:/music/x.flac'
+  e._wdTick()                                  // 第一次：记下丢失起点
+  e._aoLostAt = Date.now() - 3000
+  e._wdTick()                                  // 第二次：应触发恢复
+  ok('想播但 mpv 报 paused 时不再静默跳过（旧写法会让 _aoLostAt 永远归零）',
+    events.some((x) => x.type === 'ao-lost'),
+    JSON.stringify(events.map((x) => x.type)))
+
+  const ev2 = []
+  const e2 = makeEngine(ev2, { _paused: true, _aoLostAt: Date.now() - 3000 })
+  e2._wantPlaying = false
+  e2._wdTick()
+  ok('用户主动暂停且无播放意图时照旧跳过（不误杀正常暂停）',
+    !ev2.some((x) => x.type === 'ao-lost') && ev2.some((x) => x.reason === 'paused-or-idle'),
+    JSON.stringify(ev2.map((x) => x.type + ':' + (x.reason || ''))))
+}
+
 if (savedMute === undefined) delete process.env.LX_TEST_MUTE
 else process.env.LX_TEST_MUTE = savedMute
 
