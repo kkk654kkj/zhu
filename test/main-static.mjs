@@ -800,7 +800,7 @@ function main() {
   const wd = spawnSync(process.execPath, ['test/mpv-watchdog.mjs'], {
     cwd: ROOT, encoding: 'utf8'
   })
-  ok('独占看门狗运行时单测 mpv-watchdog（9 项：宽限边界 / 坏帧静默 / 误判防护）',
+  ok('独占看门狗运行时单测 mpv-watchdog（10 项：宽限边界 / 坏帧静默 / 诊断日志）',
     wd.status === 0, (wd.stdout || '').trim().split('\n').slice(-1)[0])
   ok('file-loaded 不来时用 load 时刻兜底，起播宽限不再永久豁免',
     /const graceBase = this\._fileLoadedAt \|\| this\._loadAt/.test(mvSrc) &&
@@ -812,6 +812,10 @@ function main() {
     !/decodeFailed/.test(appSrc4))
   ok('独占 error 分支恢复 v3.3.18 原判据（坏帧不打断单曲循环）',
     /if \(state\.exclusive && !state\.exclusiveFellBack\) \{/.test(appSrc4))
+  ok('诊断轮：看门狗早退原因 + 状态快照写进主进程日志（只观测不改行为）',
+    /_wdDiag\(/.test(mvSrc) &&
+    /wd-diag/.test(mgrSrc) &&
+    /G\.logLine\('\[wd\] '/.test(mgrSrc))
 
   }
 

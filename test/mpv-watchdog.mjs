@@ -119,6 +119,17 @@ function makeEngine(events, over = {}) {
     'loadedAt=' + e._fileLoadedAt + ' loadAt=' + e._loadAt)
 }
 
+/* ---------- ⑥ 诊断日志：早退原因可观测 + 同原因节流 ---------- */
+{
+  const events = []
+  const e = makeEngine(events, { _paused: true, _aoLostAt: 0 })
+  e._wdTick(); e._wdTick(); e._wdTick()
+  const diag = events.filter((x) => x.type === 'wd-diag')
+  ok('看门狗早退会留下原因与状态快照，且同原因 5 秒内只记一条',
+    diag.length === 1 && diag[0].reason === 'paused-or-idle' && diag[0].state.paused === true,
+    JSON.stringify(diag))
+}
+
 if (savedMute === undefined) delete process.env.LX_TEST_MUTE
 else process.env.LX_TEST_MUTE = savedMute
 
