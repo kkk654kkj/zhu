@@ -569,6 +569,12 @@ const POWER_LABEL = { off: '不处理', shutdown: '关机', hibernate: '休眠',
 let powerAfterQueue = 'off'
 
 function setPowerAfterQueue(kind) {
+  // v2.8.53 / v3.3.62：改变「播放结束后」必须先撤销已经排上队的动作。
+  // runPowerAction() 会把 kind 抓进 15 秒定时器的闭包，这里只改设置/菜单/通知
+  // 影响不到它 —— 用户把「关机」改成「不处理」（直觉上就是取消）后，15 秒到点
+  // 照样 shutdown /s /t 30，未保存的工作就这么丢了（本轮审查 P1）。
+  // cancelPowerAction() 自带「没有排队就不动作」的守卫，并能推 kind:null 让倒计时消失。
+  if (powerPending || systemShutdownPending) cancelPowerAction()
   powerAfterQueue = POWER_LABEL[kind] ? kind : 'off'
   logLine('[power] 播放结束后：' + powerAfterQueue)
   store.patch({ settings: { powerAfterQueue } })
