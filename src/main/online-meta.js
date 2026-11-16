@@ -16,6 +16,22 @@ function metaIdOf(source, songId) {
 }
 
 /**
+ * 探测档位（v3.3.65）：只留展示用的文本 / 配色类 / 悬停提示，限长且 cls 走白名单。
+ * 绝不存直链或大对象 —— 这三项只为了让收藏 / 队列列表的「规格」列和在线搜索页一致。
+ * @returns {{text:string,cls:string,tip:string}|null}
+ */
+function sanitizeSpec(sp) {
+  if (!sp || typeof sp !== 'object') return null
+  const clip = (v, n) => typeof v === 'string' ? v.slice(0, n) : ''
+  const cls = clip(sp.cls, 16)
+  return {
+    text: clip(sp.text, 24),
+    cls: ['lossless', 'high', 'ok', 'dim', ''].includes(cls) ? cls : 'dim',
+    tip: clip(sp.tip, 160)
+  }
+}
+
+/**
  * 校验并规范化一条元数据。形不成合法曲目就返回 null（调用方直接跳过）。
  * @param {object} m 渲染层传来的对象（不可信）
  * @returns {object|null}
@@ -40,6 +56,7 @@ function sanitizeMeta(m, now) {
     duration: Number(m.duration) > 0 ? Number(m.duration) : 0,
     cover: typeof m.cover === 'string' ? m.cover : '',
     quality: typeof m.quality === 'string' ? m.quality : '',
+    spec: sanitizeSpec(m.spec),
     at: Number(m.at) > 0 ? Number(m.at) : (Number(now) || Date.now())
   }
 }

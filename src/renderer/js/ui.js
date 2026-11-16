@@ -281,7 +281,9 @@ const UI = {
           </div>
           <div class="c-artist">${esc(t.artist || '未知歌手')}</div>
           <div class="c-album">${esc(t.album || '—')}</div>
-          <div class="c-spec${isHires(t) ? ' hires' : ''}" title="${esc(qualityTitle(t))}"><span class="badge${t.lossless ? ' lossless' : ''}">${esc(t.ext || '')}</span><span class="q">${esc(fmtQuality(t))}</span></div>
+          <div class="c-spec${!t.online && isHires(t) ? ' hires' : ''}" title="${esc(t.online ? (t.specTip || '在线曲目：播放时按原音源解析实际档位') : qualityTitle(t))}">${t.online
+            ? `<span class="badge${t.specCls === 'lossless' ? ' lossless' : ''}">${esc(t.specText || '在线')}</span>`
+            : `<span class="badge${t.lossless ? ' lossless' : ''}">${esc(t.ext || '')}</span><span class="q">${esc(fmtQuality(t))}</span>`}</div>
           <div class="c-dur">${fmtDuration(t.duration)}</div>
           ${acts}
         </div>`

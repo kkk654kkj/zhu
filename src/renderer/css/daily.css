@@ -21,7 +21,7 @@
 
 /* 表头与行共用同一份列定义：宽档 7 列全显 */
 #dailyPane .op-tr {
-  grid-template-columns: 34px minmax(0, 1.6fr) minmax(0, 1fr) 72px 58px 46px 74px;
+  grid-template-columns: 34px minmax(0, 1.6fr) minmax(0, 1fr) 72px 58px 46px 118px;
   gap: 10px;
 }
 
@@ -48,7 +48,7 @@
 /* 中档（520–620px 面板）：收窄固定列，把空间还给歌名 / 歌手 */
 @container (max-width: 620px) {
   #dailyPane .op-tr {
-    grid-template-columns: 28px minmax(0, 1.6fr) minmax(0, 1fr) 62px 54px 42px 64px;
+    grid-template-columns: 28px minmax(0, 1.6fr) minmax(0, 1fr) 62px 54px 42px 104px;
     gap: 8px;
   }
   #dailyPane .op-c-src .op-badge { max-width: 74px; }
@@ -57,7 +57,7 @@
 /* 窄档（< 520px 面板，例如 1080 宽窗口 + 歌词栏展开）：让出时长列，操作键收紧 */
 @container (max-width: 520px) {
   #dailyPane .op-tr {
-    grid-template-columns: 24px minmax(0, 1.6fr) minmax(0, 1fr) 58px 52px 56px;
+    grid-template-columns: 24px minmax(0, 1.6fr) minmax(0, 1fr) 58px 52px 104px;
     gap: 6px;
   }
   #dailyPane .op-c-dur { display: none; }

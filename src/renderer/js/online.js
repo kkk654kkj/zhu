@@ -495,6 +495,9 @@ const Online = {
       lossless: !!(resolved && resolved.lossless),
       isDsd: false,
       onlineBitrate: resolved ? resolved.bitrate : 0,
+      specText: (song._q && song._q.text) || '',
+      specCls: (song._q && song._q.cls) || 'dim',
+      specTip: (song._q && song._q.tip) || '',
       path: null
     }
   },
@@ -511,7 +514,7 @@ const Online = {
    * 只留「重播必须的最小集」：标题/歌手/时长/原音源/封面/标称音质。
    * 直链绝对不能存：签名分钟级过期，存下来只会让下次重播必然失败。
    */
-  metaOf(song) {
+  metaOf(song, spec) {
     return {
       id: this.keyOf(song),
       source: song.source,
@@ -522,6 +525,7 @@ const Online = {
       duration: Number(song.duration) || 0,
       cover: song.cover || '',
       quality: song.quality || '',
+      spec: spec || song._q || null,
       at: Date.now()
     }
   },
@@ -537,7 +541,8 @@ const Online = {
       album: meta.album || '',
       duration: Number(meta.duration) || 0,
       cover: meta.cover || null,
-      quality: meta.quality || ''
+      quality: meta.quality || '',
+      _q: meta.spec || null
     }
   },
 
@@ -581,7 +586,7 @@ const Online = {
     // 顺序不能反：主进程写完收藏会立刻按「仍被引用」清理元数据表，
     // 先收藏后存元数据会把这条刚加的记录当场剪掉。
     if (!on) {
-      const map = await window.api.onlineTracksRemember([this.metaOf(song)]).catch(() => null)
+      const map = await window.api.onlineTracksRemember([this.metaOf(song, song._q)]).catch(() => null)
       if (!map) { toast('收藏失败：在线曲目信息保存失败', 2500); return }
       this.syncOnlineMeta(map)
     }
@@ -599,7 +604,7 @@ const Online = {
     const song = this.list[i]
     if (!song) return
     if (!state.playlists.length) { toast('还没有歌单：先在左侧「新建歌单」', 2500); return }
-    const map = await window.api.onlineTracksRemember([this.metaOf(song)]).catch(() => null)
+    const map = await window.api.onlineTracksRemember([this.metaOf(song, song._q)]).catch(() => null)
     if (!map) { toast('加入歌单失败：在线曲目信息保存失败', 2500); return }
     this.syncOnlineMeta(map)
     currentMenuTrack = this.pseudoTrack(song)

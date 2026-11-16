@@ -109,6 +109,8 @@ const Daily = {
         e.stopPropagation()
         if (act.dataset.act === 'play') this.playAt(i)
         else if (act.dataset.act === 'download') this.downloadAt(i)
+        else if (act.dataset.act === 'fav') this.toggleFavAt(i)
+        else if (act.dataset.act === 'addpl') this.addPlaylistAt(i, act)
         return
       }
       if (e.target.closest('.btn-play-row')) this.playAt(i)
@@ -517,9 +519,14 @@ const Daily = {
     const badge = isLocal
       ? `<span class="op-badge daily-badge" title="${esc(x.reason)}">${esc(x.reason)}</span>`
       : `<span class="op-badge ${esc(t.source)}" title="${esc(x.reason)} · ${esc(this.srcName(t.source))}">${esc(x.reason)}</span>`
+    const key = isLocal ? t.id : Online.keyOf(t)
+    const favOn = state.favorites && state.favorites.has(key) ? ' on' : ''
     const acts = `<button class="op-act-btn" data-act="play" title="播放">${icon('play')}</button>` +
-      (isLocal ? '' : `<button class="op-act-btn" data-act="download" title="下载到本地">${icon('download')}</button>`)
-    return `<div class="op-tr" data-index="${i}"${isLocal ? '' : ` data-k="${esc(t.source + ':' + t.id)}"`}>
+      (isLocal ? '' :
+        `<button class="op-act-btn${favOn}" data-act="fav" aria-pressed="${favOn ? 'true' : 'false'}" title="${favOn ? '取消收藏' : '加入收藏'}">${icon('heart')}</button>` +
+        `<button class="op-act-btn" data-act="addpl" title="加入歌单" aria-label="加入歌单">${icon('plus')}</button>` +
+        `<button class="op-act-btn" data-act="download" title="下载到本地">${icon('download')}</button>`)
+    return `<div class="op-tr" data-index="${i}" data-id="${esc(key)}"${isLocal ? '' : ` data-k="${esc(t.source + ':' + t.id)}"`}>
       <div class="c-idx"><span class="num">${i + 1}</span><span class="btn-play-row">${icon('play')}</span></div>
       <div class="op-c-title"><span class="tt" title="${esc(title)}">${esc(title)}</span></div>
       <div class="op-c-artist" title="${esc(artist)}">${esc(artist)}</div>
@@ -618,6 +625,59 @@ const Daily = {
     } catch (err) {
       toast('播放失败：' + ((err && err.message) || err), 3000)
     }
+  },
+
+  /* ---------------- 收藏 / 加入歌单（v3.3.65：与在线搜索面板同款） ---------------- */
+
+  /** 行内 ♥：先落元数据（含探测档位）再写收藏，顺序反了会被 prune 当场剪掉 */
+  async toggleFavAt(i) {
+    const x = this.list[i]
+    if (!x || x.kind !== 'online') return
+    const song = x.song
+    const id = Online.keyOf(song)
+    const on = state.favorites.has(id)
+    if (!on) {
+      const map = await window.api.onlineTracksRemember([Online.metaOf(song, x.q)]).catch(() => null)
+      if (!map) { toast('收藏失败：在线曲目信息保存失败', 2500); return }
+      Online.syncOnlineMeta(map)
+    }
+    currentMenuTrack = Online.pseudoTrack(song)
+    currentMenuTracks = [currentMenuTrack]
+    try { await handleCtxAction('fav') }
+    catch (err) { toast('操作失败：' + ((err && err.message) || err), 2500) }
+    if (on) await window.api.onlineTracksGet().then((m) => Online.syncOnlineMeta(m)).catch(() => {})
+    this.paintFavRows()
+  },
+
+  /** 行内 ＋：加入歌单，复用在线搜索同一条菜单管道 */
+  async addPlaylistAt(i, btn) {
+    const x = this.list[i]
+    if (!x || x.kind !== 'online') return
+    if (!state.playlists.length) { toast('还没有歌单：先在左侧「新建歌单」', 2500); return }
+    const song = x.song
+    const map = await window.api.onlineTracksRemember([Online.metaOf(song, x.q)]).catch(() => null)
+    if (!map) { toast('加入歌单失败：在线曲目信息保存失败', 2500); return }
+    Online.syncOnlineMeta(map)
+    currentMenuTrack = Online.pseudoTrack(song)
+    currentMenuTracks = [currentMenuTrack]
+    const box = btn && btn.getBoundingClientRect ? btn.getBoundingClientRect() : null
+    UI.showContextMenu(
+      box ? box.left : 0,
+      box ? box.bottom + 6 : 0,
+      state.playlists.map((p) => ({ label: p.name, act: 'add-pl', arg: p.id }))
+    )
+  },
+
+  /** 收藏后把行内 ♥ 就地翻过来（opBody / dailyBody 都不走 UI.syncFavMarks 的 .tr 选择器） */
+  paintFavRows() {
+    document.querySelectorAll('#dailyBody .op-tr').forEach((row) => {
+      const btn = row.querySelector('.op-act-btn[data-act="fav"]')
+      if (!btn) return
+      const on = state.favorites.has(row.dataset.id)
+      btn.classList.toggle('on', on)
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false')
+      btn.title = on ? '取消收藏' : '加入收藏'
+    })
   },
 
   async downloadAt(i) {
