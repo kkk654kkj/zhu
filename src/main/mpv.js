@@ -105,6 +105,9 @@ class MpvEngine {
     this._retryTimer = null
     this._wdLogAt = new Map()   // 诊断轮：按原因节流 _wdDiag
     this._wantPlaying = false   // 诊断轮：播放意图（区分主动停止与异常 idle）
+    this._lastDur = 0           // 诊断轮 3：最近一次 duration
+    this._lastSeek = null       // 诊断轮 3：最近一次 seek 目标
+    this._lastEndReason = ''    // 诊断轮 3：最近一次 end-file reason
     // v3.3.13：load() 代次与「等 file-loaded」的续播等待者集合。
     // 用集合代替「临时替换 this.onEvent」的 wrapper，避免并发 restart 残留包装函数。
     this._loadSeq = 0
@@ -420,6 +423,7 @@ class MpvEngine {
         this.onEvent({ type: 'time', pos: this._lastPos })
         break
       case 'duration':
+        this._lastDur = typeof data === 'number' ? data : 0
         this.onEvent({ type: 'duration', duration: typeof data === 'number' ? data : 0 })
         break
       case 'pause':
@@ -431,6 +435,7 @@ class MpvEngine {
         // 不抑制：单曲循环第二遍（seek 回 0 后 eof-reached 翻 false 再翻 true）必须能再上报。
         if (data === true) {
           this._eofAt = Date.now()
+          this._wdDiag('eof-reached')
           this.onEvent({ type: 'eof' })
         }
         break
@@ -474,6 +479,8 @@ class MpvEngine {
       }
       case 'end-file': {
         const reason = msg.reason || ''
+        this._lastEndReason = reason
+        if (reason !== 'eof') this._wdDiag('end-file-' + (reason || 'unknown'))
         // mpv 在 AO 初始化失败时也会走 end-file/error，这里上报给上层决定是否回退共享
         if (reason === 'error') {
           // v3.3.20：把「AO 打不开」与「这个文件坏了」分开上报。
@@ -496,11 +503,11 @@ class MpvEngine {
           )
           this.onEvent({ type: 'file-error', message: detail, aoFailed })
         } else if (reason === 'eof') {
-          this._wdDiag('end-file-eof')
           // 与刚刚上报的 eof-reached 属于同一对（含切歌后才迟到的情况）→ 吞掉，
           // 只让渲染层收到一次曲末事件，避免一次曲末跳两首。
           // 700ms 之外的 end-file(eof) 视为独立事件上报（例如极慢的尾包 / 未观察到 eof-reached）。
           const paired = this._eofAt && Date.now() - this._eofAt < 700
+          this._wdDiag(paired ? 'end-file-eof-paired' : 'end-file-eof-standalone')
           this._eofAt = 0
           if (!paired) this.onEvent({ type: 'file-eof' })
         }
@@ -539,6 +546,7 @@ class MpvEngine {
   /* ---------------- 播放控制 ---------------- */
 
   load(filePath, { paused = false } = {}) {
+    this._lastSeek = null
     this._wantPlaying = !paused
     this._lastFile = filePath
     this._lastPos = 0
@@ -560,7 +568,7 @@ class MpvEngine {
   play() { this._wantPlaying = true; this._send(['set_property', 'pause', false]) }
   pause() { this._wantPlaying = false; this._send(['set_property', 'pause', true]) }
   stop() { this._wantPlaying = false; this._send(['stop']) }
-  seek(sec) { this._send(['seek', Math.max(0, sec), 'absolute']) }
+  seek(sec) { this._lastSeek = sec; this._wdDiag('seek'); this._send(['seek', Math.max(0, sec), 'absolute']) }
   setVolume(v01) {
     this._send(['set_property', 'volume', clamp01(v01) * 100])
   }
@@ -824,6 +832,9 @@ class MpvEngine {
         ready: this.ready, exclusive: this.exclusive, disposed: this._disposed,
         paused: this._paused, idle: this._idle, hasFile: !!this._lastFile,
         wantPlaying: !!this._wantPlaying,
+        pos: this._lastPos, dur: this._lastDur,
+        seek: this._lastSeek, endReason: this._lastEndReason,
+        eofAt: this._eofAt,
         ao: this._aoParams ? 'open' : 'null',
         fileLoadedAt: this._fileLoadedAt, loadAt: this._loadAt,
         aoLostAt: this._aoLostAt, attempts: this._recoverAttempts,
