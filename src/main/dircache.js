@@ -252,10 +252,22 @@ function cacheClear() {
   const idx = cacheLoad()
   const dir = cacheDirPath()
   let n = 0
+  // v2.8.53 / v3.3.62：删不掉的文件不能连索引一起清掉。
+  // Windows 上正被 mpv / <audio> 占用的缓存文件 unlink 必然 EPERM，以前这里
+  // 无条件 `cacheIdx = {}` → 文件留在盘上却失去索引，而 streamproxy 收尾
+  // 「见同名文件即早退、不再 cachePut」→ 这首缓存永久既不命中也不回收，
+  // 每次播放都重新下一遍（本轮审查 P1 的自锁环）。失败的条目留着下次再清。
+  const left = {}
   for (const k of Object.keys(idx)) {
     const fp = safeCacheFilePath(idx[k].file)
     if (!fp) continue
-    try { fs.unlinkSync(fp); n++ } catch (err) { /* 忽略 */ }
+    try {
+      fs.unlinkSync(fp)
+      n++
+    } catch (err) {
+      // ENOENT = 文件已经不在，索引项可以丢；其余（EPERM/EBUSY）保留
+      if (err.code !== 'ENOENT') left[k] = idx[k]
+    }
   }
   try {
     for (const f of fs.readdirSync(dir)) {
@@ -263,9 +275,9 @@ function cacheClear() {
       if (CACHE_PART_RE.test(f)) { try { fs.unlinkSync(path.join(dir, f)) } catch (err) { /* 忽略 */ } }
     }
   } catch (err) { /* 目录不存在 */ }
-  cacheIdx = {}
+  cacheIdx = left
   cacheSave()
-  return { removed: n }
+  return { removed: n, left: Object.keys(left).length }
 }
 
 function cacheStats() {
