@@ -30,6 +30,10 @@ const ok = (name, cond, extra = '') => {
 
 /* ---------- 打桩装载真实 streamproxy.js ---------- */
 const fakeDC = {
+  // v2.8.53 / v3.3.62：finishCache 收尾要看索引里有没有这条 key ——
+  // 只判「同名文件在不在」会让清缓存后被占用的孤儿文件永久占位（自锁）。
+  _idx: {},
+  cacheLoad: () => fakeDC._idx,
   cacheHit: () => null,
   cacheTry: () => null,
   cacheClassOf: () => 'mp3',
@@ -302,6 +306,30 @@ function resetCacheDir() {
   ok('不缓存时音频照常转发', res.writes.length === 1 && res.ended === true,
     'chunks=' + res.writes.length)
   resetCacheDir()
+}
+
+/* ---------- ⑦ 索引里没有的孤儿缓存文件必须被覆盖重建（自锁环回归） ---------- */
+{
+  resetCacheDir()
+  let put = null
+  fakeDC._idx = {}                                   // 索引为空 = 清缓存后文件被占用的状态
+  fakeDC.cachePut = (key, file, meta, size) => { put = { key, file, size } }
+  initG({ store: { get: () => ({ settings: { onlineCacheOn: true } }) } })
+  // 预先在目标位置放一个「孤儿」：索引里没有它，但文件还在
+  fs.mkdirSync(TEST_CACHE, { recursive: true })
+  fs.writeFileSync(path.join(TEST_CACHE, 'key.mp3'), Buffer.alloc(1024, 0xEE))
+  stubUpstream([Buffer.alloc(6000, 5)])
+  const req = { url: '/stream?src=kg&id=orphan&q=best&t=&a=&d=0', headers: {}, method: 'GET' }
+  const res = new FakeRes()
+  await SP.handleStreamRequest(req, res)
+  global.fetch = REAL_FETCH
+  const target = path.join(TEST_CACHE, 'key.mp3')
+  const size = fs.existsSync(target) ? fs.statSync(target).size : 0
+  ok('孤儿缓存文件被新数据覆盖并重新登记索引（不再永久自锁）',
+    size === 6000 && put && put.size === 6000,
+    'size=' + size + ' put=' + JSON.stringify(put))
+  resetCacheDir()
+  fakeDC._idx = {}
 }
 
 console.log(fail ? `\n${pass} 通过 / ${fail} 失败` : `\n全部通过（${pass} 项）`)

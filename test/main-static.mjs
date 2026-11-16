@@ -803,8 +803,28 @@ function main() {
       const chain = spawnSync(process.execPath, ['test/stream-chain.mjs'], {
         cwd: ROOT, encoding: 'utf8'
       })
-      ok('流式链路运行时单测 stream-chain（16 项：降级 / 背压 / 低速 / 落盘 / 残片）',
+      ok('流式链路运行时单测 stream-chain（17 项：降级 / 背压 / 低速 / 落盘 / 残片 / 孤儿缓存）',
         chain.status === 0, (chain.stdout || '').trim().split('\n').slice(-1)[0])
+
+      // v2.8.53 / v3.3.62：完整性判据不许 fail-open
+      ok('206 必须凭 Content-Range 证明覆盖到 total-1 才算整段（缺头不再默认为真）',
+        /const crCoversAll = upstream\.status === 206/.test(spSrc) &&
+        /crTotal > 0 && !Number\.isNaN\(crEnd\) && crEnd === crTotal - 1/.test(spSrc) &&
+        !/const crCoversAll = !crTotal \|\|/.test(spSrc))
+
+      ok('收尾只看「文件在不在」的早退已改成「索引里有没有这条 key」',
+        /const idxNow = DC\.cacheLoad\(\)/.test(spSrc) &&
+        /fs\.existsSync\(target2\) && idxNow && idxNow\[key\]/.test(spSrc))
+
+      ok('下载器：无 Content-Length 时不再静默当成功，改为标记 unverified',
+        /if \(!task\.total\) \{/.test(read('src/main/downloader.js')) &&
+        /task\.unverified = true/.test(read('src/main/downloader.js')) &&
+        !/if \(task\.total && task\.received \+ 1024 < task\.total\) throw/.test(read('src/main/downloader.js')))
+
+      ok('清缓存：删不掉的条目保留索引（不再无条件 cacheIdx = {}）',
+        /const left = \{\}/.test(read('src/main/dircache.js')) &&
+        /if \(err\.code !== 'ENOENT'\) left\[k\] = idx\[k\]/.test(read('src/main/dircache.js')) &&
+        /cacheIdx = left/.test(read('src/main/dircache.js')))
 
       ok('转发顺序：先 res.write 给 <audio>，缓存只做同步投递，不再一见背压就丢',
         /if \(!res\.write\(buf\)\) await waitDrain\(res\)\r?\n      if \(cacheWrite\) cacheWrite\(buf\)/.test(spSrc) &&
@@ -902,7 +922,7 @@ function main() {
       const wd = spawnSync(process.execPath, ['test/mpv-watchdog.mjs'], {
         cwd: ROOT, encoding: 'utf8'
       })
-      ok('独占看门狗运行时单测 mpv-watchdog（17 项：AO 兜底 / 坏帧静默 / 曲末 idle 恢复）',
+      ok('独占看门狗运行时单测 mpv-watchdog（19 项：AO 兜底 / 坏帧静默 / 曲末 idle 恢复 / pause 轴）',
         wd.status === 0, (wd.stdout || '').trim().split('\n').slice(-1)[0])
 
       const eofLoop = spawnSync(process.execPath, ['test/eof-loop.mjs'], {
