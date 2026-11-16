@@ -800,7 +800,7 @@ function main() {
   const wd = spawnSync(process.execPath, ['test/mpv-watchdog.mjs'], {
     cwd: ROOT, encoding: 'utf8'
   })
-  ok('独占看门狗运行时单测 mpv-watchdog（10 项：宽限边界 / 坏帧静默 / 诊断日志）',
+  ok('独占看门狗运行时单测 mpv-watchdog（12 项：宽限边界 / 坏帧静默 / wantPlaying 诊断）',
     wd.status === 0, (wd.stdout || '').trim().split('\n').slice(-1)[0])
   ok('file-loaded 不来时用 load 时刻兜底，起播宽限不再永久豁免',
     /const graceBase = this\._fileLoadedAt \|\| this\._loadAt/.test(mvSrc) &&
@@ -816,6 +816,11 @@ function main() {
     /_wdDiag\(/.test(mvSrc) &&
     /wd-diag/.test(mgrSrc) &&
     /G\.logLine\('\[wd\] '/.test(mgrSrc))
+  ok('诊断轮 2：wantPlaying 进快照、异常 idle 单列原因，恢复判定未改',
+    /wantPlaying: !!this\._wantPlaying/.test(mvSrc) &&
+    /this\._wantPlaying = !paused/.test(mvSrc) &&
+    /idle-while-want-playing/.test(mvSrc) &&
+    /this\._aoLostAt = 0\n      return/.test(mvSrc))
 
   }
 

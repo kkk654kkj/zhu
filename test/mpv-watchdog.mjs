@@ -130,6 +130,36 @@ function makeEngine(events, over = {}) {
     JSON.stringify(diag))
 }
 
+/* ---------- ⑦ 播放意图：区分主动停止与异常 idle ---------- */
+{
+  const events = []
+  const e = makeEngine(events, { _aoLostAt: 0 })
+  e.load('D:/music/x.flac', { paused: false })
+  const afterLoad = e._wantPlaying
+  e.play()
+  e._wdDiag('unit-probe')
+  const st = (events.find((x) => x.type === 'wd-diag') || {}).state || {}
+  e.pause()
+  const afterPause = e._wantPlaying
+  e.stop()
+  ok('load/play/pause/stop 维护 wantPlaying，并写进诊断快照',
+    afterLoad === true && st.wantPlaying === true && afterPause === false && e._wantPlaying === false,
+    JSON.stringify({ afterLoad, st, afterPause, afterStop: e._wantPlaying }))
+}
+
+/* ---------- ⑧ 异常 idle 单独标注（判定仍不变） ---------- */
+{
+  const events = []
+  const e = makeEngine(events, { _idle: true, _paused: false, _aoLostAt: 0 })
+  e._wantPlaying = true
+  e._lastFile = 'D:/music/x.flac'
+  e._wdTick()
+  ok('想播却 idle 时日志标 idle-while-want-playing，且 aoLostAt 仍被清零（判定未改）',
+    events.some((x) => x.type === 'wd-diag' && x.reason === 'idle-while-want-playing') &&
+    e._aoLostAt === 0,
+    JSON.stringify(events.map((x) => x.reason)))
+}
+
 if (savedMute === undefined) delete process.env.LX_TEST_MUTE
 else process.env.LX_TEST_MUTE = savedMute
 
