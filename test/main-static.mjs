@@ -1039,6 +1039,72 @@ function main() {
         !/console\.error\('\[store\] 读取失败/.test(stSrc63) &&
         /this\.onError\('\[store\] 读取失败/.test(stSrc63) &&
         /STORE_RECOVERED/.test(mjSrc))
+
+      // ===== v3.3.64 在线曲目收藏 / 加入歌单（每条对应一处改动，回退即报红） =====
+      const olSrc64 = read('src/renderer/js/online.js')
+      const appSrc64 = read('src/renderer/js/app.js')
+      const uiSrc64 = read('src/renderer/js/ui.js')
+
+      ok('v3.3.64：在线曲目元数据单独落盘（主进程三接口 + prune + 默认值）',
+        /function pruneOnlineTracks\(\)/.test(mjSrc) &&
+        /handle\('online:tracksGet'/.test(mjSrc) &&
+        /handle\('online:tracksRemember'/.test(mjSrc) &&
+        /handle\('online:tracksForget'/.test(mjSrc) &&
+        /onlineTracks: \{\}/.test(mjSrc))
+
+      ok('v3.3.64：收藏/歌单变更后按「仍被引用」清理元数据（不会无限膨胀也不会误删）',
+        // 清理规则本体在 online-meta.js（可单测），这边只认调用点
+        /OMETA\.pruneToRefs\(g\.onlineTracks, g\.favorites, g\.playlists\)/.test(mjSrc) &&
+        /const OMETA = require\('\.\/online-meta'\)/.test(mjSrc) &&
+        // 五个入口逐个点名：少一个都有「取消收藏后元数据永久残留」的漏口
+        /store\.patch\(\{ favorites: out \}\)[\s\S]{0,40}pruneOnlineTracks\(\)/.test(mjSrc) &&
+        /store\.patch\(\{ favorites: favs \}\)[\s\S]{0,40}pruneOnlineTracks\(\)/.test(mjSrc) &&
+        /pl\.trackIds\.push\(t\)[\s\S]{0,80}pruneOnlineTracks\(\)/.test(mjSrc) &&
+        /pl\.trackIds = pl\.trackIds\.filter[\s\S]{0,120}pruneOnlineTracks\(\)/.test(mjSrc) &&
+        /store\.patch\(\{ playlists: \(store\.get\(\)\.playlists \|\| \[\]\)\.filter[\s\S]{0,120}pruneOnlineTracks\(\)/.test(mjSrc))
+
+      ok('v3.3.64：preload 暴露三个元数据接口',
+        /onlineTracksGet: \(\) => invoke\('online:tracksGet'\)/.test(read('src/main/preload.js')) &&
+        /onlineTracksRemember: \(metas\) => invoke\('online:tracksRemember', metas\)/.test(read('src/main/preload.js')))
+
+      ok('v3.3.64：在线行尾有 ♥ 收藏与 ＋ 加入歌单（状态跟 state.favorites 走）',
+        /data-act="fav" aria-pressed/.test(olSrc64) &&
+        /data-act="addpl"/.test(olSrc64) &&
+        /const favOn = state\.favorites && state\.favorites\.has\(id\)/.test(olSrc64) &&
+        /async toggleFavAt\(i\)/.test(olSrc64) &&
+        /async addPlaylistAt\(i, btn\)/.test(olSrc64))
+
+      ok('v3.3.64：先写元数据再写收藏/歌单（顺序反了会被 prune 当场剪掉）',
+        /onlineTracksRemember\(\[this\.metaOf\(song\)\]\)[\s\S]{0,400}handleCtxAction\('fav'\)/.test(olSrc64) &&
+        /onlineTracksRemember\(\[this\.metaOf\(song\)\]\)[\s\S]{0,1100}showContextMenu/.test(olSrc64))
+
+      ok('v3.3.64：resolveTrack 覆盖收藏/歌单/最近播放/会话恢复（在线 id 不再被 filter 掉）',
+        /function resolveTrack\(id\)/.test(appSrc64) &&
+        /state\.onlineMeta\.get\(id\)[\s\S]{0,120}Online\.trackFromMeta/.test(appSrc64) &&
+        /state\.favorites\)\.map\(\(id\) => resolveTrack\(id\)\)/.test(appSrc64) &&
+        /pl\.trackIds\.map\(\(id\) => resolveTrack\(id\)\)/.test(appSrc64) &&
+        !/const track = state\.byId\.get\(row\.dataset\.id\)/.test(appSrc64))
+
+      ok('v3.3.64：原音源失效时换源重试一次，失败才跳曲（notePlaybackFailure 复用）',
+        /async function recoverOnlineTrack\(cur\)/.test(appSrc64) &&
+        /function notePlaybackFailure\(cur\)/.test(appSrc64) &&
+        /cur\.onlineMeta && !state\.fallbackTried\.has\(cur\.id\)/.test(appSrc64) &&
+        /const song = await Online\.recoverFromSources\(meta\)/.test(appSrc64) &&
+        /return bestScore >= 60 \? best : null/.test(olSrc64))
+
+      ok('v3.3.64：元数据表整表替换用 setKey（patch 走 deepMerge 不删键，清不掉旧条目）',
+        (mjSrc.match(/store\.setKey\('onlineTracks'/g) || []).length >= 3 &&
+        !/store\.patch\(\{ onlineTracks/.test(mjSrc))
+
+      ok('v3.3.64：收藏/入歌单后同步渲染层元数据（否则「我的收藏」要重启才看得见）',
+        /syncOnlineMeta\(map\)/.test(olSrc64) &&
+        (olSrc64.match(/this\.syncOnlineMeta\(map\)/g) || []).length >= 2 &&
+        /state\.onlineMeta = new Map\(Object\.entries\(map\)\)/.test(olSrc64))
+
+      ok('v3.3.64：混排列表里在线曲带「在线」标记 + 行尾五键列宽',
+        /tag-online/.test(uiSrc64) &&
+        /#onlinePane \.op-tr \{[\s\S]{0,160}150px/.test(read('src/renderer/css/online.css')) &&
+        /css\/online\.css/.test(read('src/renderer/index.html')))
     }
 
   }
