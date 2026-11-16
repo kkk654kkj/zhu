@@ -849,11 +849,24 @@ class MpvEngine {
     if (!this.ready || !this.exclusive || this._disposed) { this._wdDiag('engine-not-ready'); return }
     // v3.3.13：测试静音（--ao=null）不参与独占判定
     if (process.env.LX_TEST_MUTE === '1') return
-    if (this._idle || this._paused || !this._lastFile) {
-      this._wdDiag(this._idle && this._wantPlaying && this._lastFile
-        ? 'idle-while-want-playing' : 'paused-or-idle')
+    if (this._paused || !this._lastFile) {
+      this._wdDiag('paused-or-idle')
       this._aoLostAt = 0
       return
+    }
+    // v2.8.52 / v3.3.61：mpv 曲末 end-file(eof) 会卸载文件并进 idle。
+    // 以前把 idle 无条件当「正常空闲」跳过，_aoLostAt 每秒被清零，于是
+    // 「想播 + 有文件 + AO 却关着」时 2.5 秒判定永远凑不满 → 永久无声。
+    // 只有用户主动停止（wantPlaying=false）才是真空闲；异常 idle 继续走恢复判定。
+    if (this._idle && !this._wantPlaying) {
+      this._wdDiag('idle-after-stop')
+      this._aoLostAt = 0
+      return
+    }
+    if (this._idle) {
+      this._wdDiag('idle-while-want-playing')
+      // 渲染层刚发的 reload 在途时给 2 秒窗口，避免 reload 与 restart 抢同一首
+      if (Date.now() - this._loadAt < 2000) { this._aoLostAt = 0; return }
     }
     // 主动状态判定：AO 参数回来就清零计数（H2 的关键）
     if (this._aoParams) {

@@ -800,7 +800,7 @@ function main() {
   const wd = spawnSync(process.execPath, ['test/mpv-watchdog.mjs'], {
     cwd: ROOT, encoding: 'utf8'
   })
-  ok('独占看门狗运行时单测 mpv-watchdog（15 项：宽限边界 / 坏帧静默 / EOF 时序诊断）',
+  ok('独占看门狗运行时单测 mpv-watchdog（17 项：AO 兜底 / 坏帧静默 / 曲末 idle 恢复）',
     wd.status === 0, (wd.stdout || '').trim().split('\n').slice(-1)[0])
   ok('file-loaded 不来时用 load 时刻兜底，起播宽限不再永久豁免',
     /const graceBase = this\._fileLoadedAt \|\| this\._loadAt/.test(mvSrc) &&
@@ -816,16 +816,32 @@ function main() {
     /_wdDiag\(/.test(mvSrc) &&
     /wd-diag/.test(mgrSrc) &&
     /G\.logLine\('\[wd\] '/.test(mgrSrc))
-  ok('诊断轮 2：wantPlaying 进快照、异常 idle 单列原因，恢复判定未改',
+  ok('诊断轮 2：wantPlaying 进快照；异常 idle 单独标注',
     /wantPlaying: !!this\._wantPlaying/.test(mvSrc) &&
     /this\._wantPlaying = !paused/.test(mvSrc) &&
-    /idle-while-want-playing/.test(mvSrc) &&
-    /this\._aoLostAt = 0\n      return/.test(mvSrc))
-  ok('诊断轮 3：EOF 时序（pos/dur/seek/配对结果）写进快照，恢复判定未改',
+    /idle-while-want-playing/.test(mvSrc))
+  ok('诊断轮 3：EOF 时序（pos/dur/seek/配对结果）写进快照',
     /pos: this\._lastPos, dur: this\._lastDur/.test(mvSrc) &&
     /end-file-eof-paired/.test(mvSrc) &&
     /end-file-eof-standalone/.test(mvSrc) &&
     /this\._wdDiag\('seek'\)/.test(mvSrc))
+
+  const plSrc2 = read('src/renderer/js/player.js')
+  const eofLoop = spawnSync(process.execPath, ['test/eof-loop.mjs'], {
+    cwd: ROOT, encoding: 'utf8'
+  })
+  ok('曲末循环运行时单测 eof-loop（6 项：旧写法不重载 / 新写法自动重载）',
+    eofLoop.status === 0, (eofLoop.stdout || '').trim().split('\n').slice(-1)[0])
+  ok('v2.8.52：曲末单曲循环不再先 seek(0)，ended 态直接 play() 触发重载',
+    (plSrc2.match(/if \(this\.audio\.ended\) this\.play\(\)/g) || []).length === 2 &&
+    !/this\._endingHandled = false\n      this\.seek\(0\)/.test(plSrc2))
+  ok('MpvAudio currentTime setter 会复位 _ended（先 seek(0) 会让 play() 重载分支失效）',
+    /set currentTime\(v\)[\s\S]{0,400}this\._ended = false/.test(maSrc) &&
+    /if \(this\._ended && this\._srcPath\)[\s\S]{0,300}this\.load\(\)/.test(maSrc))
+  ok('v2.8.52：异常 idle（wantPlaying=true）继续走 2.5 秒恢复，不再静默清零',
+    /if \(this\._idle && !this\._wantPlaying\)/.test(mvSrc) &&
+    /if \(this\._idle\) \{[\s\S]{0,500}Date\.now\(\) - this\._loadAt < 2000/.test(mvSrc) &&
+    !/if \(this\._idle \|\| this\._paused \|\| !this\._lastFile\)/.test(mvSrc))
 
   }
 
