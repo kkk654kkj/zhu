@@ -850,6 +850,50 @@ function main() {
     /if \(this\._wantPlaying\) this\._send\(\['set_property', 'pause', false\]\)/.test(mvSrc) &&
     /const wantResume = wasPlaying \|\| this\._wantPlaying/.test(mvSrc))
 
+  // ===== v2.8.54 独立复核后的修复哨兵（每条对应一处修复，回退即报红） =====
+  {
+    const mj63 = read('src/main/main.js')
+    const st63 = read('src/main/store.js')
+    const pl63 = read('src/renderer/js/player.js')
+    const sc63 = read('src/renderer/js/shortcuts.js')
+    const sel63 = read('src/renderer/js/selection.js')
+    const scan63 = read('src/renderer/js/scan.js')
+    const pre63 = read('src/main/preload.js')
+    const menus63 = read('src/renderer/js/menus.js')
+
+    ok('v2.8.54：settings 不再把私有凭据下发给渲染层',
+      /function publicSettings\(s\)[\s\S]{0,300}delete out\.onlineChkszKey/.test(mj63) &&
+      /handle\('settings:get', \(\) => publicSettings\(store\.get\(\)\.settings\)\)/.test(mj63) &&
+      /return publicSettings\(next\)/.test(mj63))
+
+    ok('v2.8.54：批量收藏一次落盘（favorites:setMany + preload + 渲染层不再串行循环）',
+      /handle\('favorites:setMany'/.test(mj63) &&
+      /setFavoritesMany: \(ids, fav\) => invoke\('favorites:setMany'/.test(pre63) &&
+      !/for \(const t of targets\) \{[\s\S]{0,120}toggleFavorite\(t\.id\)/.test(menus63))
+
+    ok('v2.8.54：随机模式放完一轮也算整队播完（queue-end 会发）',
+      /this\._shuffleWrapped = true/.test(pl63) &&
+      /if \(this\._shuffleWrapped && auto && !fromError\) this\.emit\('queue-end'\)/.test(pl63))
+
+    ok('v2.8.54：按住键不连发（e.repeat 守卫）+ 卡片视图选中态会刷新',
+      /if \(e\.repeat\) return/.test(sc63) &&
+      /#tableBody \.tr, #tableBody \.mc/.test(sel63))
+
+    ok('v2.8.54：保存音乐目录失败不关弹窗、不静默（try/catch 后才 hideDirModal）',
+      /patchSettings\(\{ musicDirs: draftDirs\.slice\(\), watchFolders \}\)[\s\S]{0,200}UI\.hideDirModal\(\)/.test(scan63) &&
+      /catch \(err\) \{\n      toast\('保存失败：'/.test(scan63))
+
+    ok('v2.8.54：引擎 stop() 不再同名重复定义；补刀条件不再被 p.killed 短路',
+      (mvSrc.match(/^  (async )?stop\(/gm) || []).length === 1 &&
+      /p\.exitCode === null\) p\.kill\('SIGKILL'\)/.test(mvSrc) &&
+      /catch \{ wasPlaying = false \}/.test(mvSrc))
+
+    ok('v2.8.54：配置读失败走 onError（能落进 lx-player.log）',
+      !/console\.error\('\[store\] 读取失败/.test(st63) &&
+      /this\.onError\('\[store\] 读取失败/.test(st63) &&
+      /STORE_RECOVERED/.test(mj63))
+  }
+
   }
 
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
