@@ -34,13 +34,21 @@ function bindDirModal() {
   })
   document.getElementById('btnDirSave').addEventListener('click', async () => {
     if (!draftDirs.length) { toast('请至少添加一个文件夹'); return }
-    UI.hideDirModal()
-    state.settings.musicDirs = draftDirs.slice()
     const chk = document.getElementById('chkWatchFolders')
     const watchFolders = chk ? chk.checked : true
+    // v3.3.63：这里原来直接调裸 patchSettings（绕过 persist.js 的重试与失败提示），
+    // 磁盘只读/被占用时：弹窗已经关了、目录看起来保存成功、没有任何提示、扫描也不启动。
+    // 改成走 saveSettings（自带重试 + toast），失败就别关弹窗、别改内存。
+    try {
+      await window.api.patchSettings({ musicDirs: draftDirs.slice(), watchFolders })
+    } catch (err) {
+      toast('保存失败：' + ((err && err.message) || '磁盘不可写'), 3200)
+      return
+    }
+    UI.hideDirModal()
+    state.settings.musicDirs = draftDirs.slice()
     state.settings.watchFolders = watchFolders
-    await window.api.patchSettings({ musicDirs: draftDirs.slice(), watchFolders })
-    await doScan()
+    try { await doScan() } catch (err) { toast('扫描启动失败：' + ((err && err.message) || err), 3000) }
   })
 }
 

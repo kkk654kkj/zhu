@@ -55,6 +55,8 @@ contextBridge.exposeInMainWorld('api', {
   // 收藏 / 历史 / 次数 / 会话
   getFavorites: () => invoke('favorites:get'),
   toggleFavorite: (trackId) => invoke('favorites:toggle', trackId),
+  /** v3.3.63：批量收藏/取消（多选时一次 IPC，避免 N 次串行往返 + N 次整份 settings fsync） */
+  setFavoritesMany: (ids, fav) => invoke('favorites:setMany', { ids, fav }),
   getHistory: () => invoke('history:get'),
   addHistory: (trackId) => invoke('history:add', trackId),
   getPlayCounts: () => invoke('playcount:get'),
@@ -196,7 +198,8 @@ contextBridge.exposeInMainWorld('api', {
   powerCancel: () => invoke('power:cancel'),
   /** 播放结束后动作被触发/取消（界面用它显示倒计时与取消按钮） */
   onPowerAction: (cb) => on('power-action', cb),
-  // 第四轮 §6.4：onPowerAfterQueue 是死接线（主进程从不发 power-after-queue），已移除
+  // v3.3.63：onPowerAfterQueue 无消费方；主进程侧那两处 send 也已删除（原来只删监听，
+  // 注释写「主进程从不发」，与实际相反）。播放结束后动作靠 power:set 返回值 + power-action 推送。
   /** 独占输出设备被拔掉 / 插回来 */
   onDeviceLost: (cb) => on('device-lost', cb),
   /** 第二实例带来的关联文件路径 */

@@ -3,7 +3,10 @@
 /* ================= 列表多选（v1.7） ================= */
 
 function paintSelection() {
-  document.querySelectorAll('#tableBody .tr').forEach((row) => {
+  // v3.3.63：卡片视图的行元素是 .mc 而不是 .tr —— 以前只刷 .tr，网格里 Ctrl 多选后
+  // 卡片表面没有任何高亮，但「已选 N 首」已经在计数，批量收藏/删歌单会作用到
+  // 用户看不见的选中项上（同文件里 ui.js 的另两处早就是双选择器了）
+  document.querySelectorAll('#tableBody .tr, #tableBody .mc').forEach((row) => {
     row.classList.toggle('selected', state.selected.has(row.dataset.id))
   })
   // 多选工具条（v2.6）：有选中才浮现

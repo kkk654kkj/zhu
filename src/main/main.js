@@ -592,7 +592,19 @@ function createWindow() {
   // 这里挡住一切非本应用页面（devtools 与内置页面除外），与渲染层的全局 preventDefault 纵深配合。
   win.webContents.on('will-navigate', (event, targetUrl) => {
     const cur = win.webContents.getURL() || ''
-    const isSelf = targetUrl === cur || targetUrl.startsWith('file://' + __dirname.replace(/\\/g, '/'))
+    // v3.3.63：以前是 targetUrl.startsWith('file://' + __dirname) —— Windows 上真实 URL 是
+    // file:///D:/...（三斜杠），这个前缀永远匹配不上，等于只剩「等于当前页」一条判据。
+    // 现在按 URL 解析后比较所在目录，语义与注释一致（同目录的本地页面才允许）。
+    const isSelf = (() => {
+      if (targetUrl === cur) return true
+      try {
+        const t = new URL(targetUrl)
+        const c = new URL(cur)
+        if (t.protocol !== 'file:' || c.protocol !== 'file:') return false
+        const dirOf = (u) => path.dirname(decodeURIComponent(u.pathname)).toLowerCase()
+        return dirOf(t) === dirOf(c)
+      } catch (e) { return false }
+    })()
     if (!isSelf) {
       event.preventDefault()
       logLine('[win] 已拦截页面导航：' + String(targetUrl).slice(0, 120))
@@ -671,7 +683,9 @@ function setPowerAfterQueue(kind) {
   logLine('[power] 播放结束后：' + powerAfterQueue)
   store.patch({ settings: { powerAfterQueue } })
   refreshTrayMenu()
-  sendToRenderer('power-after-queue', powerAfterQueue)
+  // v3.3.63：这里与 runPowerAction 以前各推一次 'power-after-queue'，但 preload 里
+  // 对应的 onPowerAfterQueue 已在「死接线清理」时移除（渲染层无消费方，界面读的是
+  // settings + power-action）。两处一起删掉，别留「注释说没有、代码在发」的状态。
 }
 
 /**
@@ -683,7 +697,6 @@ function runPowerAction() {
   const kind = powerAfterQueue
   powerAfterQueue = 'off'
   store.patch({ settings: { powerAfterQueue: 'off' } })
-  sendToRenderer('power-after-queue', 'off')
   sendToRenderer('power-action', { kind, delay: 15 })
   logLine('[power] 队列结束，执行 ' + kind + '（15 秒内可在托盘取消）')
 
@@ -1099,6 +1112,13 @@ let lyricWatch = []
 /** 当前在看的歌词文件（rename 后用它重建监视） */
 let currentLyricFiles = []
 
+/**
+ * v3.3.63：lyric:read 的代次。handler 里有两处 await（stat / readFile），快速切歌时
+ * 先发起的调用可能后返回，把 watcher 挂到**上一首**的文件上 —— 症状是「改了 .lrc
+ * 歌词界面不刷新」，只有再切一次歌才恢复。所有 watchLyricFile 都先比代次。
+ */
+let lyricWatchSeq = 0
+
 function watchLyricFile(files, trackId) {
   for (const w of lyricWatch) { try { w.close() } catch (err) { /* 忽略 */ } }
   lyricWatch = []
@@ -1321,9 +1341,22 @@ function registerLibraryIpc() {
 }
 
 /** 设置读写：patch 走键白名单 + 形状校验；目录/监视开关变化后重挂 watcher */
+/**
+ * v3.3.63：settings 里混着主进程私有凭据（onlineChkszKey），不能整份下发到渲染层。
+ * 「填没填」这种信息走 online:extraKeyGet（只回头尾掩码）。
+ */
+function publicSettings(s) {
+  if (!s || typeof s !== 'object') return s
+  // 用浅拷贝 + delete，不用解构 rest —— 本仓库的 check-decls 扫描器不认 rest 变量，
+  // 会把它报成「引用了但没声明」。
+  const out = Object.assign({}, s)
+  delete out.onlineChkszKey
+  return out
+}
+
 function registerSettingsIpc() {
   // —— 设置 ——
-  ipcMain.handle('settings:get', () => store.get().settings)
+  ipcMain.handle('settings:get', () => publicSettings(store.get().settings))
   ipcMain.handle('settings:patch', (e, patch) => {
     const before = store.get().settings || {}
     // v3.3.13：键白名单 + 按 DEFAULT_SETTINGS 形状做值校验 + 递归防原型污染
@@ -1340,7 +1373,7 @@ function registerSettingsIpc() {
     if (JSON.stringify(next.musicDirs || []) !== prevDirs || next.watchFolders !== prevWatch) {
       startWatching()
     }
-    return next
+    return publicSettings(next)
   })
 
 }
@@ -1473,6 +1506,22 @@ function registerUserDataIpc() {
     store.patch({ favorites: favs })
     return favs
   })
+  /**
+   * v3.3.63：批量收藏/取消。
+   *
+   * 以前渲染层对 N 首选中曲目串行调 N 次 favorites:toggle —— 每首一次 IPC 往返，
+   * 且每次 store.patch 都要「原子写 tmp + fsync + rename」整份 settings.json。
+   * 全选几十首点收藏就是几十次同步 fsync，右键菜单看着像卡死。
+   */
+  ipcMain.handle('favorites:setMany', (e, { ids, fav } = {}) => {
+    const list = Array.isArray(ids) ? ids.filter((x) => typeof x === 'string' && x) : []
+    if (!list.length) return store.get().favorites || []
+    const set = new Set(store.get().favorites || [])
+    for (const id of list) { if (fav) set.add(id); else set.delete(id) }
+    const out = Array.from(set)
+    store.patch({ favorites: out })
+    return out
+  })
 
   ipcMain.handle('history:get', () => store.get().history || [])
   ipcMain.handle('history:add', (e, trackId) => {
@@ -1511,9 +1560,12 @@ function registerLyricIpc() {
    * 现在渲染层用 mtime 判断要不要重新读；文件一改还会推 lyric:changed 让它立刻刷新。
    */
   ipcMain.handle('lyric:read', async (e, trackId) => {
+    // v3.3.63：本调用一旦过期（用户又切了歌），就只返回文本、不再改 watcher
+    const seq = ++lyricWatchSeq
+    const watch = (files, id) => { if (seq === lyricWatchSeq) watchLyricFile(files, id) }
     const track = library.get(trackId)
     if (!track) {
-      watchLyricFile(null)
+      watch(null)
       return null
     }
 
@@ -1530,25 +1582,25 @@ function registerLyricIpc() {
     if (lrc && lrcMtime && lrcMtime >= audioMtime) {
       try {
         const buf = await fsp.readFile(lrc)
-        watchLyricFile([lrc, audio], trackId)
+        watch([lrc, audio], trackId)
         return { text: PROTO.decodeText(buf), mtimeMs: lrcMtime, source: 'lrc' }
       } catch (err) { /* 读不到就往下试内嵌 */ }
     }
 
     const emb = await readEmbeddedCached(trackId, audio, audioMtime)
     if (emb) {
-      watchLyricFile([audio], trackId)
+      watch([audio], trackId)
       return { text: emb, mtimeMs: audioMtime, source: 'embedded' }
     }
 
     if (lrc) {
       try {
         const buf = await fsp.readFile(lrc)
-        watchLyricFile([lrc], trackId)
+        watch([lrc], trackId)
         return { text: PROTO.decodeText(buf), mtimeMs: lrcMtime, source: 'lrc' }
       } catch (err) { /* 忽略 */ }
     }
-    watchLyricFile(null)
+    watch(null)
     return null
   })
 
@@ -2148,10 +2200,15 @@ function registerWindowIpc() {
   /* v2.8.32：改事件驱动。v2.8.27 的 16ms 定时器轮询 cursor 实测只有
      34.6fps（60 次光标移动仅 34 次窗口更新），且每帧 screen.getCursorScreenPoint()
      + 同步 setBounds 双重开销。渲染层 pointermove（rAF 节流）送相对按下点的
-     累计位移，这里只按位移落一次 setBounds，与合成器节奏对齐。 */
+     累计位移，这里只按位移落一次 setBounds，与合成器节奏对齐。
+     v3.3.63：入参先过 Number.isFinite —— 否则 base.x + undefined 得 NaN，
+     setBounds 收到 NaN 会抛 TypeError，异常从 ipcMain 回调逸出到 uncaughtException，
+     表现是「拖到一半不跟手了」且只能重启。 */
   ipcMain.on('win:drag-move', (e, dx, dy) => {
     if (!win || win.isDestroyed() || !windowDragBase || !windowDragOrigin) return
     if (BrowserWindow.fromWebContents(e.sender) !== win) return
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return
+    if (Math.abs(dx) > 20000 || Math.abs(dy) > 20000) return
     const x = windowDragBase.x + dx
     const y = windowDragBase.y + dy
     // 位移没变就不调 setBounds —— 每次调用都要过一遍 DIP↔物理换算
@@ -2638,6 +2695,14 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       session: null,
       window: {}
     }, { onError: (msg) => logLine('STORE_ERROR', msg) })
+    // v3.3.63：读取失败回落默认值时必须在日志里留一条显眼的记录 ——
+    // 否则用户只看到「歌单全没了」，事后连从哪儿捡回来都不知道。
+    if (store._recovered) {
+      logLine('STORE_RECOVERED settings.json 读取失败，已回落默认值' +
+        (store._unreadableBackup
+          ? '（原文件已备份为 ' + store._unreadableBackup + '）'
+          : '（原文件未能备份，请手工保留 ' + path.join(userData, 'settings.json') + '）'))
+    }
     // v2.1：恢复「播放结束后」的设定（关机这类动作要跨重启记住）
     powerAfterQueue = store.get().settings.powerAfterQueue || 'off'
 

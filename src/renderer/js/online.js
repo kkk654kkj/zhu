@@ -36,6 +36,7 @@ const Online = {
   playingId: null,     // 当前正在播的在线曲目 id（on:<src>:<id>）
   probeToken: 0,       // 音质探测轮次（换关键词就作废上一轮）
   _searchRound: 0,     // 新搜索轮次（play 解析期间发起新搜索就作废旧收尾）
+  _searchReq: 0,       // v3.3.63：搜索请求代次（换关键词可抢占在途请求，旧结果回来后整包丢弃）
   sources: [],         // 全部可用源（主进程返回）
   proxyBase: '',       // 本地代理基地址 http://127.0.0.1:<port>
   enabled: new Set(),  // 本次参与搜索的源
@@ -310,7 +311,12 @@ const Online = {
     const input = document.getElementById('opInput')
     const kw = (input.value || '').trim()
     if (!kw) { input.focus(); return }
-    if (this.loading) return
+    // v3.3.63：以前是一把 loading 布尔锁 —— 搜索最长要十几秒（四家并发，单源超时 15s），
+    // 期间「加载更多」和「换关键词回车」都被静默吞掉，界面上没有任何反馈，看着像卡死。
+    // 现在：换关键词（reset）可以抢占旧的，旧结果回来时代次对不上就丢弃；
+    // 只有「加载更多」在搜索中才拒绝，并且明确提示，不再无声无息。
+    if (this.loading && !reset) { toast('正在搜索，请稍候', 1500); return }
+    const reqId = ++this._searchReq
     this.loading = true
     if (reset) this._searchRound++
     this.keyword = kw
@@ -326,6 +332,8 @@ const Online = {
         limit: 30,
         sources: Array.from(this.enabled)
       })
+      // 已被更新的一轮搜索取代：结果整体丢弃，别把旧词的结果写进新词的列表
+      if (reqId !== this._searchReq) return
       const list = (r && r.list) || []
       const appendFrom = reset ? 0 : this.list.length
       if (reset) {
@@ -359,6 +367,7 @@ const Online = {
       )
       if (!this.list.length) this.setStatus('没搜到结果，换个关键词试试', false)
     } catch (err) {
+      if (reqId !== this._searchReq) return
       // v3.3.7：失败要回滚 page —— 以前 page 已经 +1，下次「加载更多」
       // 直接请求下下页，中间一页结果永久丢失
       if (!reset) this.page = Math.max(1, this.page - 1)
@@ -367,8 +376,10 @@ const Online = {
       const keep = reset ? '' : '（下面仍是上一次的结果）'
       this.setStatus('搜索失败：' + esc(err.message || '网络异常') + keep, this.hasMore)
     } finally {
-      this.loading = false
-      if (btn) btn.disabled = false
+      if (reqId === this._searchReq) {
+        this.loading = false
+        if (btn) btn.disabled = false
+      }
     }
   },
 
@@ -636,7 +647,10 @@ const Online = {
       let barCls = ''
       let acts = ''
       if (t.status === 'done') {
-        line = '已完成 · ' + mb(t.received) + ' · ' + String(t.ext || '').toUpperCase()
+        // v3.3.63：上游没给 Content-Length 的（chunked）无法校验完整性，
+        // 主进程已置 unverified —— 界面上必须能看见，否则用户以为是完整文件。
+        line = '已完成 · ' + mb(t.received) + ' · ' + String(t.ext || '').toUpperCase() +
+          (t.unverified ? ' · <span style="color:var(--warn,#d9a300)">⚠ 长度未知，可能不完整</span>' : '')
         barCls = ' done'
         acts = `<button data-act="reveal">打开位置</button><button data-act="delete">移除</button>`
       } else if (t.status === 'paused') {

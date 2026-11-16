@@ -24,6 +24,19 @@ const CACHE_INDEX = 'index.json'
 
 let cacheIdx = null // { <key>: { file, title, artist, ext, size, at } }
 
+/**
+ * v3.3.63：索引「读失败但不该动它」的标记。
+ *
+ * 以前任何读取异常都走「当成损坏 → rename 备份 → 回落空表 → 后续落盘写空表」，
+ * 而杀软/索引器瞬时锁文件（EPERM/EBUSY/EACCES）与真正的 JSON 损坏在 catch 里
+ * 长得一模一样：好索引被改名，空表覆盖回去，磁盘上的缓存文件全部变成永远命中
+ * 不到的孤儿。现在把三类失败分开：
+ *  - ENOENT      → 首次运行，静默空表；
+ *  - SyntaxError → 真损坏，备份留证后空表；
+ *  - 其余（占用/权限）→ 本次会话可读可用，但**禁止回写**（cacheLoadBlocked）。
+ */
+let cacheLoadBlocked = false
+
 /** 原子写 JSON：先写唯一临时文件并 fsync，再 rename，崩溃时不会截断索引 */
 function atomicWriteJson(file, obj) {
   const tmp = file + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8)
@@ -57,20 +70,35 @@ function cacheLoad() {
     if (j && typeof j === 'object' && !Array.isArray(j)) cacheIdx = j
     else throw new Error('索引结构损坏')
   } catch (err) {
-    // v3.3.13：损坏的索引先备份，别让一次崩溃把全部缓存记录弄丢
-    try {
-      if (fs.existsSync(idxFile)) {
-        fs.renameSync(idxFile, idxFile + '.corrupt-' + Date.now())
-        G.logLine('[cache] 索引损坏已备份', err.message)
-      }
-    } catch (e) { /* 忽略 */ }
-    cacheIdx = {}
+    // 首次运行：没有索引文件，正常
+    if (err && err.code === 'ENOENT') { cacheIdx = {}; return cacheIdx }
+    // 真的坏了（JSON 解析失败 / 顶层结构不对）：备份留证，别让一次崩溃把记录全丢掉
+    if (err instanceof SyntaxError || err.message === '索引结构损坏') {
+      try {
+        if (fs.existsSync(idxFile)) {
+          fs.renameSync(idxFile, idxFile + '.corrupt-' + Date.now())
+          G.logLine('[cache] 索引损坏已备份', err.message)
+        }
+      } catch (e) { /* 忽略 */ }
+      cacheIdx = {}
+      return cacheIdx
+    }
+    // 占用 / 权限 / 句柄耗尽：磁盘上的索引可能是好的，本次会话照常用内存空表，
+    // 但不许回写，否则会把好索引覆盖成空表（v3.3.63）
+    cacheLoadBlocked = true
+    G.logLine('[cache] 索引读取失败（本次会话不写索引，原文件保留）', (err && (err.code || err.message)) || '')
   }
   return cacheIdx
 }
 
 function cacheSave() {
   try {
+    // v3.3.63：索引读不出来（被占用/无权限）时禁止回写 —— 内存里是空表，写下去就把
+    // 磁盘上可能完好的索引覆盖掉了，缓存文件立刻全部变孤儿。
+    if (cacheLoadBlocked) {
+      G.logLine('[cache] 跳过索引写入（本次会话读索引失败）')
+      return
+    }
     // v3.3.58：cacheIdx 还没 load 过（本次会话没碰过缓存）时不能写空表。
     // 退出链的 finishQuit 会无条件补一次 cacheSave，以前直接写 {}，把磁盘上
     // 完好的 index.json 覆盖掉 —— 所有缓存文件变成永远命不中的孤儿，
@@ -191,7 +219,10 @@ function cachePut(key, file, meta, size) {
     size,
     at: Date.now()
   }
-  cacheSave()
+  // v3.3.63：这里以前同步 cacheSave()（writeFileSync + fsyncSync + renameSync），
+  // 每缓存完一首就在主进程做一次 fsync（机械盘/杀软下几十 ms），正好压在「刚起播」上。
+  // 改走已有的 1s 去抖；退出链的 finishQuit 会无条件补一次 cacheSave()，不会丢。
+  cacheSaveSoon()
   cacheEvict()
 }
 

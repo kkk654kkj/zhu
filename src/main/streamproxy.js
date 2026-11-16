@@ -169,9 +169,16 @@ function startStreamServer() {
     // 否则 ensureStreamBase() 永久 pending，所有在线播放无声无息挂死且无提示
     if (!streamBase) { try { readyResolve('') } catch (e) { /* 已 resolve */ } }
   })
-  streamServer.listen(0, '127.0.0.1', () => {
-    const port = streamServer.address().port
-    streamBase = `http://127.0.0.1:${port}`
+  // v3.3.63：回调里不能再用模块变量 streamServer —— closeStreamServer() 在监听完成前
+  // 跑过（退出瞬间）会把它置 null，`streamServer.address()` 抛 TypeError 冒到
+  // uncaughtException；而且孤儿 resolve 还会把 streamBase 写成死端口，本会话在线播放
+  // 全部 502 且不会自愈。这里锁住本次要监听的实例并比对。
+  const srv = streamServer
+  srv.listen(0, '127.0.0.1', () => {
+    if (!srv || streamServer !== srv) return
+    const addr = srv.address()
+    if (!addr) return
+    streamBase = `http://127.0.0.1:${addr.port}`
     G.logLine('[online] 代理就绪', streamBase)
     readyResolve(streamBase)
   })
