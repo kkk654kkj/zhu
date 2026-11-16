@@ -1075,8 +1075,8 @@ function main() {
         /async addPlaylistAt\(i, btn\)/.test(olSrc64))
 
       ok('v3.3.64：先写元数据再写收藏/歌单（顺序反了会被 prune 当场剪掉）',
-        /onlineTracksRemember\(\[this\.metaOf\(song\)\]\)[\s\S]{0,400}handleCtxAction\('fav'\)/.test(olSrc64) &&
-        /onlineTracksRemember\(\[this\.metaOf\(song\)\]\)[\s\S]{0,1100}showContextMenu/.test(olSrc64))
+        /onlineTracksRemember\(\[this\.metaOf\(song[\s\S]{0,30}\)\]\)\.[\s\S]{0,400}handleCtxAction\('fav'\)/.test(olSrc64) &&
+        /onlineTracksRemember\(\[this\.metaOf\(song[\s\S]{0,30}\)\]\)\.[\s\S]{0,1100}showContextMenu/.test(olSrc64))
 
       ok('v3.3.64：resolveTrack 覆盖收藏/歌单/最近播放/会话恢复（在线 id 不再被 filter 掉）',
         /function resolveTrack\(id\)/.test(appSrc64) &&
@@ -1105,6 +1105,54 @@ function main() {
         /tag-online/.test(uiSrc64) &&
         /#onlinePane \.op-tr \{[\s\S]{0,160}150px/.test(read('src/renderer/css/online.css')) &&
         /css\/online\.css/.test(read('src/renderer/index.html')))
+    }
+
+    // ===== v3.3.65 每日推荐对齐在线收藏 + 在线曲规格档位（回退即报红） =====
+    {
+      const omSrc = read('src/main/online-meta.js')
+      const dSrc65 = read('src/renderer/js/daily.js')
+      const olSrc65 = read('src/renderer/js/online.js')
+      const uiSrc65 = read('src/renderer/js/ui.js')
+      const dcSrc65 = read('src/renderer/css/daily.css')
+
+      ok('v3.3.65：主进程校验探测档位（cls 白名单 + text/tip 限长）',
+        /function sanitizeSpec\(sp\)/.test(omSrc) &&
+        /text: clip\(sp\.text, 24\)/.test(omSrc) &&
+        /\['lossless', 'high', 'ok', 'dim', ''\]\.includes\(cls\)/.test(omSrc) &&
+        /spec: sanitizeSpec\(m\.spec\)/.test(omSrc))
+
+      ok('v3.3.65：metaOf 落盘探测档位、songFromMeta 还原、toTrack 挂展示字段',
+        /metaOf\(song, spec\)/.test(olSrc65) &&
+        /spec: spec \|\| song\._q \|\| null/.test(olSrc65) &&
+        /_q: meta\.spec \|\| null/.test(olSrc65) &&
+        /specText: \(song\._q && song\._q\.text\)/.test(olSrc65))
+
+      ok('v3.3.65：收藏/入歌单落盘时带探测档位',
+        (olSrc65.match(/onlineTracksRemember\(\[this\.metaOf\(song, song\._q\)\]/g) || []).length === 2)
+
+      ok('v3.3.65：每日推荐行尾 ♥/＋ 与本地兜底行隔离',
+        /data-act="fav" aria-pressed/.test(dSrc65) &&
+        /data-act="addpl"/.test(dSrc65) &&
+        /async toggleFavAt\(i\)/.test(dSrc65) &&
+        /async addPlaylistAt\(i, btn\)/.test(dSrc65) &&
+        /\(isLocal \? '' :/.test(dSrc65))
+
+      ok('v3.3.65：每日推荐收藏先落元数据（含 x.q）再写引用 + 同步渲染层',
+        (dSrc65.match(/onlineTracksRemember\(\[Online\.metaOf\(song, x\.q\)\]/g) || []).length === 2 &&
+        /Online\.syncOnlineMeta\(map\)/.test(dSrc65) &&
+        /paintFavRows\(\)/.test(dSrc65))
+
+      ok('v3.3.65：规格列在线曲读档位文本，无档位显示「在线」占位（不动本地曲）',
+        /t\.specText \|\| '在线'/.test(uiSrc65) &&
+        /!t\.online && isHires\(t\)/.test(uiSrc65) &&
+        /t\.specTip \|\| '在线曲目：播放时按原音源解析实际档位'/.test(uiSrc65))
+
+      ok('v3.3.65：每日推荐末列按 4 键放宽（118/104/104），不动共享 app.css',
+        /46px 118px/.test(dcSrc65) && /42px 104px/.test(dcSrc65) && /52px 104px/.test(dcSrc65) &&
+        /css\/daily\.css/.test(read('src/renderer/index.html')))
+
+      ok('v3.3.65：新增 daily-fav 单测入库且覆盖 11 项',
+        (read('test/daily-fav.mjs').match(/\bok\(/g) || []).length >= 11)
     }
 
   }

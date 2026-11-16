@@ -105,6 +105,13 @@ ok('meta → 可播曲目：id 与代理地址都对', rt && rt.id === meta.id &
 ok('meta → 曲目时挂上 onlineMeta（换源兜底要用）', rt && rt.onlineMeta === meta)
 ok('脏元数据不造出空曲目', Online.trackFromMeta({ source: 'kw' }) === null && Online.trackFromMeta(null) === null)
 
+// v3.3.65：探测档位随元数据落盘并还原（规格列读它，没探到走「在线」占位）
+const probe = { text: '母带', cls: 'lossless', tip: '高解析 FLAC · 3200k', rank: 3 }
+const metaSpec = Online.metaOf(song, probe)
+ok('v3.3.65：metaOf 落盘探测档位', metaSpec.spec && metaSpec.spec.text === '母带' && metaSpec.spec.cls === 'lossless')
+ok('v3.3.65：档位还原到 track，老条目为空串（渲染层给「在线」占位）',
+  Online.trackFromMeta(metaSpec).specText === '母带' && Online.trackFromMeta(meta).specText === '')
+
 // matchScore：换源时「宁可不播也不放错歌」
 const base = { title: '晴天', artist: '周杰伦', duration: 269 }
 ok('同名同歌手同时长 → 高分', Online.matchScore({ ...base }, meta) >= 80)
