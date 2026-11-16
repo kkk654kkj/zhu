@@ -976,6 +976,69 @@ function main() {
         /end-file-eof-paired/.test(mvSrc) &&
         /end-file-eof-standalone/.test(mvSrc) &&
         /this\._wdDiag\('seek'\)/.test(mvSrc))
+
+      // ===== v3.3.63 独立审查后的修复哨兵（每条对应一处修复，回退即报红） =====
+      const stSrc63 = read('src/main/store.js')
+      const dlSrc63 = read('src/main/downloader.js')
+      const dcSrc63 = read('src/main/dircache.js')
+      const spSrc63 = read('src/main/streamproxy.js')
+      const plSrc63 = read('src/renderer/js/player.js')
+      const scSrc63 = read('src/renderer/js/shortcuts.js')
+      const selSrc63 = read('src/renderer/js/selection.js')
+      const scanSrc63 = read('src/renderer/js/scan.js')
+      const preSrc63 = read('src/main/preload.js')
+
+      ok('v3.3.63：settings 不再把 onlineChkszKey 明文下发给渲染层',
+        /function publicSettings\(s\)[\s\S]{0,400}delete out\.onlineChkszKey/.test(mjSrc) &&
+        /handle\('settings:get', \(\) => publicSettings\(store\.get\(\)\.settings\)\)/.test(mjSrc) &&
+        /return publicSettings\(next\)/.test(mjSrc))
+
+      ok('v3.3.63：批量收藏一次落盘（favorites:setMany + preload + 渲染层不再串行循环）',
+        /handle\('favorites:setMany'/.test(mjSrc) &&
+        /setFavoritesMany: \(ids, fav\) => invoke\('favorites:setMany'/.test(preSrc63) &&
+        !/for \(const t of targets\) \{[\s\S]{0,120}toggleFavorite\(t\.id\)/.test(read('src/renderer/js/menus.js')))
+
+      ok('v3.3.63：下载任务「无法校验」标记能传到界面（DTO 带 unverified）',
+        /unverified: !!t\.unverified/.test(dlSrc63) &&
+        /t\.unverified \?/.test(read('src/renderer/js/online.js')))
+
+      ok('v3.3.63：续传按同一资源判断 + 总长度比对（签名变化不再白下）',
+        /function dlSameResource\(a, b\)/.test(dlSrc63) &&
+        /!dlSameResource\(tgt\.url, info\.url\)/.test(dlSrc63) &&
+        /Math\.abs\(total - tgt\.total\) > 1/.test(dlSrc63) &&
+        /tgt: dlTargetCache\.get\(t\.id\) \|\| null/.test(dlSrc63))
+
+      ok('v3.3.63：索引读失败（占用/权限）不回写空表；cachePut 走去抖不再同步 fsync',
+        /cacheLoadBlocked = true/.test(dcSrc63) &&
+        /if \(cacheLoadBlocked\) \{[\s\S]{0,160}return/.test(dcSrc63) &&
+        /cacheSaveSoon\(\)\r?\n  cacheEvict\(\)/.test(dcSrc63) &&
+        /code === 'ENOENT'\) \{ cacheIdx = \{\}; return cacheIdx \}/.test(dcSrc63))
+
+      ok('v3.3.63：随机模式放完一轮也算整队播完（queue-end 会发）',
+        /this\._shuffleWrapped = true/.test(plSrc63) &&
+        /if \(this\._shuffleWrapped && auto && !fromError\) this\.emit\('queue-end'\)/.test(plSrc63))
+
+      ok('v3.3.63：按住键不连发（e.repeat 守卫）+ 卡片视图选中态会刷新',
+        /if \(e\.repeat\) return/.test(scSrc63) &&
+        /#tableBody \.tr, #tableBody \.mc/.test(selSrc63))
+
+      ok('v3.3.63：保存音乐目录失败不关弹窗、不静默（try/catch 后才 hideDirModal）',
+        /patchSettings\(\{ musicDirs: draftDirs\.slice\(\), watchFolders \}\)[\s\S]{0,200}UI\.hideDirModal\(\)/.test(scanSrc63) &&
+        /catch \(err\) \{\n      toast\('保存失败：'/.test(scanSrc63))
+
+      ok('v3.3.63：引擎 stop() 不再同名重复定义；补刀条件不再被 p.killed 短路',
+        (mvSrc.match(/^  (async )?stop\(/gm) || []).length === 1 &&
+        /p\.exitCode === null\) p\.kill\('SIGKILL'\)/.test(mvSrc) &&
+        /catch \{ wasPlaying = false \}/.test(mvSrc))
+
+      ok('v3.3.63：代理端口回调锁实例（退出期不再 null.address 崩溃/写死端口）',
+        /const srv = streamServer/.test(spSrc63) &&
+        /if \(!srv \|\| streamServer !== srv\) return/.test(spSrc63))
+
+      ok('v3.3.63：配置读失败走 onError（能落进 lx-player.log）',
+        !/console\.error\('\[store\] 读取失败/.test(stSrc63) &&
+        /this\.onError\('\[store\] 读取失败/.test(stSrc63) &&
+        /STORE_RECOVERED/.test(mjSrc))
     }
 
   }
