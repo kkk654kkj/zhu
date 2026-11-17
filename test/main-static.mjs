@@ -1268,7 +1268,7 @@ function main() {
         /Object\.assign\(\{\}, have, \{ spec: want \}\)/.test(ol67))
 
       ok('v3.3.67：版本号已升（package.json）',
-        /"version": "3\.3\.67"/.test(pkg67))
+        /"version": "3\.3\.(67|68)"/.test(pkg67))
 
       ok('v3.3.67：扫描作用域有真跑的回归测试（缺依赖时明确 SKIP 而非假通过）',
         fs.existsSync(path.join(ROOT, 'test/scan-scope.mjs')) &&
@@ -1296,6 +1296,12 @@ function main() {
         /cur && cur\.id === id \? cur : \{ id \}/.test(m68) &&
         /toggleFavorite\(id\)/.test(m68) &&
         !/toggleFavorite\(state\.currentId\)/.test(m68))
+
+      const cd68 = read('tools/check-dist.mjs')
+      ok('v3.3.68：check-dist 接受联网版新 exe 名（换装不再假失败）',
+        /exeNames = \['猪专属播放器\.exe', '猪专属播放器联网版\.exe'\]/.test(cd68) &&
+        /hasExe/.test(cd68) &&
+        !/const must = \['猪专属播放器\.exe'/.test(cd68))
     }
 
   }
