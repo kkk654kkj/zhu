@@ -10,8 +10,17 @@ if (!dir) {
   process.exit(2)
 }
 
-const must = ['猪专属播放器.exe', 'resources/app.asar', 'engine/mpv.exe', '启动播放器.vbs', 'icon.ico']
+// v3.3.68：联网版自 v3.3.67 起只保留「猪专属播放器联网版.exe」；
+// 本地版仍是「猪专属播放器.exe」。两者取其一即可，不能写死旧名让联网版换装假失败。
+const exeNames = ['猪专属播放器.exe', '猪专属播放器联网版.exe']
+const must = ['resources/app.asar', 'engine/mpv.exe', '启动播放器.vbs', 'icon.ico']
 const soft = ['data/settings.json', '使用说明.txt']
+
+const hasExe = exeNames.some((n) => {
+  try { return fs.statSync(path.join(dir, n)).size > 0 } catch { return false }
+})
+console.log((hasExe ? '✓ ' : '✗ ') + '主程序 exe（' + exeNames.join(' / ') + '）')
+if (!hasExe) bad++
 
 const MAX_ASAR_JSON = 64 * 1024 * 1024   // 损坏的 asar 头可能给出巨量长度，必须封顶再 Buffer.alloc
 
