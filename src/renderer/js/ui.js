@@ -80,6 +80,8 @@ const UI = {
         <a class="nav-item" data-view="${esc(p.id)}" data-playlist="${esc(p.id)}" title="${esc(p.name)}">
           ${icon('album')}<span>${esc(p.name)}</span><b>${p.trackIds ? p.trackIds.length : 0}</b>
         </a>
+        <button class="pl-del" type="button" data-playlist="${esc(p.id)}"
+          aria-label="删除歌单" title="删除歌单">${icon('trash')}</button>
       </div>`).join('')
   },
 
@@ -116,6 +118,11 @@ const UI = {
     this._tTracks = tracks
     this._tCtx = ctx || {}
     this._tCurrentId = this._tCtx.currentId || null
+    // v3.3.67：keepScroll —— 同一视图内因播放/计数/收藏刷新而重画时保住滚动位置。
+    // 以前一律回顶：在「最近播放」里边听边翻，每切一首就被弹回第一行。
+    const keepScroll = !!this._tCtx.keepScroll
+    const scroller = this.els.viewScroll
+    const prevTop = scroller ? scroller.scrollTop : 0
     host.classList.toggle('grid-mode', !!this.gridMode)
     if (!tracks.length) {
       if (this._vl) { this._vl.destroy(); this._vl = null }
@@ -125,7 +132,6 @@ const UI = {
       return
     }
     this._syncGridVars()
-    const scroller = this.els.viewScroll
     // 虚拟滚动内核（vlist.js）：列表与网格共用一套，行高/行数由回调给
     if (!this._vl && scroller) {
       this._vl = createVList({
@@ -137,8 +143,10 @@ const UI = {
       })
     }
     // 与旧实现（innerHTML 重建后浏览器自动回顶）行为一致：切视图/排序/搜索回顶部
-    if (scroller && scroller.scrollTop) scroller.scrollTop = 0
+    if (scroller && !keepScroll && scroller.scrollTop) scroller.scrollTop = 0
     if (this._vl) this._vl.reset()
+    // 虚拟滚动内核 reset 后按原位恢复（行数变化时由浏览器自行夹到合法范围）
+    if (keepScroll && scroller && prevTop) scroller.scrollTop = prevTop
     this._markSortHeader(this._tCtx.sortKey, this._tCtx.sortDir)
   },
 

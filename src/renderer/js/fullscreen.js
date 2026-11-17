@@ -21,9 +21,13 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && UI.isFullscreen()) {
       e.preventDefault()
+      // v3.3.67：Esc 在这里只防了默认行为。全屏页开着时同一个 Esc 还会被
+      // 主界面的全局快捷键/弹层处理再吃一遍（关面板、清搜索、取消关机倒计时），
+      // 一次按键做两件事。全屏的「退出」优先，截住这次事件。
+      e.stopPropagation()
       UI.setFullscreen(false)
     }
-  })
+  }, true)
 
   /* v2.8.37 / v3.3.45：全屏页自己的播放队列入口。
      复用主界面的 #queuePanel（同一份 UI.renderQueue / 清空 / 行尾 ×），

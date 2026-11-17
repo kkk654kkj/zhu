@@ -624,7 +624,21 @@ const Online = {
     const id = track.id || (track.source ? this.keyOf(track) : '')
     if (!id) return false
     if (id.indexOf('on:') !== 0) return true
-    if (state.onlineMeta && state.onlineMeta.has(id)) return true
+    // v3.3.67：已存档位优先；但「先收藏、后探测」时旧条目没有 spec —— 那时要把
+    // 新探测结果补进去。以前 has(id) 就直接 return true，收藏页永远显示「在线」。
+    const have = state.onlineMeta && state.onlineMeta.get ? state.onlineMeta.get(id) : null
+    if (have) {
+      const want = spec || (track && track._q) || null
+      const hasSpec = !!(have.spec && (have.spec.text || have.spec.cls))
+      if (!want || hasSpec) return true
+      try {
+        const map = await window.api.onlineTracksRemember([Object.assign({}, have, { spec: want })])
+        this.syncOnlineMeta(map)
+      } catch (err) {
+        console.error('[online] rememberTrack 补档位失败', err)
+      }
+      return true
+    }
     let meta = null
     if (track.onlineMeta && track.onlineMeta.id === id) {
       // 已有落盘条目（重复收藏 / 换源后重播）：只补 spec，不覆盖旧档位
@@ -668,8 +682,8 @@ const Online = {
     if (!song) return
     const id = this.keyOf(song)
     const on = state.favorites.has(id)
-    // 顺序不能反：主进程写完收藏会立刻按「仍被引用」清理元数据表，
-    // 先收藏后存元数据会把这条刚加的记录当场剪掉。
+    // 先把元数据落盘再写收藏：prune 只删「无人引用」的条目，先后本身不影响结果；
+    // 这样收藏写入失败时也能明确回滚，不会留下半条记录。
     if (!on) {
       const map = await window.api.onlineTracksRemember([this.metaOf(song, song._q)]).catch(() => null)
       if (!map) { toast('收藏失败：在线曲目信息保存失败', 2500); return }
@@ -967,7 +981,7 @@ const Online = {
       }
       return `<div class="dl-item" data-id="${esc(t.id)}">
         <div class="dl-top">
-          <span class="dl-name" title="${esc(t.artist + ' - ' + t.title)}">${esc(t.title || '未知歌曲')}</span>
+          <span class="dl-name" title="${esc((t.artist ? t.artist + ' - ' : '') + (t.title || '未知歌曲'))}">${esc(t.title || '未知歌曲')}</span>
           <span class="dl-pct">${t.status === 'done' ? '100%' : (t.total ? pct + '%' : '')}</span>
         </div>
         <div class="dl-sub">${esc(t.artist || '')} · <span class="dl-line">${esc(line)}${warn ? ' · <span class="dl-warn" style="color:var(--warn,#d9a300)">' + esc(warn) + '</span>' : ''}</span></div>

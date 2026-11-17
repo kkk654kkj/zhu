@@ -121,7 +121,11 @@ class MpvEngine {
   }
 
   get running() {
-    return !!(this.proc && !this.proc.killed)
+    // v3.3.67：补 exitCode 判据。spawn 失败/进程已退但还没触发 close 的窗口里，
+    // proc 仍在、killed 仍是 false，旧判据会返回 true → start() 走「已在运行」直接
+    // 成功返回，实际没有任何引擎，播放全部静默失败。
+    if (!this.proc || this.proc.killed) return false
+    return this.proc.exitCode === null && this.proc.signalCode === null
   }
 
   /** 启动引擎进程（幂等）。返回 {ok, exclusive, error} */

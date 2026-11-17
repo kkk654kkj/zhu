@@ -969,7 +969,8 @@ function startWatching() {
   stopWatching()
   const s = store.get().settings
   if (s.watchFolders === false) { logLine('[watch] 已关闭'); return }
-  const dirs = Array.isArray(s.musicDirs) ? s.musicDirs.filter(Boolean) : []
+  const dirs = (Array.isArray(s.musicDirs) ? s.musicDirs.filter(Boolean) : [])
+    .filter((d) => typeof d === 'string' && PROTO.isSafeMediaRoot(d))
   for (const dir of dirs) {
     try {
       const w = fs.watch(dir, { recursive: true }, (evt, filename) => {
@@ -1415,12 +1416,26 @@ function registerPlaylistIpc() {
     store.patch({ playlists: list })
     return item
   })
-  ipcMain.handle('playlists:update', (e, { id, patch }) => {
+  ipcMain.handle('playlists:update', (e, payload) => {
+    const { id, patch } = payload && typeof payload === 'object' ? payload : {}
+    if (typeof id !== 'string' || !id) return null
     const list = store.get().playlists || []
     const idx = list.findIndex((p) => p.id === id)
     if (idx < 0) return null
-    list[idx] = { ...list[idx], ...patch }
+    // v3.3.67：只放行展示字段。以前整段 spread：patch 能覆盖 id、
+    // trackIds 传字符串会逐字符入库（'abc' → 'a','b','c'），且换 trackIds 后
+    // onlineTracks 不会 prune → 留下永远显示不出来的孤儿元数据。
+    const safe = {}
+    if (patch && typeof patch === 'object') {
+      if (typeof patch.name === 'string' && patch.name.trim()) safe.name = patch.name.trim().slice(0, 80)
+      if (typeof patch.cover === 'string') safe.cover = patch.cover
+      if (Array.isArray(patch.trackIds)) {
+        safe.trackIds = patch.trackIds.filter((t) => typeof t === 'string' && t)
+      }
+    }
+    list[idx] = { ...list[idx], ...safe }
     store.patch({ playlists: list })
+    if (safe.trackIds) pruneOnlineTracks()
     return list[idx]
   })
   ipcMain.handle('playlists:remove', (e, id) => {
@@ -1468,7 +1483,10 @@ function registerPlaylistIpc() {
     for (const t of tracks) {
       const rel = path.relative(base, t.path)
       const useRel = rel && !rel.startsWith('..') && !path.isAbsolute(rel)
-      lines.push(useRel ? rel : t.path)
+      const line = useRel ? rel : t.path
+      // v3.3.67：以 '#' 开头的行会被 m3u 解析当作注释/指令（导入处也是这么判的），
+      // 文件名恰好以 # 开头时加 './' 前缀，保证能原样导回来
+      lines.push(line.startsWith('#') ? './' + line : line)
     }
     try {
       fs.writeFileSync(filePath, lines.join('\r\n') + '\r\n', 'utf8')
@@ -1589,6 +1607,9 @@ function registerUserDataIpc() {
 
   ipcMain.handle('history:get', () => store.get().history || [])
   ipcMain.handle('history:add', (e, trackId) => {
+    // v3.3.67：与 favorites:toggle 同一把尺子 —— 非字符串 id 会污染 history/playCounts
+    // （对象键被强转成 '[object Object]'，purge/prune 的 keep 集合对不上）
+    if (typeof trackId !== 'string' || !trackId) return false
     const hist = (store.get().history || []).filter((h) => h.id !== trackId)
     hist.unshift({ id: trackId, at: Date.now() })
     store.patch({ history: hist.slice(0, 300) })
@@ -1597,6 +1618,7 @@ function registerUserDataIpc() {
 
   ipcMain.handle('playcount:get', () => store.get().playCounts || {})
   ipcMain.handle('playcount:inc', (e, trackId) => {
+    if (typeof trackId !== 'string' || !trackId) return 0
     const pc = store.get().playCounts || {}
     pc[trackId] = (pc[trackId] || 0) + 1
     store.patch({ playCounts: pc })
@@ -2841,12 +2863,22 @@ if (gotLock) cleanChromiumCache().catch(() => {})
     // 设置里开了「启动时扫描音乐文件夹」也会自动扫一次（增量、很快）。
     const needScan = library.list().length === 0 || store.get().settings.autoScanOnStart === true
     if (needScan) {
-      const run = library.scan(store.get().settings.musicDirs, (p) => {
-        sendToRenderer('lib:scan-progress', {
-          phase: p.phase, done: p.done, total: p.total,
-          track: p.track ? toClientTrack(p.track) : null
+      // v3.3.67：启动扫描与 lib:scan 用同一把尺子。以前直接用 settings.musicDirs ——
+      // settings.json 被手改/被旧版本写进盘符根、系统目录、UNC、设备路径时，
+      // 会把整个盘（或共享树）当媒体库索引，曲库瞬间被无关文件撑爆。
+      const startDirs = (store.get().settings.musicDirs || [])
+        .filter((d) => typeof d === 'string' && PROTO.isSafeMediaRoot(d))
+      if (!startDirs.length && library.list().length === 0) {
+        logLine('[library] 启动扫描跳过：没有可用的音乐目录')
+      }
+      const run = startDirs.length
+        ? library.scan(startDirs, (p) => {
+          sendToRenderer('lib:scan-progress', {
+            phase: p.phase, done: p.done, total: p.total,
+            track: p.track ? toClientTrack(p.track) : null
+          })
         })
-      })
+        : Promise.resolve({ skipped: true, reason: 'no-safe-dirs' })
       activeScan = run
       run
         .then((res) => {

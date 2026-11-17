@@ -297,12 +297,19 @@ body.win-dragging #galleryView { backdrop-filter: none !important; }
 .pl-item { position: relative; }
 .pl-item .pl-del {
   opacity: 0;
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
   width: 20px; height: 20px;
   display: grid; place-items: center;
   border-radius: 4px;
   color: var(--txt-3);
+  /* v3.3.67：模板补上删除按钮后它才真正出现在 DOM 里，补定位与键盘可达 */
+  background: transparent; border: 0; padding: 0; cursor: pointer;
 }
+.pl-item .pl-del:focus-visible { opacity: 1; outline: 1px solid var(--accent); }
 .pl-item:hover .pl-del { opacity: 1; }
+/* hover 时把曲目数让给删除按钮（两者都在右端，20px 按钮会盖住数字） */
+.pl-item:hover > .nav-item > b { opacity: 0; }
+.pl-item > .nav-item > b { transition: opacity .12s; }
 .pl-item .pl-del:hover { color: var(--danger); background: var(--bg-hover); }
 .pl-item .pl-del svg { width: 11px; height: 11px; }
 

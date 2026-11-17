@@ -317,7 +317,11 @@ async function writeEmbeddedLyric(text, lyricDir, id) {
     const out = path.join(lyricDir, id + '.lrc')
     const old = await fsp.readFile(out, 'utf8').catch(() => null)
     if (old === text) return out
-    await fsp.writeFile(out, text, 'utf8')
+    // v3.3.67：先写临时文件再 rename —— 以前直接 writeFile，扫描中途退出/断电会留下
+    // 半截 .lrc，下游按「有歌词」渲染出一堆残缺行，且下次扫描读到的 old 也是坏的。
+    const tmp = out + '.tmp'
+    await fsp.writeFile(tmp, text, 'utf8')
+    await fsp.rename(tmp, out)
     return out
   } catch (err) {
     console.error('[lyric] 内嵌歌词写入失败:', err.message)
@@ -924,6 +928,18 @@ class Library {
           added: 0, updated: 0, removed: 0, failed: 0, total: this.tracks.size
         }
       }
+      // v3.3.67：清理阶段只删「本次扫描范围内」的曲目。
+      // 以前 seen 只含本次扫到的文件，子集扫描（例如将来给某个目录做「单独重扫」）
+      // 会把其它根的曲目当成已删除，清空并写回 library.json —— 数据丢失。
+      const scopeRoots = scanDirs
+        .map((d) => { try { return path.resolve(d).toLowerCase() } catch { return '' } })
+        .filter(Boolean)
+      const inScope = (p) => {
+        const s = String(p || '')
+        if (!s) return false
+        const low = s.toLowerCase()
+        return scopeRoots.some((r) => low === r || low.startsWith(r.endsWith(path.sep) ? r : r + path.sep))
+      }
       for (const dir of scanDirs) {
         let ok = false
         try {
@@ -1043,8 +1059,10 @@ class Library {
         for (const id of Array.from(this.tracks.keys())) {
           if (!seen.has(id)) {
             const old = this.tracks.get(id)
+            // 本次没扫到的根目录下的曲目一并不动（子集扫描不能连带清理别的根）
+            if (!old || !inScope(old.path)) continue
             // 内嵌歌词是程序生成的文件，曲目被移除时一起清掉，别在 data\lyrics 里留孤儿
-            if (old && old.lyric && this.lyricDir && path.dirname(old.lyric) === this.lyricDir) {
+            if (old.lyric && this.lyricDir && path.dirname(old.lyric) === this.lyricDir) {
               try { fs.unlinkSync(old.lyric) } catch {}
             }
             this.tracks.delete(id)
@@ -1054,7 +1072,7 @@ class Library {
         }
         // 失败记录同样要清理：文件已被删掉的条目留着就是脏数据（目录不可达时一并跳过）
         for (const [id, f] of Array.from(this.failures)) {
-          if (!seen.has(id) && !(await fileExists(f.path))) this.failures.delete(id)
+          if (!seen.has(id) && inScope(f.path) && !(await fileExists(f.path))) this.failures.delete(id)
         }
       }
 

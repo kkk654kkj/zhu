@@ -56,17 +56,24 @@ let maxIntent = 0   // btnMax 图标的状态意图 token（启动异步回调�
  */
 async function loadInitialData() {
   const slowTimer = setTimeout(() => UI.showScan('正在载入音乐库…'), 400)
+  // v3.3.67：每个接口单独兜底。以前 Promise.all 里任何一个 reject（设置/歌单 JSON
+  // 临时读不出来、曲库正在重建、磁盘权限变动）都会让 boot 的 catch 把整个 body
+  // 换成堆栈页 —— 界面直接不可用，也没有重试入口。
+  const soft = (p, fallback) => Promise.resolve(p).catch((err) => {
+    console.error('[boot] 读取失败，使用默认值:', err && err.message)
+    return fallback
+  })
   const [settings, tracks, favs, hist, playlists, counts, session, onlineMeta] = await Promise.all([
-    window.api.getSettings(),
-    window.api.listTracks(),
-    window.api.getFavorites(),
-    window.api.getHistory(),
-    window.api.getPlaylists(),
-    window.api.getPlayCounts(),
-    window.api.getSession(),
+    soft(window.api.getSettings(), {}),
+    soft(window.api.listTracks(), []),
+    soft(window.api.getFavorites(), []),
+    soft(window.api.getHistory(), []),
+    soft(window.api.getPlaylists(), []),
+    soft(window.api.getPlayCounts(), {}),
+    soft(window.api.getSession(), null),
     // v3.3.64：本地版没有这个接口 —— 缺了就当空的，不影响启动
     typeof window.api.onlineTracksGet === 'function'
-      ? window.api.onlineTracksGet().catch(() => ({}))
+      ? soft(window.api.onlineTracksGet(), {})
       : Promise.resolve({})
   ])
   clearTimeout(slowTimer)
@@ -487,8 +494,11 @@ window.addEventListener('uix:locate', () => {
   if (typeof toast === 'function') toast('已定位到当前曲目')
 })
 
-function renderView() {
-  clearSelection()          // 列表重建后旧选中已失效
+function renderView(opts) {
+  // v3.3.67：keepScroll —— 「最近播放 / 最常播放」因为当前曲被计数而重画时，
+  // 保留滚动位置与选中态；其余场景（切视图/排序/搜索）照旧回顶并清选中。
+  const keepScroll = !!(opts && opts.keepScroll)
+  if (!keepScroll) clearSelection()          // 列表重建后旧选中已失效
   // 在线搜索 / 每日推荐都是独立面板：不复用本地表格（列不一样，多出「音源 / 下载」）
   const isOnline = state.view === 'online'
   const isDaily = state.view === 'daily'
@@ -678,7 +688,8 @@ function renderView() {
     showCounts: state.view === 'most',   // 只在「最常播放」里显示次数，其他视图不挤
     sortKey: state.sortKey,
     sortDir: state.sortDir,
-    selected: state.selected             // v3.3.22 虚拟滚动：重画可视窗口时带上选中态
+    selected: state.selected,            // v3.3.22 虚拟滚动：重画可视窗口时带上选中态
+    keepScroll                           // v3.3.67：同视图刷新不回顶
   })
 }
 
@@ -714,7 +725,7 @@ function bindPlayer() {
     // 以前那些没播过的歌也会进「最近播放」。
     state.currentId = track.id
     updateNavCounts()
-    if (state.view === 'recent') renderView()
+    if (state.view === 'recent') renderView({ keepScroll: true })
     UI.renderQueue(player.tracks, player.index, state.currentId)
     // 换曲后切成这首歌自己的歌词偏移（v1.7）
     state.lyricOffset = offsetFor(track.id)
@@ -739,14 +750,14 @@ function bindPlayer() {
       if (id.indexOf('on:') === 0 && typeof Online !== 'undefined' && Online.rememberTrack) {
         Online.rememberTrack(player.current).then(() => {
           updateNavCounts()
-          if (state.view === 'recent') renderView()
+          if (state.view === 'recent') renderView({ keepScroll: true })
         }).catch(() => {})
       }
       window.api.addHistory(id).catch(() => {})
       state.history = [{ id, at: Date.now() }]
         .concat(state.history.filter((h) => h.id !== id)).slice(0, 300)
       updateNavCounts()
-      if (state.view === 'recent') renderView()
+      if (state.view === 'recent') renderView({ keepScroll: true })
     }
     UI.setPlayIcon(playing)
     // v3.3.7：renderQueue 的输出只跟 tracks/index/currentId 有关，播放/暂停
@@ -787,7 +798,7 @@ function bindPlayer() {
         window.api.incPlayCount(id).then((n) => {
           state.playCounts[id] = n
           // 正在看「最常播放」时顺序会变，立即重排
-          if (state.view === 'most') renderView()
+          if (state.view === 'most') renderView({ keepScroll: true })
         }).catch(() => {})
       }
     }
@@ -1753,6 +1764,9 @@ function bindBar(el, onCommit, onPreview, onReset) {
     return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
   }
   el.addEventListener('pointerdown', (e) => {
+    // v3.3.67：右键/中键在进度条/音量条上按下会直接 seek 或调音量（并抢指针捕获），
+    // 右键菜单还没弹出来歌就跳了。只认主键。
+    if (e.button !== 0) return
     dragging = true
     el.setPointerCapture(e.pointerId)
     onPreview(ratioOf(e))

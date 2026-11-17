@@ -1211,6 +1211,71 @@ function main() {
         (read('test/player-recover.mjs').match(/\bok\(/g) || []).length >= 9)
     }
 
+    // ===== v3.3.67 第二轮审查修复（回退即报红） =====
+    {
+      const libSrc67 = read('src/main/library.js')
+      const main67 = read('src/main/main.js')
+      const app67 = read('src/renderer/js/app.js')
+      const ui67 = read('src/renderer/js/ui.js')
+      const ol67 = read('src/renderer/js/online.js')
+      const pkg67 = read('package.json')
+
+      ok('v3.3.67：库扫描清理限定在本次扫描范围内（子集扫描不再清空别的根）',
+        /const scopeRoots = scanDirs/.test(libSrc67) &&
+        /const inScope = \(p\) =>/.test(libSrc67) &&
+        /if \(!old \|\| !inScope\(old\.path\)\) continue/.test(libSrc67) &&
+        /inScope\(f\.path\)/.test(libSrc67))
+
+      ok('v3.3.67：内嵌歌词原子落盘（tmp + rename）',
+        /const tmp = out \+ '\.tmp'/.test(libSrc67) &&
+        /await fsp\.rename\(tmp, out\)/.test(libSrc67))
+
+      ok('v3.3.67：history/playcount 挡非字符串 id + playlists:update 只放行展示字段',
+        /history:add', \(e, trackId\) => \{[\s\S]{0,220}typeof trackId !== 'string'/.test(main67) &&
+        (main67.match(/typeof trackId !== 'string'/g) || []).length >= 3 &&
+        /const \{ id, patch \} = payload && typeof payload === 'object' \? payload : \{\}/.test(main67) &&
+        /safe\.trackIds = patch\.trackIds\.filter/.test(main67) &&
+        /if \(safe\.trackIds\) pruneOnlineTracks\(\)/.test(main67))
+
+      ok('v3.3.67：启动扫描/监视目录过 isSafeMediaRoot + m3u 首字符 # 转义',
+        /const startDirs = \(store\.get\(\)\.settings\.musicDirs \|\| \[\]\)\s*\n\s*\.filter\(\(d\) => typeof d === 'string' && PROTO\.isSafeMediaRoot\(d\)\)/.test(main67) &&
+        /\.filter\(\(d\) => typeof d === 'string' && PROTO\.isSafeMediaRoot\(d\)\)/.test(main67) &&
+        /line\.startsWith\('#'\) \? '\.\/' \+ line : line/.test(main67))
+
+      ok('v3.3.67：首屏并发读取逐项兜底（单个接口失败不再整页堆栈）',
+        /const soft = \(p, fallback\) => Promise\.resolve\(p\)\.catch/.test(app67) &&
+        (app67.match(/soft\(window\.api\./g) || []).length >= 7)
+
+      ok('v3.3.67：同视图刷新保滚动（keepScroll）',
+        /const keepScroll = !!this\._tCtx\.keepScroll/.test(ui67) &&
+        /if \(keepScroll && scroller && prevTop\) scroller\.scrollTop = prevTop/.test(ui67) &&
+        (app67.match(/renderView\(\{ keepScroll: true \}\)/g) || []).length >= 4 &&
+        /keepScroll\s+\/\/ v3\.3\.67/.test(app67))
+
+      ok('v3.3.67：歌单删除按钮进模板 + 网格高亮清理 + 右键不拖进度条',
+        /class="pl-del" type="button"/.test(ui67) &&
+        /#tableBody \.tr\.playing, #tableBody \.mc\.playing/.test(read('src/renderer/js/queue-tools.js')) &&
+        /if \(e\.button !== 0\) return/.test(app67) &&
+        /e\.stopPropagation\(\)[\s\S]{0,80}UI\.setFullscreen\(false\)/.test(read('src/renderer/js/fullscreen.js')))
+
+      ok('v3.3.67：mpv running 认 exitCode/signalCode + 下载标题不再拼出 undefined',
+        /this\.proc\.exitCode === null && this\.proc\.signalCode === null/.test(read('src/main/mpv.js')) &&
+        /t\.artist \? t\.artist \+ ' - ' : ''/.test(ol67))
+
+      ok('v3.3.67：rememberTrack 给已存条目补档位（先收藏后探测可回填）',
+        /const have = state\.onlineMeta && state\.onlineMeta\.get/.test(ol67) &&
+        /if \(!want \|\| hasSpec\) return true/.test(ol67) &&
+        /Object\.assign\(\{\}, have, \{ spec: want \}\)/.test(ol67))
+
+      ok('v3.3.67：版本号已升（package.json）',
+        /"version": "3\.3\.67"/.test(pkg67))
+
+      ok('v3.3.67：扫描作用域有真跑的回归测试（缺依赖时明确 SKIP 而非假通过）',
+        fs.existsSync(path.join(ROOT, 'test/scan-scope.mjs')) &&
+        (read('test/scan-scope.mjs').match(/\bok\(/g) || []).length >= 5 &&
+        /SKIP：缺少运行时依赖/.test(read('test/scan-scope.mjs')))
+    }
+
   }
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
