@@ -1304,6 +1304,15 @@ function main() {
         !/const must = \['猪专属播放器\.exe'/.test(cd68))
     }
 
+    // ===== v3.3.69 歌单增删曲 IPC 参数校验（放宽口径重审 P1，两版同源） =====
+    {
+      const mj69 = read('src/main/main.js')
+      ok('v3.3.69：playlists:addTracks/removeTracks 校验 id 与 trackIds 数组',
+        /playlists:addTracks', \(e, \{ id, trackIds \} = \{\}\) => \{[\s\S]{0,120}Array\.isArray\(trackIds\)/.test(mj69) &&
+        /playlists:removeTracks', \(e, \{ id, trackIds \} = \{\}\) => \{[\s\S]{0,120}Array\.isArray\(trackIds\)/.test(mj69) &&
+        (mj69.match(/typeof t === 'string' && t\)/g) || []).length >= 2)
+    }
+
   }
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
