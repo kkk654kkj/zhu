@@ -1443,20 +1443,30 @@ function registerPlaylistIpc() {
     pruneOnlineTracks()
     return true
   })
-  ipcMain.handle('playlists:addTracks', (e, { id, trackIds }) => {
+  // v3.3.69：这两条通道原先只查 pl 存在，id / trackIds 都没校验 ——
+  // trackIds 传字符串会逐字符写成 ['a','b','c']，传 undefined 直接抛错；
+  // 从损坏存档读回的 pl.trackIds 非数组时 .includes / filter 也会崩。
+  // 与同文件 playlists:update 的 Array.isArray 过滤口径对齐。
+  ipcMain.handle('playlists:addTracks', (e, { id, trackIds } = {}) => {
+    if (typeof id !== 'string' || !id || !Array.isArray(trackIds)) return null
+    const ids = trackIds.filter((t) => typeof t === 'string' && t)
     const list = store.get().playlists || []
     const pl = list.find((p) => p.id === id)
     if (!pl) return null
-    for (const t of trackIds) if (!pl.trackIds.includes(t)) pl.trackIds.push(t)
+    if (!Array.isArray(pl.trackIds)) pl.trackIds = []
+    for (const t of ids) if (!pl.trackIds.includes(t)) pl.trackIds.push(t)
     store.patch({ playlists: list })
     pruneOnlineTracks()
     return pl
   })
-  ipcMain.handle('playlists:removeTracks', (e, { id, trackIds }) => {
+  ipcMain.handle('playlists:removeTracks', (e, { id, trackIds } = {}) => {
+    if (typeof id !== 'string' || !id || !Array.isArray(trackIds)) return null
+    const ids = trackIds.filter((t) => typeof t === 'string' && t)
     const list = store.get().playlists || []
     const pl = list.find((p) => p.id === id)
     if (!pl) return null
-    const set = new Set(trackIds)
+    if (!Array.isArray(pl.trackIds)) pl.trackIds = []
+    const set = new Set(ids)
     pl.trackIds = pl.trackIds.filter((t) => !set.has(t))
     store.patch({ playlists: list })
     pruneOnlineTracks()
