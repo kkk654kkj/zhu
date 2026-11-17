@@ -483,7 +483,7 @@ function main() {
       /syncFavMarks\(ids, favorites\) \{/.test(uiSrc) &&
       /el\.querySelector\('\.row-act\[data-act="fav"\]'\)/.test(uiSrc) &&
       /UI\.syncFavMarks\(targets\.map\(\(t\) => t\.id\), state\.favorites\)/.test(read('src/renderer/js/menus.js')) &&
-      /UI\.syncFavMarks\(\[state\.currentId\], state\.favorites\)/.test(read('src/renderer/js/mini.js')))
+      /UI\.syncFavMarks\(\[(state\.currentId|id)\], state\.favorites\)/.test(read('src/renderer/js/mini.js')))
     ok('收藏：行内爱心带 aria-pressed（初始态也交给屏幕阅读器）',
       /data-act="fav" aria-pressed="\$\{favOn \? 'true' : 'false'\}"/.test(uiSrc))
     // v2.8.44：主进程拉起的每个子进程都要隐藏控制台窗口。
@@ -1186,7 +1186,7 @@ function main() {
         /async rememberTrack\(track, spec\)/.test(olSrc66) &&
         /await Online\.rememberTrack\(/.test(miniSrc66) &&
         /Online\.rememberTrack\(player\.current\)/.test(appSrc66) &&
-        /rememberTrack\(cur \|\|/.test(miniSrc66))
+        /rememberTrack\(cur( && cur\.id === id \? cur : \{ id \}| \|\|)/.test(miniSrc66))
 
       ok('v3.3.66：上游头统一走 http-util（过滤逐跳头，三处一致）',
         /HOP_HEADER = \/\^\(host\|content-length\|connection\|keep-alive\|transfer-encoding\|upgrade\|proxy-connection\|te\|trailer\|range\)\$\/i/.test(huSrc66) &&
@@ -1274,6 +1274,28 @@ function main() {
         fs.existsSync(path.join(ROOT, 'test/scan-scope.mjs')) &&
         (read('test/scan-scope.mjs').match(/\bok\(/g) || []).length >= 5 &&
         /SKIP：缺少运行时依赖/.test(read('test/scan-scope.mjs')))
+    }
+
+    // ===== v3.3.68 第三轮审查修复（回退即报红） =====
+    {
+      const app68 = read('src/renderer/js/app.js')
+      const d68 = read('src/renderer/js/daily.js')
+      const m68 = read('src/renderer/js/mini.js')
+
+      ok('v3.3.68：换源搜索返回后校验当前曲（切歌后旧回调不再拽回旧曲）',
+        /const song = await Online\.recoverFromSources\(meta\)/.test(app68) &&
+        /if \(!player\.current \|\| player\.current\.id !== cur\.id\) return/.test(app68))
+
+      ok('v3.3.68：每日推荐点播加并发 token（连点不再让旧解析覆盖新歌）',
+        /const token = \(this\._playToken \|\| 0\) \+ 1/.test(d68) &&
+        /this\._playToken = token/.test(d68) &&
+        /if \(token !== this\._playToken\) return/.test(d68))
+
+      ok('v3.3.68：底栏收藏固定入口 id（元数据与收藏同一首）',
+        /const id = state\.currentId[\s\S]{0,400}const ready = await Online\.rememberTrack/.test(m68) &&
+        /cur && cur\.id === id \? cur : \{ id \}/.test(m68) &&
+        /toggleFavorite\(id\)/.test(m68) &&
+        !/toggleFavorite\(state\.currentId\)/.test(m68))
     }
 
   }
