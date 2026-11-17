@@ -586,12 +586,18 @@ const Daily = {
 
   /** 在线行：复用在线搜索视图的解析 / 代理 / ClientTrack 构造，队列 = 本页全部在线曲目 */
   async playOnline(song) {
+    // v3.3.68：与在线搜索页 Online.play 同款并发 token ——
+    // onlinePlayable 解析要 1~7 秒，连点两首时后返回的旧解析会把正在播的新歌
+    // 换成旧歌。token 自增，await 后不是最后一次请求就整段作废。
+    const token = (this._playToken || 0) + 1
+    this._playToken = token
     try { await Online.init() } catch { /* 下面按 proxyBase 判断 */ }
     if (!Online.proxyBase) {
       toast('本地代理未就绪，在线播放暂不可用。稍后重试或重启应用', 4000)
       return
     }
     const r = await window.api.onlinePlayable(song).catch((err) => ({ ok: false, error: err.message }))
+    if (token !== this._playToken) return   // 已被更晚的播放请求取代，这次作废
     if (!r || !r.ok) { toast((r && r.error) || '解析失败', 3000); return }
     const track = Online.toTrack(song, r)
     const queue = this.onlineSongs().map((s) => Online.toTrack(s, null))

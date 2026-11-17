@@ -879,6 +879,10 @@ async function recoverOnlineTrack(cur) {
   if (!meta || typeof Online === 'undefined') { notePlaybackFailure(cur); return }
   toast('原音源放不出来，正在换源重试…', 2000)
   const song = await Online.recoverFromSources(meta).catch(() => null)
+  // v3.3.68：换源跨全源搜索要数秒，这期间用户可能已点下一首。
+  // 旧回调醒来时 cur 已不是当前曲：此时 setQueue 会把新歌拽回旧曲重播，
+  // 或给新歌记一次误失败并跳曲。当前曲不是发起换源那首就整段作废。
+  if (!player.current || player.current.id !== cur.id) return
   if (!song) { toast('换源也没找到「' + (meta.title || '这首') + '」，已跳过', 3000); notePlaybackFailure(cur); return }
   const fresh = Online.toTrack(song, null)
   // 保持原 id：队列按 id 定位，换 id 会让当前曲在队列里「消失」并多出一条

@@ -38,22 +38,26 @@ async function toggleMini(on) {
 }
 
 async function toggleFavoriteCurrent() {
-  if (!state.currentId) return
+  // v3.3.68：固定入口时的 id —— 补元数据与写收藏必须同一首。
+  // 以前 await rememberTrack 期间切歌会让「元数据落旧曲、收藏写新曲」，
+  // 新收藏的 on: id 没有元数据，在收藏列表里被 filter 掉（计数+1、删不掉）。
+  const id = state.currentId
+  if (!id) return
   // v3.3.66：底栏 ♥ / 迷你卡只传 id，在线曲因此没有元数据落盘 —— 收藏里会留下
   // 一个解析不出来的 on: 空行（计数 +1、列表没有、重启也在、还删不掉）。
   // 先补元数据再写收藏；补不出来就不写，宁可这次不收藏。
   const cur = (typeof player !== 'undefined' && player) ? player.current : null
   if (typeof Online !== 'undefined' && Online.rememberTrack) {
-    const ready = await Online.rememberTrack(cur || { id: state.currentId }).catch(() => false)
+    const ready = await Online.rememberTrack(cur && cur.id === id ? cur : { id }).catch(() => false)
     if (!ready) { toast('这首歌的信息还没准备好，稍后再试', 2500); return }
   }
   let favs
-  try { favs = await window.api.toggleFavorite(state.currentId) }
+  try { favs = await window.api.toggleFavorite(id) }
   catch (err) { toast('操作失败：' + (err.message || err), 2500); return }
   state.favorites = new Set(favs)
-  UI.setFavorite(state.favorites.has(state.currentId))
+  UI.setFavorite(state.favorites.has(id))
   // v2.8.43：底栏/迷你卡收藏后，列表行内那颗心同步翻过来
-  UI.syncFavMarks([state.currentId], state.favorites)
+  UI.syncFavMarks([id], state.favorites)
   updateNavCounts()
   if (state.view === 'fav') renderView()
   toast(state.favorites.has(state.currentId) ? '已加入收藏' : '已取消收藏')
