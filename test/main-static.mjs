@@ -964,6 +964,17 @@ function main() {
       fs.existsSync(path.join(ROOT, 'test/scan-scope.mjs')))
   }
 
+  // ===== v2.8.56 IPC 参数校验（放宽口径重审的 2 条 P1） =====
+  {
+    const mj56 = read('src/main/main.js')
+    ok('v2.8.56：favorites:toggle 挡非字符串 id（移植联网版 v3.3.66）',
+      /favorites:toggle', \(e, trackId\) => \{[\s\S]{0,160}typeof trackId !== 'string' \|\| !trackId/.test(mj56))
+    ok('v2.8.56：歌单增删曲校验 id 与 trackIds 数组（两版同源）',
+      /playlists:addTracks', \(e, \{ id, trackIds \} = \{\}\) => \{[\s\S]{0,120}Array\.isArray\(trackIds\)/.test(mj56) &&
+      /playlists:removeTracks', \(e, \{ id, trackIds \} = \{\}\) => \{[\s\S]{0,120}Array\.isArray\(trackIds\)/.test(mj56) &&
+      (mj56.match(/typeof t === 'string' && t\)/g) || []).length >= 2)
+  }
+
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
 }

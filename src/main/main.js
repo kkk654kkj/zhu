@@ -1312,19 +1312,26 @@ function registerPlaylistIpc() {
     store.patch({ playlists: (store.get().playlists || []).filter((p) => p.id !== id) })
     return true
   })
-  ipcMain.handle('playlists:addTracks', (e, { id, trackIds }) => {
+  // v2.8.56：与联网版 v3.3.69 同源加固 —— id / trackIds 缺校验会写坏歌单
+  ipcMain.handle('playlists:addTracks', (e, { id, trackIds } = {}) => {
+    if (typeof id !== 'string' || !id || !Array.isArray(trackIds)) return null
+    const ids = trackIds.filter((t) => typeof t === 'string' && t)
     const list = store.get().playlists || []
     const pl = list.find((p) => p.id === id)
     if (!pl) return null
-    for (const t of trackIds) if (!pl.trackIds.includes(t)) pl.trackIds.push(t)
+    if (!Array.isArray(pl.trackIds)) pl.trackIds = []
+    for (const t of ids) if (!pl.trackIds.includes(t)) pl.trackIds.push(t)
     store.patch({ playlists: list })
     return pl
   })
-  ipcMain.handle('playlists:removeTracks', (e, { id, trackIds }) => {
+  ipcMain.handle('playlists:removeTracks', (e, { id, trackIds } = {}) => {
+    if (typeof id !== 'string' || !id || !Array.isArray(trackIds)) return null
+    const ids = trackIds.filter((t) => typeof t === 'string' && t)
     const list = store.get().playlists || []
     const pl = list.find((p) => p.id === id)
     if (!pl) return null
-    const set = new Set(trackIds)
+    if (!Array.isArray(pl.trackIds)) pl.trackIds = []
+    const set = new Set(ids)
     pl.trackIds = pl.trackIds.filter((t) => !set.has(t))
     store.patch({ playlists: list })
     return pl
@@ -1421,6 +1428,9 @@ function registerUserDataIpc() {
   })
 
   ipcMain.handle('favorites:toggle', (e, trackId) => {
+    // v2.8.56：移植联网版 v3.3.66 修法 —— 非字符串会污染收藏数组
+    // （同文件 history:add 已有此守卫，注释还写「与 favorites:toggle 同口径」，实现却漏了）
+    if (typeof trackId !== 'string' || !trackId) return store.get().favorites || []
     const favs = store.get().favorites || []
     const i = favs.indexOf(trackId)
     if (i >= 0) favs.splice(i, 1)
