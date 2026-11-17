@@ -896,6 +896,74 @@ function main() {
 
   }
 
+// ===== v2.8.55 共享修复哨兵（与联网版 v3.3.67 同源；回退即报红） =====
+  {
+    const lib55 = read('src/main/library.js')
+    const mj55 = read('src/main/main.js')
+    const app55 = read('src/renderer/js/app.js')
+    const ui55 = read('src/renderer/js/ui.js')
+    const mv55 = read('src/main/mpv.js')
+    const qt55 = read('src/renderer/js/queue-tools.js')
+    const fs55 = read('src/renderer/js/fullscreen.js')
+    const css55 = read('src/renderer/css/app.css')
+    const pkg55 = read('package.json')
+
+    ok('v2.8.55：扫描清理只删本次扫描范围内的曲目（子集扫描不再清空其它根）',
+      lib55.includes('const scopeRoots = scanDirs') &&
+      lib55.includes('const inScope = (p) =>') &&
+      lib55.includes('if (!old || !inScope(old.path)) continue') &&
+      lib55.includes('inScope(f.path)'))
+
+    ok('v2.8.55：内嵌歌词 tmp+rename 原子落盘',
+      lib55.includes("const tmp = out + '.tmp'") &&
+      lib55.includes('await fsp.rename(tmp, out)'))
+
+    ok('v2.8.55：封面预热停止时提前结算延时 promise（不再挂住协程）',
+      lib55.includes('this._coverWarmupResolve = null') &&
+      lib55.includes('const done = this._coverWarmupResolve') &&
+      lib55.includes('if (done) done()'))
+
+    ok('v2.8.55：history:add / playcount:inc 挡非字符串 id',
+      mj55.includes("if (typeof trackId !== 'string' || !trackId) return false") &&
+      mj55.includes("if (typeof trackId !== 'string' || !trackId) return 0"))
+
+    ok('v2.8.55：playlists:update 只放行 name/cover/trackIds 且过滤类型',
+      mj55.includes("handle('playlists:update', (e, payload)") &&
+      mj55.includes('if (Array.isArray(src.trackIds)) safe.trackIds') &&
+      mj55.includes("if (typeof src.name === 'string') safe.name"))
+
+    ok('v2.8.55：启动扫描与 watcher 都过 isSafeMediaRoot（settings 手改不再整盘索引）',
+      (mj55.split('PROTO.isSafeMediaRoot(d)').length - 1) >= 2 &&
+      mj55.includes("'no-safe-dirs'") &&
+      mj55.includes('启动扫描跳过：没有可用的音乐目录'))
+
+    ok('v2.8.55：m3u 导出给 # 开头的文件名加 ./ 前缀',
+      mj55.includes("startsWith('#') ? './' + line : line"))
+
+    ok('v2.8.55：首屏 7 路读取逐个兜底（单个失败不换整页堆栈）',
+      app55.includes('const soft = (p, fallback) => Promise.resolve(p).catch') &&
+      app55.includes('soft(window.api.getSession(), null)'))
+
+    ok('v2.8.55：同视图刷新保滚动（renderView keepScroll + 三处调用 + 表格恢复位置）',
+      app55.includes('function renderView(opts)') &&
+      (app55.split('renderView({ keepScroll: true })').length - 1) === 3 &&
+      ui55.includes('if (keepScroll && scroller && prevTop) scroller.scrollTop = prevTop'))
+
+    ok('v2.8.55：侧栏歌单补回删除按钮（模板 + 定位样式）',
+      ui55.includes('class="pl-del" type="button"') &&
+      css55.includes('position: absolute; right: 8px; top: 50%; transform: translateY(-50%)'))
+
+    ok('v2.8.55：清空队列同时清网格高亮；Esc 在全屏页截断；mpv running 认退出码',
+      qt55.includes('#tableBody .tr.playing, #tableBody .mc.playing') &&
+      fs55.includes('e.stopPropagation()') &&
+      fs55.includes('}, true)') &&
+      mv55.includes('this.proc.exitCode === null && this.proc.signalCode === null'))
+
+    ok('v2.8.55：版本号已升 + 扫描作用域回归测试入仓',
+      pkg55.includes('"version": "2.8.55"') &&
+      fs.existsSync(path.join(ROOT, 'test/scan-scope.mjs')))
+  }
+
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
 }

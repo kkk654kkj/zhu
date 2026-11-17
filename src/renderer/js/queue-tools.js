@@ -66,7 +66,8 @@ const QT = (() => {
       // UI.setRowPlaying(id, false) 的语义是「只给 id 那一行加 playing」，
       // 传旧 id + false 反而会把高亮留在旧行上；这里直接清干净。
       UI._tCurrentId = null
-      document.querySelectorAll('#tableBody .tr.playing').forEach((el) => el.classList.remove('playing'))
+      // v2.8.55：网格模式的高亮挂 .mc.playing，只清 .tr 会留一块亮着的卡片
+      document.querySelectorAll('#tableBody .tr.playing, #tableBody .mc.playing').forEach((el) => el.classList.remove('playing'))
       if (typeof Online !== 'undefined' && Online && typeof Online.markPlaying === 'function') Online.markPlaying(null)
       UI.renderNowPlaying(null, false)
       UI.renderLyric(null, '')

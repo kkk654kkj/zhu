@@ -121,7 +121,10 @@ class MpvEngine {
   }
 
   get running() {
-    return !!(this.proc && !this.proc.killed)
+    // v2.8.55：spawn 失败时 proc 可能还在、killed 仍为 false，但进程根本没起来。
+    // 认 exitCode/signalCode 为 null 才算真的在运行。
+    if (!this.proc || this.proc.killed) return false
+    return this.proc.exitCode === null && this.proc.signalCode === null
   }
 
   /** 启动引擎进程（幂等）。返回 {ok, exclusive, error} */

@@ -882,7 +882,7 @@ function startWatching() {
   stopWatching()
   const s = store.get().settings
   if (s.watchFolders === false) { logLine('[watch] 已关闭'); return }
-  const dirs = Array.isArray(s.musicDirs) ? s.musicDirs.filter(Boolean) : []
+  const dirs = Array.isArray(s.musicDirs) ? s.musicDirs.filter((d) => typeof d === 'string' && PROTO.isSafeMediaRoot(d)) : []
   for (const dir of dirs) {
     try {
       const w = fs.watch(dir, { recursive: true }, (evt, filename) => {
@@ -1291,11 +1291,20 @@ function registerPlaylistIpc() {
     store.patch({ playlists: list })
     return item
   })
-  ipcMain.handle('playlists:update', (e, { id, patch }) => {
+  ipcMain.handle('playlists:update', (e, payload) => {
+    const { id, patch } = payload && typeof payload === 'object' ? payload : {}
+    if (typeof id !== 'string' || !id) return null
     const list = store.get().playlists || []
     const idx = list.findIndex((p) => p.id === id)
     if (idx < 0) return null
-    list[idx] = { ...list[idx], ...patch }
+    // v2.8.55：只放行可改字段。以前整包展开，patch 能改掉 id / 塞进任意键，
+    // trackIds 传字符串还会被逐字符 push，歌单里出现一堆单字符 id。
+    const src = patch && typeof patch === 'object' ? patch : {}
+    const safe = {}
+    if (typeof src.name === 'string') safe.name = src.name.trim().slice(0, 80) || '未命名歌单'
+    if (typeof src.cover === 'string') safe.cover = src.cover
+    if (Array.isArray(src.trackIds)) safe.trackIds = src.trackIds.filter((t) => typeof t === 'string' && t)
+    list[idx] = { ...list[idx], ...safe }
     store.patch({ playlists: list })
     return list[idx]
   })
@@ -1341,7 +1350,9 @@ function registerPlaylistIpc() {
     for (const t of tracks) {
       const rel = path.relative(base, t.path)
       const useRel = rel && !rel.startsWith('..') && !path.isAbsolute(rel)
-      lines.push(useRel ? rel : t.path)
+      const line = useRel ? rel : t.path
+      // v2.8.55：文件名以 # 开头时 m3u 会当注释行丢掉，加 './' 前缀保住它
+      lines.push(line.startsWith('#') ? './' + line : line)
     }
     try {
       fs.writeFileSync(filePath, lines.join('\r\n') + '\r\n', 'utf8')
@@ -1420,6 +1431,8 @@ function registerUserDataIpc() {
 
   ipcMain.handle('history:get', () => store.get().history || [])
   ipcMain.handle('history:add', (e, trackId) => {
+    // v2.8.55：挡非字符串 id（与 favorites:toggle 同口径）；否则 history 里会混进 undefined/数字
+    if (typeof trackId !== 'string' || !trackId) return false
     const hist = (store.get().history || []).filter((h) => h.id !== trackId)
     hist.unshift({ id: trackId, at: Date.now() })
     store.patch({ history: hist.slice(0, 300) })
@@ -1428,6 +1441,8 @@ function registerUserDataIpc() {
 
   ipcMain.handle('playcount:get', () => store.get().playCounts || {})
   ipcMain.handle('playcount:inc', (e, trackId) => {
+    // v2.8.55：同 history:add，非字符串 id 不计分（否则播放次数表里会出现 'undefined' 键）
+    if (typeof trackId !== 'string' || !trackId) return 0
     const pc = store.get().playCounts || {}
     pc[trackId] = (pc[trackId] || 0) + 1
     store.patch({ playCounts: pc })
@@ -2144,12 +2159,19 @@ if (gotLock) cleanChromiumCache().catch(() => {})
     // 设置里开了「启动时扫描音乐文件夹」也会自动扫一次（增量、很快）。
     const needScan = library.list().length === 0 || store.get().settings.autoScanOnStart === true
     if (needScan) {
-      const run = library.scan(store.get().settings.musicDirs, (p) => {
-        sendToRenderer('lib:scan-progress', {
-          phase: p.phase, done: p.done, total: p.total,
-          track: p.track ? toClientTrack(p.track) : null
-        })
-      })
+      // v2.8.55：启动扫描与 lib:scan / settings:patch 同一把尺子（isSafeMediaRoot）。
+      // settings.json 被手改成盘符根 / UNC / 设备路径时，以前会直接整盘索引。
+      const startDirs = (Array.isArray(store.get().settings.musicDirs) ? store.get().settings.musicDirs : [])
+        .filter((d) => typeof d === 'string' && PROTO.isSafeMediaRoot(d))
+      if (!startDirs.length) logLine('[library] 启动扫描跳过：没有可用的音乐目录')
+      const run = startDirs.length
+        ? library.scan(startDirs, (p) => {
+            sendToRenderer('lib:scan-progress', {
+              phase: p.phase, done: p.done, total: p.total,
+              track: p.track ? toClientTrack(p.track) : null
+            })
+          })
+        : Promise.resolve({ skipped: true, reason: 'no-safe-dirs' })
       activeScan = run
       run
         .then((res) => {

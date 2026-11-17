@@ -53,14 +53,19 @@ let audio = null
  */
 async function loadInitialData() {
   const slowTimer = setTimeout(() => UI.showScan('正在载入音乐库…'), 400)
+  // v2.8.55：首屏逐个兜底 —— 单个接口失败不再整页换成堆栈页。
+  const soft = (p, fallback) => Promise.resolve(p).catch((err) => {
+    console.error('[boot] 读取失败，使用默认值:', err && err.message)
+    return fallback
+  })
   const [settings, tracks, favs, hist, playlists, counts, session] = await Promise.all([
-    window.api.getSettings(),
-    window.api.listTracks(),
-    window.api.getFavorites(),
-    window.api.getHistory(),
-    window.api.getPlaylists(),
-    window.api.getPlayCounts(),
-    window.api.getSession()
+    soft(window.api.getSettings(), {}),
+    soft(window.api.listTracks(), []),
+    soft(window.api.getFavorites(), []),
+    soft(window.api.getHistory(), []),
+    soft(window.api.getPlaylists(), []),
+    soft(window.api.getPlayCounts(), {}),
+    soft(window.api.getSession(), null)
   ])
   clearTimeout(slowTimer)
   UI.hideScan()
@@ -449,8 +454,11 @@ window.addEventListener('uix:locate', () => {
   if (typeof toast === 'function') toast('已定位到当前曲目')
 })
 
-function renderView() {
-  clearSelection()          // 列表重建后旧选中已失效
+function renderView(opts) {
+  // v2.8.55：keepScroll 用于「同视图内的数据刷新」（历史/播放次数变化）。
+  // 以前每次刷新都会清选中并把列表滚回顶部，切歌时正在浏览的行会跳走。
+  const keepScroll = !!(opts && opts.keepScroll)
+  if (!keepScroll) clearSelection()          // 列表重建后旧选中已失效
   const list = computedList()
   state.visible = list
 
@@ -591,7 +599,8 @@ function renderView() {
     showCounts: state.view === 'most',   // 只在「最常播放」里显示次数，其他视图不挤
     sortKey: state.sortKey,
     sortDir: state.sortDir,
-    selected: state.selected             // v3.3.22 虚拟滚动：重画可视窗口时带上选中态
+    selected: state.selected,            // v3.3.22 虚拟滚动：重画可视窗口时带上选中态
+    keepScroll                           // v2.8.55：同视图刷新时保持滚动位置
   })
 }
 
@@ -625,7 +634,7 @@ function bindPlayer() {
     // 以前那些没播过的歌也会进「最近播放」。
     state.currentId = track.id
     updateNavCounts()
-    if (state.view === 'recent') renderView()
+    if (state.view === 'recent') renderView({ keepScroll: true })
     UI.renderQueue(player.tracks, player.index, state.currentId)
     // 换曲后切成这首歌自己的歌词偏移（v1.7）
     state.lyricOffset = offsetFor(track.id)
@@ -649,7 +658,7 @@ function bindPlayer() {
       state.history = [{ id, at: Date.now() }]
         .concat(state.history.filter((h) => h.id !== id)).slice(0, 300)
       updateNavCounts()
-      if (state.view === 'recent') renderView()
+      if (state.view === 'recent') renderView({ keepScroll: true })
     }
     UI.setPlayIcon(playing)
     // v3.3.7：renderQueue 的输出只跟 tracks/index/currentId 有关，播放/暂停
@@ -690,7 +699,7 @@ function bindPlayer() {
         window.api.incPlayCount(id).then((n) => {
           state.playCounts[id] = n
           // 正在看「最常播放」时顺序会变，立即重排
-          if (state.view === 'most') renderView()
+          if (state.view === 'most') renderView({ keepScroll: true })
         }).catch(() => {})
       }
     }
@@ -1586,6 +1595,7 @@ function bindBar(el, onCommit, onPreview, onReset) {
     return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
   }
   el.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return          // v2.8.55：只认主键，右键不再顺手 seek
     dragging = true
     el.setPointerCapture(e.pointerId)
     onPreview(ratioOf(e))

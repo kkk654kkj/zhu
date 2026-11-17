@@ -198,7 +198,7 @@ ok('右上角收起按钮 → UI.setFullscreen(false)',
   calls.setFs.length === 1 && calls.setFs[0] === false, JSON.stringify(calls.setFs))
 calls.setFs.length = 0
 fsView.classList.add('open')
-for (const l of (document._ls.keydown || [])) l.fn({ key: 'Escape', preventDefault() {} })
+for (const l of (document._ls.keydown || [])) l.fn({ key: 'Escape', preventDefault() {}, stopPropagation() {} })
 ok('Esc 在全屏页打开时 → UI.setFullscreen(false)',
   calls.setFs.length === 1 && calls.setFs[0] === false, JSON.stringify(calls.setFs))
 

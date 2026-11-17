@@ -75,11 +75,14 @@ const UI = {
       box.innerHTML = '<div class="nav-item" style="color:var(--txt-3);cursor:default;font-size:12px;padding-left:10px">还没有歌单</div>'
       return
     }
+    // v2.8.55：补回删除按钮 —— 委托与 CSS 一直在等这个节点，模板里却从来没有它，
+    // 表现就是歌单只能建不能删。
     box.innerHTML = playlists.map((p) => `
       <div class="pl-item" data-playlist="${esc(p.id)}">
         <a class="nav-item" data-view="${esc(p.id)}" data-playlist="${esc(p.id)}" title="${esc(p.name)}">
           ${icon('album')}<span>${esc(p.name)}</span><b>${p.trackIds ? p.trackIds.length : 0}</b>
         </a>
+        <button class="pl-del" type="button" data-playlist="${esc(p.id)}" aria-label="删除歌单" title="删除歌单">${icon('trash')}</button>
       </div>`).join('')
   },
 
@@ -126,6 +129,9 @@ const UI = {
     }
     this._syncGridVars()
     const scroller = this.els.viewScroll
+    // v2.8.55：keepScroll 时记住旧位置，重建可视窗口后再放回去
+    const keepScroll = !!this._tCtx.keepScroll
+    const prevTop = keepScroll && scroller ? scroller.scrollTop : 0
     // 虚拟滚动内核（vlist.js）：列表与网格共用一套，行高/行数由回调给
     if (!this._vl && scroller) {
       this._vl = createVList({
@@ -137,8 +143,9 @@ const UI = {
       })
     }
     // 与旧实现（innerHTML 重建后浏览器自动回顶）行为一致：切视图/排序/搜索回顶部
-    if (scroller && scroller.scrollTop) scroller.scrollTop = 0
+    if (scroller && !keepScroll && scroller.scrollTop) scroller.scrollTop = 0
     if (this._vl) this._vl.reset()
+    if (keepScroll && scroller && prevTop) scroller.scrollTop = prevTop
     this._markSortHeader(this._tCtx.sortKey, this._tCtx.sortDir)
   },
 

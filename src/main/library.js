@@ -317,7 +317,11 @@ async function writeEmbeddedLyric(text, lyricDir, id) {
     const out = path.join(lyricDir, id + '.lrc')
     const old = await fsp.readFile(out, 'utf8').catch(() => null)
     if (old === text) return out
-    await fsp.writeFile(out, text, 'utf8')
+    // v2.8.55：先写 .tmp 再 rename —— 直接覆盖时进程中途被杀会留下半截 .lrc，
+    // 下次启动读到的是截断歌词，比没有歌词更难排查。
+    const tmp = out + '.tmp'
+    await fsp.writeFile(tmp, text, 'utf8')
+    await fsp.rename(tmp, out)
     return out
   } catch (err) {
     console.error('[lyric] 内嵌歌词写入失败:', err.message)
@@ -651,6 +655,9 @@ class Library {
     // v3.3.23：封面后台预热的状态句柄
     this._coverWarmupAbort = true
     this._coverWarmupTimer = null
+    // v2.8.55：延时 promise 的结算函数。停止预热时提前调用，
+    // 否则 clearTimeout 之后 await 永不返回，run() 连同 ids 闭包一直挂着。
+    this._coverWarmupResolve = null
   }
 
   /** 记一条失败（幂等）：同一文件重复失败只刷新时间与原因，保留首次出现时间 */
@@ -847,7 +854,17 @@ class Library {
         if (this._coverWarmupAbort) return
         try { await this.getCover(id) } catch (err) { /* 预热失败不影响使用，真要显示时会再试 */ }
         if (this._coverWarmupAbort) return
-        await new Promise((r) => { this._coverWarmupTimer = setTimeout(r, DELAY) })
+        await new Promise((r) => {
+          this._coverWarmupResolve = () => {
+            this._coverWarmupTimer = null
+            this._coverWarmupResolve = null
+            r()
+          }
+          this._coverWarmupTimer = setTimeout(() => {
+            const done = this._coverWarmupResolve
+            if (done) done()
+          }, DELAY)
+        })
       }
     }
     run()
@@ -856,6 +873,10 @@ class Library {
   stopCoverWarmup() {
     this._coverWarmupAbort = true
     if (this._coverWarmupTimer) { clearTimeout(this._coverWarmupTimer); this._coverWarmupTimer = null }
+    // v2.8.55：把挂在 DELAY 上的那一次 await 提前结算（否则协程泄漏）
+    const done = this._coverWarmupResolve
+    this._coverWarmupResolve = null
+    if (done) done()
   }
 
   list() {
@@ -911,6 +932,18 @@ class Library {
           skipped: true, reason: 'no-dirs',
           added: 0, updated: 0, removed: 0, failed: 0, total: this.tracks.size
         }
+      }
+      // v2.8.55：清理阶段只删「本次扫描范围内」的曲目。
+      // 以前 seen 只含本次扫到的文件，子集扫描（例如将来给某个目录做「单独重扫」）
+      // 会把其它根的曲目当成已删除，清空并写回 library.json —— 数据丢失。
+      const scopeRoots = scanDirs
+        .map((d) => { try { return path.resolve(d).toLowerCase() } catch { return '' } })
+        .filter(Boolean)
+      const inScope = (p) => {
+        const s = String(p || '')
+        if (!s) return false
+        const low = s.toLowerCase()
+        return scopeRoots.some((r) => low === r || low.startsWith(r.endsWith(path.sep) ? r : r + path.sep))
       }
       for (const dir of scanDirs) {
         let ok = false
@@ -1031,8 +1064,10 @@ class Library {
         for (const id of Array.from(this.tracks.keys())) {
           if (!seen.has(id)) {
             const old = this.tracks.get(id)
+            // 本次没扫到的根目录下的曲目一并不动（子集扫描不能连带清理别的根）
+            if (!old || !inScope(old.path)) continue
             // 内嵌歌词是程序生成的文件，曲目被移除时一起清掉，别在 data\lyrics 里留孤儿
-            if (old && old.lyric && this.lyricDir && path.dirname(old.lyric) === this.lyricDir) {
+            if (old.lyric && this.lyricDir && path.dirname(old.lyric) === this.lyricDir) {
               try { fs.unlinkSync(old.lyric) } catch {}
             }
             this.tracks.delete(id)
@@ -1042,7 +1077,7 @@ class Library {
         }
         // 失败记录同样要清理：文件已被删掉的条目留着就是脏数据（目录不可达时一并跳过）
         for (const [id, f] of Array.from(this.failures)) {
-          if (!seen.has(id) && !(await fileExists(f.path))) this.failures.delete(id)
+          if (!seen.has(id) && inScope(f.path) && !(await fileExists(f.path))) this.failures.delete(id)
         }
       }
 

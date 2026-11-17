@@ -18,12 +18,15 @@
   // 收起：右上角按钮 / Esc
   const fsClose = $('fsClose')
   if (fsClose) fsClose.addEventListener('click', () => UI.setFullscreen(false))
+  // v2.8.55：捕获阶段处理并截断 —— 冒泡阶段拦不住后注册的监听，
+  // 一次 Esc 会同时「退出全屏」和「取消选中等」，用户看到两件事一起发生。
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && UI.isFullscreen()) {
       e.preventDefault()
+      e.stopPropagation()
       UI.setFullscreen(false)
     }
-  })
+  }, true)
 
   /* v2.8.37 / v3.3.45：全屏页自己的播放队列入口。
      复用主界面的 #queuePanel（同一份 UI.renderQueue / 清空 / 行尾 ×），
