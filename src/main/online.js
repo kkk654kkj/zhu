@@ -10,6 +10,8 @@
  */
 
 const crypto = require('crypto')
+// v3.3.66：上游请求头过滤（与 streamproxy / downloader 共用一份）
+const HTTPU = require('./http-util')
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 const TIMEOUT = 15000
@@ -956,9 +958,10 @@ async function probeStream(info, realDuration, expectDuration = 0, opts = {}) {
     ? Math.max(MIN_BUDGET_MS, Math.floor(leftProbe() / (maxAttempts - attempt)))
     : 8000
   try {
-    const headers = { Range: 'bytes=0-1' }
-    if (info.referer) headers.Referer = info.referer
-    if (info.headers && typeof info.headers === 'object') Object.assign(headers, info.headers)
+    // v3.3.66：只取 2 字节探 content-range；上游附带的头先过滤逐跳头再合并，
+    // 否则 Host/Content-Length 会被原样塞进 undici（请求直接抛错，探测永远失败）
+    const headers = HTTPU.buildUpstreamHeaders(info)
+    headers.Range = 'bytes=0-1'
     const res = await req(info.url, { headers, timeout: perTry, signal })
     // v3.3.13：本函数只看响应头，正文必须显式取消，否则每个探测留 8 秒 timer + 连接
     try { res.release && res.release() } catch (e) { /* 忽略 */ }

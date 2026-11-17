@@ -10,6 +10,8 @@ const DC = require('./dircache')
 // v3.3.32：serveLocalFile 用 PROTO.mimeFor 取 Content-Type；v3.3.24 拆分时漏搬这个
 // require（错留了 electron 的 protocol），缓存命中播放必抛 ReferenceError → 500。
 const PROTO = require('./protocols')
+// v3.3.66：上游请求头过滤 / 内网地址判定的共用实现
+const HTTPU = require('./http-util')
 
 let G = null
 function init(g) { G = g }
@@ -489,17 +491,12 @@ function sendCachedStream(req, res, song, hit, fallback) {
 /**
  * 组装上游请求头：UA + 平台要求的 Referer/Cookie 等。
  * 逐跳头（host/content-length/connection/range）不透传 —— Range 由本端按需补。
+ * v3.3.66：过滤逻辑抽到 http-util，下载器/在线探测共用同一份（以前三处各写一份，
+ * 其中两处直接 Object.assign，逐跳头会把 undici 请求打挂）。
  */
 function buildUpstreamHeaders(info, req) {
-  const headers = { 'User-Agent': 'Mozilla/5.0' }
-  if (info.referer) headers.Referer = info.referer
-  // 有些平台的直链要带它自己指定的头（比如 QQ 的 Cookie/Referer），网关会一起给
-  if (info.headers && typeof info.headers === 'object') {
-    for (const [k, v] of Object.entries(info.headers)) {
-      if (typeof v === 'string' && !/^(host|content-length|connection|range)$/i.test(k)) headers[k] = v
-    }
-  }
-  if (req.headers.range) headers.Range = req.headers.range
+  const headers = HTTPU.buildUpstreamHeaders(info)
+  if (req && req.headers && req.headers.range) headers.Range = req.headers.range
   return headers
 }
 

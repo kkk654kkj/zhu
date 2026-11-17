@@ -409,15 +409,16 @@ const Daily = {
     return '高码率'
   },
 
-  /** 探测结果 → 行内文案 + 排序档位（3 母带 / 2 无损 / 1 高码率 / 0 低码率或未知） */
+  /** 探测结果 → 行内文案 + 排序档位（3 高解析 / 2 无损 / 1 高码率 / 0 低码率或未知）
+   *  v3.3.66：文案与在线搜索页统一（同一档位在哪儿都叫「高解析」/「无损」/「320k」） */
   qualityOf(song, r) {
     if (!r || !r.ok) {
-      return { text: String(song.quality || '—').toUpperCase(), cls: 'dim', rank: 0, tip: '没探测到实际档位（点播时按音源能力解析）' }
+      return { text: String(song.quality || '—'), cls: 'dim', rank: 0, tip: '没探测到实际档位（点播时按音源能力解析）' }
     }
     if (r.lossless) {
       const hi = r.level === 'jymaster' || r.level === 'master' || (r.bitrate || 0) >= 1411
       return {
-        text: hi ? '母带' : '无损',
+        text: hi ? '高解析' : '无损',
         cls: 'lossless',
         rank: hi ? 3 : 2,
         tip: (hi ? '高解析 FLAC' : '无损 FLAC') +
@@ -455,6 +456,9 @@ const Daily = {
         this.probed++
         x.q = this.qualityOf(x.song, r)
         x.qr = x.q.rank
+        // v3.3.66：探测结果也写回 song 本身 —— playOnline/playAll 用 toTrack(song, null)
+        // 组队列，以前队列里的曲目不知道刚探到的档位（和在线搜索页口径不一致）
+        x.song._q = x.q
         this.paintCell(x)
         this.setStatus('正在核对音质 ' + this.probed + '/' + total + '…')
       }
@@ -499,7 +503,7 @@ const Daily = {
     // 换了两次仍然大量重合：如实说明，别让用户以为按钮没反应
     const narrow = (this._batchOverlap || 0) >= DAILY_RETRY_OVERLAP
     return `全 ${this.onlineCount} 首在线曲目 · ${this.qualityLabel()}优先` +
-      (hi ? ' · 已探到 ' + hi + ' 首无损/母带' : '') +
+      (hi ? ' · 已探到 ' + hi + ' 首无损/高解析' : '') +
       (narrow ? ' · 音源这边可换的新歌不多' : ' · 每次打开重新挑选')
   },
 
@@ -513,7 +517,7 @@ const Daily = {
     const t = (isLocal ? x.track : x.song) || {}
     const title = t.title || '未知歌曲'
     const artist = t.artist || '未知歌手'
-    const q = isLocal ? (t.ext || '—') : (x.q ? x.q.text : String(t.quality || '—').toUpperCase())
+    const q = isLocal ? (t.ext || '—') : (x.q ? x.q.text : String(t.quality || '—'))
     const qCls = isLocal ? '' : ' ' + ((x.q && x.q.cls) || 'dim')
     const qTip = isLocal ? '' : ((x.q && x.q.tip) || '进页后会自动核对真实档位')
     const badge = isLocal
@@ -531,7 +535,7 @@ const Daily = {
       <div class="op-c-title"><span class="tt" title="${esc(title)}">${esc(title)}</span></div>
       <div class="op-c-artist" title="${esc(artist)}">${esc(artist)}</div>
       <div class="op-c-src">${badge}</div>
-      <div class="op-c-q${qCls}"${qTip ? ` title="${esc(qTip)}"` : ''}>${esc(String(q).toUpperCase())}</div>
+      <div class="op-c-q${qCls}"${qTip ? ` title="${esc(qTip)}"` : ''}>${esc(q)}</div>
       <div class="op-c-dur">${fmtDuration(t.duration || 0)}</div>
       <div class="op-c-act">${acts}</div>
     </div>`

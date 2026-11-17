@@ -97,12 +97,16 @@ function updateLibStat() {
 function updateNavCounts() {
   const albumSet = new Set(state.tracks.map((t) => t.album || '未知专辑'))
   const dirSet = new Set(state.tracks.map((t) => t.dir || '').filter(Boolean))
+  // v3.3.66：徽章按「真能渲染成一行」的数量算。以前直接取数组长度，
+  // 而在线曲在缺元数据时 resolveTrack 返回 null、行被 filter 掉 —— 数字比列表多。
+  const canShow = (id) => !!(typeof resolveTrack === 'function' && resolveTrack(id))
+  const counts = state.playCounts || {}
   UI.renderNavCounts({
     all: state.tracks.length,
-    fav: state.favorites.size,
-    recent: state.history.length,
+    fav: Array.from(state.favorites).filter(canShow).length,
+    recent: state.history.filter((h) => canShow(h.id)).length,
     added: countRecentlyAdded(),
-    most: state.tracks.filter((t) => (state.playCounts[t.id] || 0) > 0).length,
+    most: Object.keys(counts).filter((id) => (counts[id] || 0) > 0 && canShow(id)).length,
     folders: dirSet.size,
     albums: albumSet.size
   })

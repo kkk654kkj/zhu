@@ -651,6 +651,7 @@ class Library {
     // v3.3.23：封面后台预热的状态句柄
     this._coverWarmupAbort = true
     this._coverWarmupTimer = null
+    this._coverWarmupResolve = null
   }
 
   /** 记一条失败（幂等）：同一文件重复失败只刷新时间与原因，保留首次出现时间 */
@@ -847,7 +848,13 @@ class Library {
         if (this._coverWarmupAbort) return
         try { await this.getCover(id) } catch (err) { /* 预热失败不影响使用，真要显示时会再试 */ }
         if (this._coverWarmupAbort) return
-        await new Promise((r) => { this._coverWarmupTimer = setTimeout(r, DELAY) })
+        // v3.3.66：延时器要能被 stopCoverWarmup 提前结算 —— 只 clearTimeout 的话
+        // 这个 await 永远不返回，协程连同 ids 闭包一直挂着（每次重扫/退出多一份）
+        await new Promise((r) => {
+          this._coverWarmupResolve = r
+          this._coverWarmupTimer = setTimeout(() => { this._coverWarmupResolve = null; r() }, DELAY)
+        })
+        this._coverWarmupResolve = null
       }
     }
     run()
@@ -856,6 +863,11 @@ class Library {
   stopCoverWarmup() {
     this._coverWarmupAbort = true
     if (this._coverWarmupTimer) { clearTimeout(this._coverWarmupTimer); this._coverWarmupTimer = null }
+    if (this._coverWarmupResolve) {
+      const done = this._coverWarmupResolve
+      this._coverWarmupResolve = null
+      done()
+    }
   }
 
   list() {

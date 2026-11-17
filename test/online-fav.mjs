@@ -63,15 +63,27 @@ ok('收藏被取消但仍在歌单里 → 不清（否则歌单里那条当场�
 ok('空表 / 脏入参不炸', OMETA.pruneToRefs(null).dropped === 0 && OMETA.pruneToRefs({}, null, null).dropped === 0)
 ok('歌单里出现非字符串 id 不会污染 keep', OMETA.pruneToRefs({ 'on:kw:5': {} }, [], [{ trackIds: [null, 5] }]).dropped === 1)
 
+// v3.3.66：同一首的后到元数据不能把已存档位洗掉
+// （收藏页规格列从「高解析」退化成「在线」的根因：整条覆盖 + spec:null）
+const withSpec = OMETA.sanitizeMeta({ ...good, spec: { text: '高解析', cls: 'lossless', tip: 'FLAC' } }, 10)
+const noSpec = OMETA.sanitizeMeta(good, 11)
+ok('后到条目没带档位 → 保留旧档位',
+  OMETA.mergeMeta(withSpec, noSpec).spec && OMETA.mergeMeta(withSpec, noSpec).spec.text === '高解析')
+ok('后到条目带档位 → 以新值为准',
+  OMETA.mergeMeta(withSpec, OMETA.sanitizeMeta({ ...good, spec: { text: '128k', cls: 'dim', tip: '' } }, 12)).spec.text === '128k')
+ok('没有旧条目时直接用新条目', OMETA.mergeMeta(null, noSpec).id === 'on:kw:778899')
+ok('mergeMeta 不吃脏入参', OMETA.mergeMeta(null, null) === null && OMETA.mergeMeta(null, undefined) === null)
+
 /* ---------------- ② 渲染层 Online ---------------- */
 
 const src = fs.readFileSync(path.join(ROOT, 'src/renderer/js/online.js'), 'utf8')
 const sandbox = {
   console,
   // online.js 顶层只定义函数与对象，不执行 —— 这些桩只是给实例方法用
-  state: { settings: {}, favorites: new Set() },
+  state: { settings: {}, favorites: new Set(), onlineMeta: new Map() },
   document: { querySelectorAll: () => [], getElementById: () => null },
-  window: { api: {} },
+  // v3.3.66：rememberTrack 会把返回的整表同步回 state.onlineMeta
+  window: { api: { onlineTracksRemember: async (metas) => ({ [metas[0].id]: metas[0] }) } },
   player: null,
   toast: () => {},
   esc: (v) => String(v == null ? '' : v),
@@ -111,6 +123,16 @@ const metaSpec = Online.metaOf(song, probe)
 ok('v3.3.65：metaOf 落盘探测档位', metaSpec.spec && metaSpec.spec.text === '母带' && metaSpec.spec.cls === 'lossless')
 ok('v3.3.65：档位还原到 track，老条目为空串（渲染层给「在线」占位）',
   Online.trackFromMeta(metaSpec).specText === '母带' && Online.trackFromMeta(meta).specText === '')
+
+// v3.3.66：底栏 ♥ / 迷你卡 / 播放历史只传 id —— 写收藏前必须先把元数据补齐，
+// 否则收藏里留下一个 resolveTrack 解析不出来的 on: 空行（计数 +1、列表没有）
+const idOnly = { id: 'on:kw:778899', title: '晴天', artist: '周杰伦', duration: 269 }
+ok('只有 id 的在线曲：rememberTrack 能反推 source/songId 并落盘',
+  await Online.rememberTrack(idOnly) === true)
+ok('rememberTrack 之后 state.onlineMeta 里查得到', sandbox.state.onlineMeta.has('on:kw:778899'))
+ok('本地曲不需要元数据，直接放行', await Online.rememberTrack({ id: 'local-1' }) === true)
+ok('on: 前缀但拆不出 source/songId → 拒绝（不写出一条永久空行）',
+  await Online.rememberTrack({ id: 'on:broken' }) === false)
 
 // matchScore：换源时「宁可不播也不放错歌」
 const base = { title: '晴天', artist: '周杰伦', duration: 269 }

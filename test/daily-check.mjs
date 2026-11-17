@@ -72,7 +72,9 @@ const Online = {
   enabled: new Set(['kw', 'qq']),
   proxyBase: 'http://127.0.0.1:12345',
   init: async () => {},
-  toTrack: (s) => ({ id: 'on:' + s.source + ':' + s.id, online: s, source: s.source })
+  toTrack: (s) => ({ id: 'on:' + s.source + ':' + s.id, online: s, source: s.source }),
+  // v3.3.65 起 daily.row 用 Online.keyOf 拼收藏 id（桩以前缺这个 → 该套件从那时起跑不过）
+  keyOf: (s) => 'on:' + s.source + ':' + s.id
 }
 const player = {
   queues: [],

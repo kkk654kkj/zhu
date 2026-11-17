@@ -94,8 +94,9 @@ class Player extends Emitter {
    * @param {Array} tracks
    * @param {number} startIndex
    * @param {boolean} autoplay
+   * @param {boolean} force 同一 id 也强制重新加载（在线换源：id 不变、地址变了）
    */
-  setQueue(tracks, startIndex = 0, autoplay = true) {
+  setQueue(tracks, startIndex = 0, autoplay = true, force = false) {
     const prevId = this.current ? this.current.id : null
     this.tracks = tracks.slice()
     this._buildShufflePool()
@@ -109,7 +110,9 @@ class Player extends Emitter {
     this.emit('queue-change', this.tracks, this.index)
 
     if (target < 0) { this.stop(); return }
-    if (targetId === prevId && this.audio.src) {
+    // v3.3.66：只比 id 会把「同一首歌换了地址」当成同一首直接早退
+    // （在线换源兜底就是这么被吞掉的：新地址从未 load，只对死链再 play 一次）
+    if (!force && targetId === prevId && this.audio.src) {
       // 目标就是当前这首：不重新加载，只在需要时恢复播放
       if (autoplay && this.audio.paused) this.play()
       return

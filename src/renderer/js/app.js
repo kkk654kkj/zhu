@@ -386,10 +386,15 @@ function computedList() {
     // 不设时间窗口——窗口会让"上个月整理的那批歌"凭空消失，用户只会觉得是 bug
     list = state.tracks.slice().sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
   } else if (state.view === 'most') {
-    // 最常播放（v1.7）：只列有播放记录的，按次数降序
-    list = state.tracks
-      .filter((t) => (state.playCounts[t.id] || 0) > 0)
-      .sort((a, b) => (state.playCounts[b.id] || 0) - (state.playCounts[a.id] || 0))
+    // 最常播放（v1.7）：只列有播放记录的，按次数降序。
+    // v3.3.66：以前只遍历 state.tracks —— 在线曲的 id 是 on: 前缀、不在曲库里，
+    // 播得再多也上不了榜（次数白记，徽章数字还把它算进去了）
+    const counts = state.playCounts || {}
+    list = Object.keys(counts)
+      .filter((id) => (counts[id] || 0) > 0)
+      .map((id) => resolveTrack(id))
+      .filter(Boolean)
+    list.sort((a, b) => (counts[b.id] || 0) - (counts[a.id] || 0))
   } else if (state.view === 'folders') {
     list = []   // 目录网格自渲染，不走表格
   } else if (state.view.startsWith('folder:')) {
@@ -729,6 +734,14 @@ function bindPlayer() {
     if (playing && player.current && state.historyId !== player.current.id) {
       const id = player.current.id
       state.historyId = id
+      // v3.3.66：在线曲也要先落元数据 —— 否则「最近播放」里这行永远解析不出来
+      // （徽章按 history.length 算，数字会比列表多；以后收藏了又会凭空多出一行）
+      if (id.indexOf('on:') === 0 && typeof Online !== 'undefined' && Online.rememberTrack) {
+        Online.rememberTrack(player.current).then(() => {
+          updateNavCounts()
+          if (state.view === 'recent') renderView()
+        }).catch(() => {})
+      }
       window.api.addHistory(id).catch(() => {})
       state.history = [{ id, at: Date.now() }]
         .concat(state.history.filter((h) => h.id !== id)).slice(0, 300)
@@ -867,7 +880,9 @@ async function recoverOnlineTrack(cur) {
   const name = (Online.sources.find((s) => s.id === song.source) || {}).short || song.source
   toast('已换源到「' + name + '」继续播放', 2500)
   state.fallbackTried.add(cur.id)
-  player.setQueue(tracks, idx, true)
+  // v3.3.66：必须带 force —— id 没变（上面刻意保持），只传三参会被
+  // setQueue 的「同一首不重载」早退吞掉，新地址永远不加载
+  player.setQueue(tracks, idx, true, true)
 }
 
 /**

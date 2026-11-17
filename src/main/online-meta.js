@@ -73,6 +73,21 @@ function sanitizeMetas(list, now) {
 }
 
 /**
+ * 把一条新元数据合并到旧条目上（v3.3.66）。
+ *
+ * 为什么不能整条替换：规格列只有「探测完成」时才有值，而收藏 / 加歌单可能在
+ * 探测之前就发生 —— 那时 metaOf 落下来的是 spec:null，整条替换会把已经存好的
+ * 「母带」洗成「在线」。所以规格只增不减，其余字段仍以新值为准。
+ * @returns {object|null}
+ */
+function mergeMeta(prev, next) {
+  if (!next) return prev || null
+  const out = Object.assign({}, next)
+  if (!out.spec && prev && prev.spec) out.spec = prev.spec
+  return out
+}
+
+/**
  * 按「仍被引用」清理元数据表。
  *
  * 引用来源只有两个：收藏 id 列表、各歌单的 trackIds。
@@ -94,4 +109,4 @@ function pruneToRefs(map, favorites, playlists) {
   return { out, dropped }
 }
 
-module.exports = { metaIdOf, sanitizeMeta, sanitizeMetas, pruneToRefs }
+module.exports = { metaIdOf, sanitizeMeta, sanitizeMetas, mergeMeta, pruneToRefs }

@@ -14,6 +14,8 @@ const require = createRequire(import.meta.url)
 const here = path.dirname(fileURLToPath(import.meta.url))
 const target = path.resolve(here, '../src/main/online.js')
 const src = fs.readFileSync(target, 'utf8')
+// online.js 里的 require('./xxx') 必须按它自己的目录解析（v3.3.66 新增 ./http-util）
+const mainRequire = createRequire(target)
 
 function loadOnline() {
   const mod = { exports: {} }
@@ -24,7 +26,7 @@ function loadOnline() {
       ' anySignal, abortError, sleepAbortable, qingEnsureTicket,' +
       ' getPlayable, qingTicketExp: () => qingTicketExp }'
   )
-  factory(mod, mod.exports, require, target, path.dirname(target))
+  factory(mod, mod.exports, mainRequire, target, path.dirname(target))
   return mod.exports
 }
 

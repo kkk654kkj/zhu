@@ -7,6 +7,8 @@ const fs = require('fs')
  */
 const DC = require('./dircache')
 const SP = require('./streamproxy')
+// v3.3.66：上游请求头过滤与 streamproxy 共用一份
+const HTTPU = require('./http-util')
 const { app, BrowserWindow } = require('electron')
 
 let G = null
@@ -283,9 +285,9 @@ async function dlRun(task) {
       offset = 0
     }
 
-    const headers = { 'User-Agent': 'Mozilla/5.0' }
-    if (info.referer) headers.Referer = info.referer
-    if (info.headers && typeof info.headers === 'object') Object.assign(headers, info.headers)
+    // v3.3.66：走共用过滤器 —— 以前直接 Object.assign，上游回的 Host/Content-Length/
+    // Connection 会被原样塞给 undici（TypeError），表现是「这首下载必失败」
+    const headers = HTTPU.buildUpstreamHeaders(info)
     if (offset > 0) headers.Range = 'bytes=' + offset + '-'
 
     // v3.3.16：握手阶段单独限时。下载同样会卡在「连接已建立、响应头一直不来」，
@@ -536,6 +538,10 @@ function probeLimit(fn) {
       try { p = fn() } catch (e) {
         probeRunning--
         reject(e)
+        // v3.3.66：同步抛错这条路径以前不唤醒排队项 —— 排队的探测要等下一次
+        // 成功探测的 finally 才被 shift，没有别的探测时那首会一直停在「探测中」
+        const next = probeWaiting.shift()
+        if (next) next()
         return
       }
       p.then(resolve, reject).finally(() => {

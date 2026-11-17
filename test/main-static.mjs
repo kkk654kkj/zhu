@@ -1000,7 +1000,7 @@ function main() {
 
       ok('v3.3.63：下载任务「无法校验」标记能传到界面（DTO 带 unverified）',
         /unverified: !!t\.unverified/.test(dlSrc63) &&
-        /t\.unverified \?/.test(read('src/renderer/js/online.js')))
+        /if \(t\.unverified\) warn =/.test(read('src/renderer/js/online.js')))
 
       ok('v3.3.63：续传按同一资源判断 + 总长度比对（签名变化不再白下）',
         /function dlSameResource\(a, b\)/.test(dlSrc63) &&
@@ -1153,6 +1153,62 @@ function main() {
 
       ok('v3.3.65：新增 daily-fav 单测入库且覆盖 11 项',
         (read('test/daily-fav.mjs').match(/\bok\(/g) || []).length >= 11)
+    }
+
+    // ===== v3.3.66 审查修复（回退即报红） =====
+    {
+      const omSrc66 = read('src/main/online-meta.js')
+      const huSrc66 = read('src/main/http-util.js')
+      const dlSrc66 = read('src/main/downloader.js')
+      const olMain66 = read('src/main/online.js')
+      const spSrc66 = read('src/main/streamproxy.js')
+      const libSrc66 = read('src/main/library.js')
+      const pjSrc66 = read('src/renderer/js/player.js')
+      const appSrc66 = read('src/renderer/js/app.js')
+      const olSrc66 = read('src/renderer/js/online.js')
+      const miniSrc66 = read('src/renderer/js/mini.js')
+
+      ok('v3.3.66：mergeMeta 导出且「后到条目没带档位不清旧档位」',
+        /function mergeMeta\(prev, next\)/.test(omSrc66) &&
+        /if \(!out\.spec && prev && prev\.spec\) out\.spec = prev\.spec/.test(omSrc66) &&
+        / mergeMeta,/.test(omSrc66))
+
+      ok('v3.3.66：tracksRemember 走 mergeMeta（不整条覆盖）+ 收藏入口挡非字符串 id',
+        /out\[m\.id\] = OMETA\.mergeMeta\(cur\[m\.id\], m\)/.test(mainSrc) &&
+        /if \(typeof trackId !== 'string' \|\| !trackId\) return store\.get\(\)\.favorites \|\| \[\]/.test(mainSrc))
+
+      ok('v3.3.66：换源 fallback 用 force 重载（同 id 不再被早退吞掉）',
+        /if \(!force && targetId === prevId && this\.audio\.src\)/.test(pjSrc66) &&
+        /player\.setQueue\(tracks, idx, true, true\)/.test(appSrc66) &&
+        /test\/player-recover\.mjs/.test(read('package.json')) === false /* 单测靠 tools 枚举，不进 package.json */)
+
+      ok('v3.3.66：在线曲写收藏/历史前先 rememberTrack（底栏 ♥ 不再留空行）',
+        /async rememberTrack\(track, spec\)/.test(olSrc66) &&
+        /await Online\.rememberTrack\(/.test(miniSrc66) &&
+        /Online\.rememberTrack\(player\.current\)/.test(appSrc66) &&
+        /rememberTrack\(cur \|\|/.test(miniSrc66))
+
+      ok('v3.3.66：上游头统一走 http-util（过滤逐跳头，三处一致）',
+        /HOP_HEADER = \/\^\(host\|content-length\|connection\|keep-alive\|transfer-encoding\|upgrade\|proxy-connection\|te\|trailer\|range\)\$\/i/.test(huSrc66) &&
+        /HTTPU\.buildUpstreamHeaders\(info\)/.test(dlSrc66) &&
+        /HTTPU\.buildUpstreamHeaders\(info\)/.test(olMain66) &&
+        /HTTPU\.buildUpstreamHeaders\(info\)/.test(spSrc66) &&
+        !/Object\.assign\(headers, info\.headers\)/.test(dlSrc66 + olMain66 + spSrc66))
+
+      ok('v3.3.66：下载 done 复用 + 封面主色挡内网地址',
+        /t\.status === 'done'\) return \{ ok: false, error: '这首已经下载过了'/.test(mainSrc) &&
+        /HTTPU\.isPrivateHost\(new URL\(String\(coverUrl\)\)\.hostname\)/.test(mainSrc))
+
+      ok('v3.3.66：probeLimit 同步抛错也唤醒排队 + 封面预热 promise 可结算',
+        (dlSrc66.match(/probeWaiting\.shift\(\)/g) || []).length >= 2 &&
+        /_coverWarmupResolve = r/.test(libSrc66) &&
+        /if \(this\._coverWarmupResolve\)/.test(libSrc66))
+
+      ok('v3.3.66：档位文案统一为「高解析」+ 探测结果回写 song + 下载警示不再二次转义',
+        /text: hi \? '高解析' : '无损'/.test(read('src/renderer/js/daily.js')) &&
+        /x\.song\._q = x\.q/.test(read('src/renderer/js/daily.js')) &&
+        /\$\{esc\(line\)\}\$\{warn \?/.test(olSrc66) &&
+        (read('test/player-recover.mjs').match(/\bok\(/g) || []).length >= 9)
     }
 
   }

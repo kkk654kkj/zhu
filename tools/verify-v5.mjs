@@ -201,7 +201,9 @@ try {
       /startCoverWarmup\(\)/.test(lib) && /stopCoverWarmup\(\)/.test(lib) &&
       /coverKeyOf\(t\)/.test(lib) && /coverKeyOf\(t\)/.test(gc.slice(0, 600)))
   ok('预热串行节流且可中止',
-      /_coverWarmupAbort/.test(lib) && /setTimeout\(r, DELAY\)/.test(lib))
+      // v3.3.66：延时器改成可提前结算（只 clearTimeout 会让 await 永久挂起）
+      /_coverWarmupAbort/.test(lib) && /_coverWarmupResolve = r/.test(lib) &&
+      /setTimeout\(\(\) => \{ this\._coverWarmupResolve = null; r\(\) \}, DELAY\)/.test(lib))
   ok('构造函数初始化预热句柄',
       /_coverWarmupAbort = true/.test(lib) && /_coverWarmupTimer = null/.test(lib))
   ok('退出链中止预热',

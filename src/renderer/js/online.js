@@ -93,13 +93,51 @@ const Online = {
     const cur = player.current
     if (!cur || !cur.online || !p) return
     if ((cur.onlineKey || '') !== p.id) return
+    let spec = null
     if (p.lossless && !cur.lossless) {
       cur.lossless = true
       cur.ext = 'FLAC'
+      spec = {
+        text: '无损',
+        cls: 'lossless',
+        tip: '取流后确认无损 FLAC' + (p.bitrate ? ' · ' + p.bitrate + 'k' : '') + (p.cached ? '（来自缓存）' : '')
+      }
       toast('这首其实拿到了无损 FLAC' + (p.bitrate ? ' · ' + p.bitrate + 'k' : '') + (p.cached ? '（来自缓存）' : ''))
     } else if (!p.lossless && cur.lossless) {
       cur.lossless = false
+      spec = { text: (p.bitrate || 320) + 'k', cls: 'dim', tip: '这次只拿到 ' + (p.bitrate || 320) + 'k' }
       toast('无损这次没取到，已按 ' + (p.bitrate || 320) + 'k 播放')
+    }
+    // v3.3.66：以前只改 lossless 标志 —— 规格列还显示点播那一刻的结论，和 toast 打架
+    if (spec) this.applyPlayingSpec(cur, spec)
+  },
+
+  /**
+   * 把「取流后才知道的真实档位」写回当前曲 + 在线列表行 + 已落盘元数据。
+   * 落盘那步很关键：收藏页/队列的规格列读的就是它，不更新的话重启后又变回旧结论。
+   */
+  applyPlayingSpec(cur, spec) {
+    cur.specText = spec.text
+    cur.specCls = spec.cls
+    cur.specTip = spec.tip || ''
+    const id = cur.id
+    const song = (this.list || []).find((s) => this.keyOf(s) === id)
+    if (song) song._q = spec
+    const row = Array.from(document.querySelectorAll('#opBody .op-tr')).find((r) => r.dataset.id === id)
+    if (row) {
+      const cell = row.querySelector('.op-c-q')
+      if (cell) {
+        cell.textContent = spec.text
+        cell.className = 'op-c-q ' + spec.cls
+        if (spec.tip) cell.title = spec.tip
+      }
+    }
+    if (cur.onlineMeta) {
+      const meta = Object.assign({}, cur.onlineMeta, { spec })
+      cur.onlineMeta = meta
+      window.api.onlineTracksRemember([meta])
+        .then((map) => this.syncOnlineMeta(map))
+        .catch(() => {})
     }
   },
 
@@ -254,7 +292,7 @@ const Online = {
     }
     if (from > 0) body.insertAdjacentHTML('beforeend', html)
     else body.innerHTML = html
-    if (from === 0) this.probeQuality()
+    this.probeQuality(from)
   },
 
   markPlaying(id) {
@@ -270,13 +308,16 @@ const Online = {
    * 搜索接口给的码率是平台标称（酷我/QQ 一律 128k），看不出无损，容易让人以为放不了 flac。
    * 这里对前 24 行各问一次解析服务——只取 2 字节拿 content-range，顺带把直链塞进缓存，
    * 真点播放时就不用再解析。3 路并发，换关键词就作废上一轮。
+   * @param {number} from 「加载更多」追加的起始行（v3.3.66：以前追加的行永不探测，
+   *        同一页里前 24 行是实测档位、第 25 行起是平台标称，口径不一致）
    */
-  async probeQuality() {
-    const token = ++this.probeToken
+  async probeQuality(from = 0) {
+    // 只有新一轮搜索才作废上一轮；追加时沿用当前 token，否则会打断上一批的探测
+    const token = from === 0 ? ++this.probeToken : this.probeToken
     if (qualityKey() === '128k') return
     const rows = Array.from(document.querySelectorAll('#opBody .op-tr'))
     const todo = []
-    for (const row of rows.slice(0, 24)) {
+    for (const row of rows.slice(from, from + 24)) {
       const song = this.list[Number(row.dataset.index)]
       if (song && !song._q) todo.push({ row, song })
     }
@@ -570,6 +611,50 @@ const Online = {
     state.onlineMeta = new Map(Object.entries(map))
   },
 
+  /**
+   * 在线曲在「写收藏 / 入歌单 / 记历史」之前，先把元数据落盘（v3.3.66）。
+   *
+   * 底栏 ♥、迷你卡、播放历史这些入口以前只传 id：收藏里于是留下一个没有元数据的
+   * `on:` id —— resolveTrack 解析不出来，行被 filter 掉，计数却 +1，重启也在，
+   * 而且没法在收藏视图里删掉。返回 true 表示调用方可以继续写引用。
+   * 本地曲 / 已有元数据 / 不需要元数据的 id 都直接放行。
+   */
+  async rememberTrack(track, spec) {
+    if (!track) return false
+    const id = track.id || (track.source ? this.keyOf(track) : '')
+    if (!id) return false
+    if (id.indexOf('on:') !== 0) return true
+    if (state.onlineMeta && state.onlineMeta.has(id)) return true
+    let meta = null
+    if (track.onlineMeta && track.onlineMeta.id === id) {
+      // 已有落盘条目（重复收藏 / 换源后重播）：只补 spec，不覆盖旧档位
+      meta = Object.assign({}, track.onlineMeta, { spec: spec || track._q || track.onlineMeta.spec || null })
+    } else {
+      // toTrack 出来的 ClientTrack 不带 source/songId，只有 id（on:<src>:<songId>）
+      const m = /^on:([^:]+):(.+)$/.exec(id)
+      if (!m) return false
+      meta = this.metaOf({
+        source: m[1],
+        id: m[2],
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        duration: track.duration,
+        cover: track.cover,
+        quality: ''
+      }, spec || track._q)
+    }
+    if (!meta) return false
+    try {
+      const map = await window.api.onlineTracksRemember([meta])
+      this.syncOnlineMeta(map)
+      return !!(state.onlineMeta && state.onlineMeta.has(id))
+    } catch (err) {
+      console.error('[online] rememberTrack', err)
+      return false
+    }
+  },
+
   /** 只补代理基地址（不渲染界面、不绑事件）：启动时给收藏/歌单里的在线曲铺路 */
   async ensureBase() {
     if (this.proxyBase) return this.proxyBase
@@ -851,13 +936,16 @@ const Online = {
     list.innerHTML = this.dl.slice().sort((a, b) => b.at - a.at).map((t) => {
       const pct = t.total ? Math.min(100, Math.round((t.received / t.total) * 100)) : 0
       let line = ''
+      let warn = ''
       let barCls = ''
       let acts = ''
       if (t.status === 'done') {
         // v3.3.63：上游没给 Content-Length 的（chunked）无法校验完整性，
         // 主进程已置 unverified —— 界面上必须能看见，否则用户以为是完整文件。
-        line = '已完成 · ' + mb(t.received) + ' · ' + String(t.ext || '').toUpperCase() +
-          (t.unverified ? ' · <span style="color:var(--warn,#d9a300)">⚠ 长度未知，可能不完整</span>' : '')
+        // v3.3.66：警告改成独立节点 —— 以前把 <span> 拼进 line 再整体 esc()，
+        // 面板上显示的是这串源码
+        line = '已完成 · ' + mb(t.received) + ' · ' + String(t.ext || '').toUpperCase()
+        if (t.unverified) warn = '⚠ 长度未知，可能不完整'
         barCls = ' done'
         acts = `<button data-act="reveal">打开位置</button><button data-act="delete">移除</button>`
       } else if (t.status === 'paused') {
@@ -882,7 +970,7 @@ const Online = {
           <span class="dl-name" title="${esc(t.artist + ' - ' + t.title)}">${esc(t.title || '未知歌曲')}</span>
           <span class="dl-pct">${t.status === 'done' ? '100%' : (t.total ? pct + '%' : '')}</span>
         </div>
-        <div class="dl-sub">${esc(t.artist || '')} · <span class="dl-line">${esc(line)}</span></div>
+        <div class="dl-sub">${esc(t.artist || '')} · <span class="dl-line">${esc(line)}${warn ? ' · <span class="dl-warn" style="color:var(--warn,#d9a300)">' + esc(warn) + '</span>' : ''}</span></div>
         <div class="dl-bar"><i class="${barCls}" style="width:${t.status === 'done' ? 100 : pct}%"></i></div>
         <div class="dl-acts">${acts}</div>
       </div>`

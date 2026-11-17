@@ -39,6 +39,14 @@ async function toggleMini(on) {
 
 async function toggleFavoriteCurrent() {
   if (!state.currentId) return
+  // v3.3.66：底栏 ♥ / 迷你卡只传 id，在线曲因此没有元数据落盘 —— 收藏里会留下
+  // 一个解析不出来的 on: 空行（计数 +1、列表没有、重启也在、还删不掉）。
+  // 先补元数据再写收藏；补不出来就不写，宁可这次不收藏。
+  const cur = (typeof player !== 'undefined' && player) ? player.current : null
+  if (typeof Online !== 'undefined' && Online.rememberTrack) {
+    const ready = await Online.rememberTrack(cur || { id: state.currentId }).catch(() => false)
+    if (!ready) { toast('这首歌的信息还没准备好，稍后再试', 2500); return }
+  }
   let favs
   try { favs = await window.api.toggleFavorite(state.currentId) }
   catch (err) { toast('操作失败：' + (err.message || err), 2500); return }

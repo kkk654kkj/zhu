@@ -23,6 +23,7 @@ const DLYW = require('./dlyric-window')
 const MPVM = require('./mpv-manager')
 const DL = require('./downloader')
 const OMETA = require('./online-meta')   // v3.3.64：在线曲目元数据的校验 / 按引用清理
+const HTTPU = require('./http-util')     // v3.3.66：上游头过滤 + 内网地址判定（封面取色守卫）
 const DC = require('./dircache')
 const SP = require('./streamproxy')
 
@@ -1522,6 +1523,9 @@ function registerUserDataIpc() {
   // —— 收藏 / 历史 / 播放次数 ——
   ipcMain.handle('favorites:get', () => store.get().favorites || [])
   ipcMain.handle('favorites:toggle', (e, trackId) => {
+    // v3.3.66：非字符串会污染收藏数组，还会让 pruneToRefs 的 keep 集合（字符串）
+    // 与表里那条对不上 —— 误删元数据，并留下一条永远点不开的收藏
+    if (typeof trackId !== 'string' || !trackId) return store.get().favorites || []
     const favs = store.get().favorites || []
     const i = favs.indexOf(trackId)
     if (i >= 0) favs.splice(i, 1)
@@ -1562,7 +1566,9 @@ function registerUserDataIpc() {
     const cur = store.get().onlineTracks || {}
     if (!list.length) return cur
     const out = Object.assign({}, cur)
-    for (const m of list) out[m.id] = m
+    // v3.3.66：逐条合并而不是整条覆盖 —— 后到的一条可能没有 spec（探测未完成 /
+    // 省流量），整条替换会把已存的档位洗成「在线」（见 online-meta.mergeMeta）
+    for (const m of list) out[m.id] = OMETA.mergeMeta(cur[m.id], m)
     store.setKey('onlineTracks', out)   // 同上：整表替换，别用会合并旧键的 patch
     return out
   })
@@ -1851,6 +1857,9 @@ function registerOnlineIpc() {
       if (t.key !== key) continue
       if (t.status === 'paused') return { ok: false, error: '这首在下载列表里（已暂停），去列表点继续', id: t.id }
       if (t.status === 'downloading' || t.status === 'queued' || t.status === 'pausing') return { ok: false, error: '这首正在下载中', id: t.id }
+      // v3.3.66：已下载完的再点一次以前会新建任务，dlPickPath 用 wx 占位后序号化，
+      // 落成「歌名 (2).mp3」—— 扫描后曲库多一首重复曲。已完成就不再重下。
+      if (t.status === 'done') return { ok: false, error: '这首已经下载过了', id: t.id, done: true, path: t.path || '' }
       // 第四轮 §4.5.2 #8：已失败的任务直接复用并重跑，别在列表里再堆一条同 key 的
       if (t.status === 'error') {
         t.error = ''
@@ -2110,7 +2119,12 @@ function registerSystemIpc() {
       if (cov && cov.buf && cov.buf.length) buf = cov.buf
       // v3.3.48：在线曲不在本地曲库里，取不到内嵌封面 —— 按 https 地址拉一次
       // （限 512KB / 8 秒，失败静默，渲染层保持上一个颜色，不闪烁）
+      // v3.3.66：只放行公网 https —— 地址来自渲染层，以前任何 host 都会被主进程
+      // 拉一次（盲 SSRF：能探内网服务的 GET 副作用）
       if (!buf && coverUrl && /^https:\/\//i.test(String(coverUrl))) {
+        let okHost = false
+        try { okHost = !HTTPU.isPrivateHost(new URL(String(coverUrl)).hostname) } catch (err) { okHost = false }
+        if (!okHost) return null
         buf = await fetchCoverBuffer(String(coverUrl))
       }
       if (!buf || !buf.length) return null
