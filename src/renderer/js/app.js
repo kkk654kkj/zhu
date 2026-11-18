@@ -611,6 +611,16 @@ function cancelSkipTimer() {
   if (state.skipTimer) { clearTimeout(state.skipTimer); state.skipTimer = null }
 }
 
+/**
+ * v2.8.58（T02-04 同步）：播放条加载指示。
+ * 只在换曲时出现，由 player 的真实事件（元数据 / canplay / error）收掉；
+ * 以前没有任何加载态，慢速文件在加载那几秒里直接显示「播放中 + 0:00」。
+ */
+function setPlaybackLoading(on) {
+  const el = document.getElementById('pbLoading')
+  if (el) el.hidden = !on
+}
+
 function bindPlayer() {
   player.on('track-change', (track) => {
     state.currentId = track.id
@@ -648,6 +658,8 @@ function bindPlayer() {
   player.on('track-leave', (prev, pos) => {
     if (prev) rememberResume(prev.id, pos)
   })
+
+  player.on('loading-change', (on) => setPlaybackLoading(on))
 
   player.on('state-change', (playing) => {
     // 真正开始播放时才记一条历史（track-change 也会在仅加载时触发）

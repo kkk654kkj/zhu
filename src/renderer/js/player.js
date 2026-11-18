@@ -22,6 +22,9 @@ class Player extends Emitter {
     this._pendingSeek = null
     this._endingHandled = false
     this._loadedTrack = null     // 上一次真正 load 进 audio 的曲目（用于切歌时上报播放位置）
+    // v2.8.58（T02-04 同步）：加载态。换曲时置真，由真实事件（元数据 / 可播 / 出错）
+    // 收掉 —— 不用固定延时去猜「大概该好了」。
+    this.loading = false
 
     // v2.8.49 / v3.3.57：加载看门狗。上游响应头已发、正文却不来时，<audio>
     // 既不触发 error 也不 reject play()，底栏会永久停在「播放态 + 0:00 / --:--」。
@@ -54,6 +57,7 @@ class Player extends Emitter {
     })
     audio.addEventListener('loadedmetadata', () => {
       this._loadReady = true
+      this._setLoading(false)
       this._clearLoadWatchdog()
       if (this._pendingSeek != null) {
         try { audio.currentTime = this._pendingSeek } catch {}
@@ -64,6 +68,7 @@ class Player extends Emitter {
     audio.addEventListener('canplay', () => {
       this._loadReady = true
       this._clearLoadWatchdog()
+      this._setLoading(false)
     })
     audio.addEventListener('progress', () => {
       if (!this._loadReady) this._armLoadWatchdog()
@@ -73,6 +78,7 @@ class Player extends Emitter {
     audio.addEventListener('ended', () => this._onEnded())
     audio.addEventListener('error', () => {
       this._clearLoadWatchdog()
+      this._setLoading(false)
       const err = audio.error
       console.error('[player] 音频错误:', err && err.code, err && err.message)
       this.emit('error', err)
@@ -171,6 +177,14 @@ class Player extends Emitter {
     this.emit('queue-change', this.tracks, this.index)
   }
 
+  /** 加载态的唯一写入口：变化才发事件，界面不必轮询也不用固定延时兜底 */
+  _setLoading(v) {
+    const next = !!v
+    if (this.loading === next) return
+    this.loading = next
+    this.emit('loading-change', next)
+  }
+
   _buildShufflePool() {
     this._shufflePool = this.tracks.map((_, i) => i)
     for (let i = this._shufflePool.length - 1; i > 0; i--) {
@@ -209,6 +223,7 @@ class Player extends Emitter {
     // v2.8.49：每次换源都先收掉上一首的看门狗，避免旧定时器误报新曲
     this._clearLoadWatchdog()
     this._loadReady = false
+    this._setLoading(true)
     // 切走之前把上一首的播放位置报出去（长音轨断点续播要靠它）
     if (this._loadedTrack && this._loadedTrack.id !== track.id) {
       this.emit('track-leave', this._loadedTrack, this.audio.currentTime || 0)
@@ -218,6 +233,16 @@ class Player extends Emitter {
     // v3.3.13：跨 load 复位 700ms 抑制窗，短曲目 / 快速切歌的曲末不被误吞
     this._lastEndedAt = 0
     this._pendingSeek = null
+    // v2.8.58：地址为空（文件被删 / 记录坏了）时明确报错，不去 load 一个空地址
+    if (!track.audio) {
+      const err = new Error('曲目地址为空（文件可能已被移动或删除）')
+      err.code = 'NO_PROXY'
+      this._clearLoadWatchdog()
+      this._setLoading(false)
+      this.emit('track-change', track)
+      this.emit('error', err)
+      return
+    }
     this.audio.src = track.audio
     this.audio.load()
     this._armLoadWatchdog()
@@ -268,6 +293,7 @@ class Player extends Emitter {
   stop() {
     this._clearLoadWatchdog()
     this._loadReady = false
+    this._setLoading(false)
     this._clearFade()
     const prev = this._loadedTrack
     let pos = 0
