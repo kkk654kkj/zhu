@@ -88,7 +88,11 @@ ok('主进程 online:proxyBase 也做有限次重试',
   (main.match(/SP\.ensureStreamBase\(\)/g) || []).length >= 2)
 
 ok('地址为空时播放器直接报 NO_PROXY，不去 load 一个假地址',
-  /err\.code = 'NO_PROXY'/.test(player) && /if \(!track\.audio\) \{/.test(player))
+  /if \(track\.online\) err\.code = 'NO_PROXY'/.test(player) && /if \(!track\.audio\) \{/.test(player))
+
+ok('本地空地址不冒充代理未就绪（NO_PROXY 只在在线曲上发）',
+  /if \(track\.online\) err\.code = 'NO_PROXY'/.test(player) &&
+  !/^\s*err\.code = 'NO_PROXY'$/m.test(player))
 
 ok('错误链对 NO_PROXY 只提示并停住（不换源、不跳曲）',
   /err\.code === 'NO_PROXY'/.test(app) && /player\.pause\(\)/.test(app) &&

@@ -226,8 +226,11 @@ class Player extends Emitter {
     // 报 ERR_FILE_NOT_FOUND 被错误链当成坏链换源，连着几首全部「失败」。
     // 这里明确报一个可识别的错误，交给 app.js 提示并停住，不进跳曲链。
     if (!track.audio) {
-      const err = new Error(track.online ? '在线地址未就绪（本地代理端口未绑定）' : '曲目地址为空')
-      err.code = 'NO_PROXY'
+      const err = new Error(track.online ? '在线地址未就绪（本地代理端口未绑定）' : '曲目地址为空（文件可能已被移动或删除）')
+      // v3.3.71 修：只有在线曲才是「代理端口没就绪」，才该停住等重试。
+      // 本地文件地址为空（盘掉线 / 文件被删）仍走原有失败链：计数 → 自动跳下一首，
+      // 否则一张专辑里缺一个文件就会整队停在这里。
+      if (track.online) err.code = 'NO_PROXY'
       this._clearLoadWatchdog()
       this.emit('track-change', track)
       this.emit('error', err)
