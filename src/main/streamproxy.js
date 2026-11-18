@@ -221,7 +221,8 @@ function newFlight(key) {
 }
 
 function attachSub(flight, req, res) {
-  const sub = { req, res, alive: true }
+  // owned：正文由别人（serveLocalFile 的 pipe）负责，finally 不许再 end
+  const sub = { req, res, alive: true, owned: false }
   flight.subs.add(sub)
   const onClose = () => {
     if (res.writableFinished) return
@@ -319,6 +320,8 @@ async function handleStreamRequest(req, res) {
       if (inflight.get(flight.key) === flight) inflight.delete(flight.key)
       for (const sub of Array.from(flight.subs)) {
         try { sub.cleanup() } catch (e) { /* 忽略 */ }
+        // 交给 serveLocalFile 的订阅者自己会收尾；这里再 end 会把正文截成 0 字节
+        if (sub.owned) continue
         try { if (!sub.res.writableEnded) sub.res.end() } catch (e) { /* 已断开 */ }
       }
       flight.subs.clear()
@@ -353,7 +356,15 @@ async function runFlight(flight, ctx) {
         // 事件只推一次 —— 多个订阅者只是同一首歌的多个搬运工，界面不该收两条。
         G.logLine('[cache] 命中(降级档)', path.basename(hit2.path))
         G.sendToRenderer('online:now-playing', cacheNowPlaying(song, hit2, info))
-        for (const sub of liveSubs(flight)) serveLocalFile(hit2.path, sub.req, sub.res)
+        for (const sub of liveSubs(flight)) {
+          // v3.3.71 修：serveLocalFile 是 rs.pipe(res)，**异步**写正文。
+          // 把它标成 owned，让 handleStreamRequest 的 finally 不要替它 end() ——
+          // 真实 ServerResponse 一旦在 pipe 装好后被 end，正文一个字节都发不出去，
+          // 客户端拿到声明的 Content-Length + 0 字节并挂住（无损请求降级到 mp3
+          // 且该档已有缓存时必现，是本轮 gate 抓到的回归）。
+          sub.owned = true
+          serveLocalFile(hit2.path, sub.req, sub.res)
+        }
         return
       }
     }
