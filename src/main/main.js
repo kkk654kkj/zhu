@@ -1706,7 +1706,17 @@ function registerLyricIpc() {
 function registerOnlineIpc() {
   // —— 联网版：在线音乐 ——
   ipcMain.handle('online:sources', () => online.listSources())
-  ipcMain.handle('online:proxyBase', () => SP.ensureStreamBase())
+  // v3.3.71（T02-03）：端口绑定失败（安全软件临时拦 / TIME_WAIT）属于可恢复故障。
+  // 以前直接把空串交给渲染层，渲染层拿去拼出相对 /stream，<audio> 报
+  // ERR_FILE_NOT_FOUND（错误链当 ENOENT），接着换源 → 再失败 → 连跳。
+  // 这里只做有限次重试（2 次、间隔 250ms），拿不到就明确回空，由界面提示重试。
+  ipcMain.handle('online:proxyBase', async () => {
+    let base = await SP.ensureStreamBase()
+    if (base) return base
+    await new Promise((r) => setTimeout(r, 250))
+    base = await SP.ensureStreamBase()
+    return base || ''
+  })
 
   ipcMain.handle('online:search', async (e, { keyword, page, limit, sources } = {}) => {
     const kw = String(keyword || '').trim()

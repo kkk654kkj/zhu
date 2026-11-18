@@ -592,6 +592,8 @@ const Daily = {
     const token = (this._playToken || 0) + 1
     this._playToken = token
     try { await Online.init() } catch { /* 下面按 proxyBase 判断 */ }
+    // v3.3.71（T02-03）：init 的结论可能早已过期（端口重绑 / 当时被拦），播前现问一次
+    await Online.ensureBase()
     if (!Online.proxyBase) {
       toast('本地代理未就绪，在线播放暂不可用。稍后重试或重启应用', 4000)
       return
@@ -623,6 +625,7 @@ const Daily = {
         return
       }
       try { await Online.init() } catch { /* 下面按 proxyBase 判断 */ }
+      await Online.ensureBase()
       if (!Online.proxyBase) {
         toast('本地代理未就绪，在线播放暂不可用。稍后重试或重启应用', 4000)
         return

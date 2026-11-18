@@ -221,6 +221,18 @@ class Player extends Emitter {
     // v3.3.13：跨 load 复位 700ms 抑制窗，短曲目 / 快速切歌的曲末不被误吞
     this._lastEndedAt = 0
     this._pendingSeek = null
+    // v3.3.71（T02-03）：在线曲地址为空 = 本地代理还没拿到端口。
+    // 以前照旧赋给 <audio>，相对 /stream 在 file:// 页面下变成 file:///stream，
+    // 报 ERR_FILE_NOT_FOUND 被错误链当成坏链换源，连着几首全部「失败」。
+    // 这里明确报一个可识别的错误，交给 app.js 提示并停住，不进跳曲链。
+    if (!track.audio) {
+      const err = new Error(track.online ? '在线地址未就绪（本地代理端口未绑定）' : '曲目地址为空')
+      err.code = 'NO_PROXY'
+      this._clearLoadWatchdog()
+      this.emit('track-change', track)
+      this.emit('error', err)
+      return
+    }
     this.audio.src = track.audio
     this.audio.load()
     this._armLoadWatchdog()

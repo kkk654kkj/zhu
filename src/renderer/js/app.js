@@ -825,12 +825,22 @@ function bindPlayer() {
     if (!document.getElementById('audioPanel').hidden) paintExclusiveVolume()
   })
 
-  player.on('error', () => {
+  player.on('error', (err) => {
     const cur = player.current
     // 同一首歌的重复报错只处理一次（mpvaudio 对同一文件可能连发
     // error / file-error 两类事件，不去重会一次失败跳两首）
     if (cur && state.lastErrKey === cur.id && Date.now() - state.lastErrAt < 2000) return
     if (cur) { state.lastErrKey = cur.id; state.lastErrAt = Date.now() }
+
+    // v3.3.71（T02-03）：代理端口没就绪不是「这首歌坏了」——地址压根没拼出来。
+    // 以前这种空地址会被当成坏链：作废直链 → 换源 → 再失败，连跳几首还弹「音源失效」。
+    // 只提示并停住：换源、跳下一首都救不了「端口没绑上」。
+    if (err && err.code === 'NO_PROXY') {
+      toast((err.message || '在线地址未就绪') + '，请稍后重试', 3500)
+      cancelSkipTimer()
+      player.pause()
+      return
+    }
 
     // v3.3.18（第四轮 P1 #7）：在线曲放不出来 = 这条直链多半已经失效。
     // 以前只有 mpv **独占**下的 file-error 会让主进程作废直链缓存；默认共享输出时

@@ -27,8 +27,28 @@ function onEl(id, ev, fn) {
   if (node) node.addEventListener(ev, fn)
 }
 
-const Online = {
-  list: [],            // 当前搜索结果（OnlineSong）
+/**
+ * v3.3.71（T02-03）：取本地代理基地址的有限重试。
+ *
+ * 主进程绑端口是异步的；安全软件临时拦截、端口 TIME_WAIT 都会让第一次拿到空串。
+ * 以前取到空串就当场拼出相对 `/stream`（file:// 页面下等于 file:///stream），
+ * <audio> 报 ERR_FILE_NOT_FOUND，被错误链当成坏链去换源重试 —— 越重试越坏。
+ * 现在重试几次；仍然拿不到就明确返回空串，由调用方给「稍后重试」提示。
+ */
+async function fetchProxyBase(api, attempts = 3, delayMs = 250) {
+  if (!api || typeof api.onlineProxyBase !== 'function') return ''
+  const tries = Math.max(1, attempts)
+  for (let i = 0; i < tries; i++) {
+    let base = ''
+    try { base = await api.onlineProxyBase() } catch (err) { base = '' }
+    base = typeof base === 'string' ? base.trim() : ''
+    if (base) return base
+    if (i < tries - 1 && delayMs > 0) await new Promise((r) => setTimeout(r, delayMs))
+  }
+  return ''
+}
+
+const Online = {  list: [],            // 当前搜索结果（OnlineSong）
   keyword: '',
   page: 1,
   hasMore: false,
@@ -469,6 +489,9 @@ const Online = {
     }
     // 第四轮 §4.5.3 #15：本地代理没起来时以前会拼出相对 /stream，
     // <audio> 只会报 code 4，用户完全看不出是代理端口绑定失败
+    // v3.3.71（T02-03）：init 时拿到的是当时的结论，可能早已过期（端口重绑过 / 当时被拦），
+    // 播放前现问一次（内部有限重试），别拿旧空串直接拒绝用户。
+    await this.ensureBase()
     if (!this.proxyBase) {
       if (!stale) this.setStatus('❌ 本地代理未就绪（端口绑定失败），请稍后重试', this.hasMore)
       toast('本地代理未就绪，在线播放暂不可用。稍后重试或重启应用', 4000)
@@ -506,6 +529,10 @@ const Online = {
 
   /** 这首歌在本机代理上的地址（解析交给主进程，播到才做） */
   streamUrlFor(song) {
+    // v3.3.71（T02-03）：代理没就绪就绝不拼地址。
+    // 以前返回相对 `/stream?...`，在 file:// 页面下变成 file:///stream，
+    // <audio> 报 ERR_FILE_NOT_FOUND，错误链把它当坏链去换源，越换越死。
+    if (!this.proxyBase) return ''
     const q = new URLSearchParams({
       q: qualityKey(),
       t: song.title || '',
@@ -521,11 +548,11 @@ const Online = {
     // 主进程的缓存键挂在地址上，如果跟着换源结果走，
     // 同一行点两次（一次直连、一次换源）就会变成两份互不相认的缓存。
     const actual = (resolved && resolved.song) || song
-    return {
+    const track = {
       id: `on:${song.source}:${song.id}`,
       online: actual,                     // 歌词/下载用实际发声的那首
       onlineKey: `${song.source}:${song.id}`,
-      audio: this.streamUrlFor(song),
+      audio: '',                          // 见下方 getter：按读的那一刻现拼
       title: song.title,
       artist: song.artist,
       album: song.album || '',
@@ -541,6 +568,15 @@ const Online = {
       specTip: (song._q && song._q.tip) || '',
       path: null
     }
+    // v3.3.71（T02-03）：地址改成 getter，按「读的那一刻」的代理端口与音质设置现拼。
+    // 启动时收藏/歌单里的在线曲可能还没拿到端口（主进程刚绑），那时拼出来的是空串；
+    // 等真正要播时端口早就绪了，不必为了一首歌重建整条队列。
+    Object.defineProperty(track, 'audio', {
+      enumerable: true,
+      configurable: true,
+      get: () => this.streamUrlFor(song)
+    })
+    return track
   },
 
   /* ---------------- 收藏 / 歌单（v3.3.64） ---------------- */
@@ -672,7 +708,8 @@ const Online = {
   /** 只补代理基地址（不渲染界面、不绑事件）：启动时给收藏/歌单里的在线曲铺路 */
   async ensureBase() {
     if (this.proxyBase) return this.proxyBase
-    try { this.proxyBase = await window.api.onlineProxyBase() } catch (err) { this.proxyBase = '' }
+    // v3.3.71（T02-03）：有限重试（3 次 / 250ms），拿不到就明确回空串
+    this.proxyBase = await fetchProxyBase(window.api)
     return this.proxyBase
   },
 
@@ -800,10 +837,11 @@ const Online = {
   },
 
   /** 加入队列（不打断当前播放） */
-  addQueueAt(i) {
+  async addQueueAt(i) {
     const song = this.list[i]
     if (!song) return
-    // 与 play() 同口径：代理未就绪时 toTrack 会拼出相对 /stream，播到该曲必然 404
+    // v3.3.71（T02-03）：入队前现问一次代理（有限重试），别拿启动时的空串判死
+    await this.ensureBase()
     if (!this.proxyBase) {
       toast('本地代理未就绪，在线播放暂不可用。稍后重试或重启应用', 4000)
       return
