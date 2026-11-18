@@ -466,6 +466,14 @@ async function runFlight(flight, ctx) {  const { song, source, id, prefer, range
       }
     }
     if (resume && startAt > 0) headers.Range = 'bytes=' + startAt + '-'
+    // v3.3.71 修：残片从登记表「取走」后，只要这次没真正用上（上游打不开 / 502 /
+    // 订阅者全断），就必须放回去 —— 否则 .part 变成没人认领的孤儿，磁盘只增不减。
+    const keepResume = () => {
+      if (!resume) return
+      putResume(cKey, resume)
+      resume = null
+      startAt = 0
+    }
     let opened
     try {
       opened = await openUpstream(info, headers, flight.ctrl.signal)
@@ -493,6 +501,7 @@ async function runFlight(flight, ctx) {  const { song, source, id, prefer, range
         }
       }
       if (!opened) {
+        keepResume()
         failAll(flight, 502, 'upstream error')
         return
       }
@@ -500,6 +509,7 @@ async function runFlight(flight, ctx) {  const { song, source, id, prefer, range
     const upstream = opened.upstream
     flight.upstreamCtrl = opened.ctrl
     if (dead()) {
+      keepResume()
       try { Promise.resolve(upstream.body && upstream.body.cancel()).catch(() => {}) } catch (e) { /* 忽略 */ }
       return
     }
@@ -513,6 +523,7 @@ async function runFlight(flight, ctx) {  const { song, source, id, prefer, range
       try { G.online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
       // 第四轮 §4.5.2 #1：非 2xx 的响应体不取消会一直占着连接
       try { Promise.resolve(upstream.body && upstream.body.cancel()).catch(() => {}) } catch (e) { /* 忽略 */ }
+      keepResume()
       failAll(flight, 502, 'upstream ' + upstream.status)
       return
     }
@@ -711,7 +722,7 @@ async function runFlight(flight, ctx) {  const { song, source, id, prefer, range
       }
     }
 
-    if (dead()) { dropPart(); return }
+    if (dead()) { await parkPart(); return }
     // 封口：从这里开始正文要按序发出，半路再插队的请求只能自己另起一条上游
     flight.sealed = true
     // 续传时客户端要的是「从 0 开始整段」，前缀由本地残片补，状态码必须是 200 而不是 206
@@ -735,7 +746,7 @@ async function runFlight(flight, ctx) {  const { song, source, id, prefer, range
       cached: false
     })
     if (!upstream.body) {
-      dropPart()
+      await parkPart()
       for (const sub of liveSubs(flight)) { try { sub.res.end() } catch (e) { /* 已断开 */ } }
       return
     }
@@ -746,7 +757,7 @@ async function runFlight(flight, ctx) {  const { song, source, id, prefer, range
       if (!okPrefix) {
         // 前缀没发全，响应已经不可信：断开而不是让客户端把半首当整首
         for (const sub of liveSubs(flight)) { try { sub.res.destroy() } catch (e) { /* 已断开 */ } }
-        dropPart()
+        await parkPart()
         return
       }
     }
@@ -762,7 +773,8 @@ async function runFlight(flight, ctx) {  const { song, source, id, prefer, range
       cacheWrite: writer ? writer.write : null
     })
   } catch (err) {
-    try { dropPart() } catch (e) { /* 忽略 */ }
+    try { await parkPart() } catch (e) { /* 忽略 */ }
+    keepResume()
     G.logLine('[online] 代理异常', (err && err.message) || err)
     // 头已发出的订阅者只能断开（再 writeHead 会抛）；没发的补一个 500
     failAll(flight, 500, 'proxy error')

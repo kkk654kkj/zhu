@@ -225,6 +225,44 @@ stubUpstream({ dropAfter: 1000 })
   ok('作废后仍按整段重新缓存', puts.length === 1 && puts[0].size === 3000, 'puts=' + JSON.stringify(puts))
 }
 
+/* ---------- ⑤ 上游 502 / 打不开：残片必须归还，不能变孤儿 ---------- */
+initG()
+stubUpstream({ dropAfter: 1000 })
+{
+  const res = new FakeRes()
+  await SP.handleStreamRequest(reqOf('orphan', 'bytes=0-'), res)
+  ok('前置：先造一份 1000 字节残片', partsInCache().length === 1, 'parts=' + JSON.stringify(partsInCache()))
+}
+{
+  initG()
+  puts.length = 0
+  // 上游明确 502（真机里对应 CDN 拒绝 / 签名失效）
+  global.fetch = async () => ({
+    ok: false,
+    status: 502,
+    headers: { get: (k) => (k === 'content-type' ? 'audio/mpeg' : null) },
+    body: { getReader: () => ({ read: async () => ({ done: true }), cancel: async () => {} }) }
+  })
+  const res = new FakeRes()
+  await SP.handleStreamRequest(reqOf('orphan', 'bytes=0-'), res)
+  const parts = partsInCache()
+  const size = parts.length ? fs.statSync(path.join(CACHE, parts[0])).size : 0
+  ok('上游 502 后残片仍在盘上（不是没人认领的孤儿）', parts.length === 1 && size === 1000,
+    'parts=' + JSON.stringify(parts) + ' size=' + size)
+  ok('502 这一轮不写缓存索引', puts.length === 0, 'puts=' + puts.length)
+}
+{
+  initG()
+  puts.length = 0
+  const ranges = stubUpstream()
+  const res = new FakeRes()
+  await SP.handleStreamRequest(reqOf('orphan', 'bytes=0-'), res)
+  ok('归还的残片下一轮还能续上（上游只收后半段）',
+    ranges.length === 1 && ranges[0] === 'bytes=1000-' && res.body().length === 3000 && res.body().equals(BUF),
+    'ranges=' + JSON.stringify(ranges) + ' len=' + res.body().length)
+  ok('续上后缓存按整首落盘', puts.length === 1 && puts[0].size === 3000, 'puts=' + JSON.stringify(puts))
+}
+
 global.fetch = REAL_FETCH
 try { fs.rmSync(CACHE, { recursive: true, force: true }) } catch (e) { /* 忽略 */ }
 console.log(fail ? `\n${pass} 通过 / ${fail} 失败` : `\n全部通过（${pass} 项）`)

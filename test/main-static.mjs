@@ -870,7 +870,7 @@ function main() {
         /let info = await G\.online\.getPlayable/.test(spSrc) &&
         /!dead\(\) && \(prefer === 'master' \|\| prefer === 'lossless'\)/.test(spSrc) &&
         /getPlayable\(song, 'best', \{ signal: flight\.ctrl\.signal \}\)/.test(spSrc) &&
-        /if \(!opened\) \{\r?\n        failAll\(flight, 502, 'upstream error'\)/.test(spSrc) &&
+        /if \(!opened\) \{\r?\n        keepResume\(\)\r?\n        failAll\(flight, 502, 'upstream error'\)/.test(spSrc) &&
         /上游降级重试成功/.test(spSrc))
 
       ok('渲染层加载看门狗：20 秒无数据明确报错，progress 续期，元数据到达收掉',
