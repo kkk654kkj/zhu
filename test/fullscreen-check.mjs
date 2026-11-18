@@ -281,5 +281,41 @@ ok('独占开关重载后自动展开全屏页，标记只用一次',
   reopenCalls.length === 1 && reopenCalls[0] === true && !reopenStore.has('lx_fs_reopen'),
   JSON.stringify(reopenCalls))
 
+/* 回归（v3.3.70 成品实测踩到）：boot 挂在 window 的 DOMContentLoaded 上，document 阶段的
+   监听先跑，那一刻 UI.els 还是空的。此时不能把恢复标记白吃掉，必须等 els 就绪再展开。 */
+const lateStore = new Map([['lx_fs_reopen', '1']])
+const lateCalls = []
+const lateUI = {
+  els: {},
+  isFullscreen: () => false,
+  setFullscreen: (s) => { lateCalls.push(s); return !!s },
+  toggleQueue: () => {}
+}
+const lateCtx = vm.createContext({
+  console,
+  document: {
+    readyState: 'loading',
+    body: new El('body', 'body'),
+    getElementById: () => null,
+    querySelector: () => null,
+    addEventListener: () => {}
+  },
+  window: { api: {}, addEventListener: (t, fn) => { if (t === 'load') setTimeout(fn, 10) } },
+  MutationObserver: MO,
+  sessionStorage: {
+    getItem: (k) => (lateStore.has(k) ? lateStore.get(k) : null),
+    setItem: (k, v) => lateStore.set(k, String(v)),
+    removeItem: (k) => lateStore.delete(k)
+  },
+  UI: lateUI,
+  setTimeout, clearTimeout
+})
+vm.runInContext(fs.readFileSync(path.join(ROOT, 'src/renderer/js/fullscreen.js'), 'utf8'), lateCtx,
+  { filename: 'fullscreen.js#late' })
+setTimeout(() => { lateUI.els.fsView = { classList: { contains: () => false } } }, 60)
+await new Promise((r) => setTimeout(r, 320))
+ok('boot 晚于 load 时等 els 就绪再展开（恢复标记不被白吃）',
+  lateCalls.length === 1 && lateCalls[0] === true, JSON.stringify(lateCalls))
+
 console.log(fail ? `\n${pass} 通过 / ${fail} 失败` : `\n全部通过（${pass} 项）`)
 process.exit(fail ? 1 : 0)

@@ -51,16 +51,27 @@
     if (UI.isFullscreen()) sessionStorage.setItem('lx_fs_reopen', '1')
   })
 
-  /* 重载后恢复全屏页（只在「从全屏页里点了独占」时才有标记，其它路径不受影响） */
+  /* 重载后恢复全屏页（只在「从全屏页里点了独占」时才有标记，其它路径不受影响）。
+     成品实测踩到的坑：不能在 document 上等 DOMContentLoaded —— app.js 的 boot 挂在
+     window 上，document 阶段的监听先跑，那一刻 UI.els 还是空的，setFullscreen() 直接返回
+     false，标记又被吃掉了，重载后就静静停在主界面。改成等 els 就绪（load 晚于 boot，
+     再加 40×50ms 轮询兜底，启动慢也不会漏）。 */
   let reopenFs = false
   try {
     reopenFs = sessionStorage.getItem('lx_fs_reopen') === '1'
     if (reopenFs) sessionStorage.removeItem('lx_fs_reopen')
   } catch (e) { /* 无 sessionStorage（隐私模式）：当作没标记 */ }
   if (reopenFs) {
-    const openFs = () => { try { UI.setFullscreen(true) } catch (e) { /* 忽略 */ } }
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', openFs, { once: true })
-    else openFs()
+    let tries = 0
+    const openFs = () => {
+      if (!UI.els || !UI.els.fsView) {
+        if (++tries <= 40) setTimeout(openFs, 50)
+        return
+      }
+      try { UI.setFullscreen(true) } catch (e) { /* 忽略 */ }
+    }
+    if (document.readyState === 'complete') openFs()
+    else window.addEventListener('load', openFs, { once: true })
   }
 
   /* v2.8.37 / v3.3.45：全屏页自己的播放队列入口。
