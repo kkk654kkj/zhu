@@ -411,10 +411,17 @@ async function writeResumePrefix(flight, file, bytes) {
  * 领头请求：解析 → 打开上游 → 发头（此时封口）→ 广播正文 → 写缓存。
  * 其余订阅者在这个函数跑的同时收字节，谁都不再单独拉一次上游。
  */
-async function runFlight(flight, ctx) {  const { song, source, id, prefer, rangeHdr, cacheOn } = ctx
+async function runFlight(flight, ctx) {
+  const { song, source, id, prefer, rangeHdr, cacheOn } = ctx
   // 缓存残片的兜底清理：正常路径在 pumpFlightBody 的 finally 里做；
   // 这里提到外层声明，好在任何早期异常时也能清掉
   let dropPart = () => {}
+  // v3.3.71 修：这两个兜底必须在 try **外面**声明。
+  // 写在 try 里是 const，catch 里调不到 —— 异常路径上 keepResume() 会抛
+  // ReferenceError，把真正的失败原因（解析/上游）顶掉，parkPart 也不会执行，
+  // 残片照样变孤儿。赋值仍在 try 内，闭包拿到的仍是本次请求的 part / resume。
+  let keepResume = () => {}
+  let parkPart = async () => {}
   const dead = () => flight.aborted || !liveSubs(flight).length
   try {
     let info = await G.online.getPlayable(song, prefer, { signal: flight.ctrl.signal })
@@ -468,7 +475,7 @@ async function runFlight(flight, ctx) {  const { song, source, id, prefer, range
     if (resume && startAt > 0) headers.Range = 'bytes=' + startAt + '-'
     // v3.3.71 修：残片从登记表「取走」后，只要这次没真正用上（上游打不开 / 502 /
     // 订阅者全断），就必须放回去 —— 否则 .part 变成没人认领的孤儿，磁盘只增不减。
-    const keepResume = () => {
+    keepResume = () => {
       if (!resume) return
       putResume(cKey, resume)
       resume = null
@@ -613,7 +620,7 @@ async function runFlight(flight, ctx) {  const { song, source, id, prefer, range
     // v3.3.71（T02-02）：中途断流不再一删了之 —— 已连续写入的残片登记起来，
     // 下一次同曲请求（不论从 0 还是从残片末尾）接着补，缓存才有可能真正落盘。
     // 必须是异步的：先等后台写盘队列落完、写流真正 close，磁盘上的字节数才可信。
-    const parkPart = async () => {
+    parkPart = async () => {
       if (writer) {
         try { await writer.flush() } catch (e) { /* 忽略 */ }
         writer.stop()

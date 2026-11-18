@@ -263,6 +263,67 @@ stubUpstream({ dropAfter: 1000 })
   ok('续上后缓存按整首落盘', puts.length === 1 && puts[0].size === 3000, 'puts=' + JSON.stringify(puts))
 }
 
+/* ---------- ⑥ 解析抛错：日志必须保留真因（catch 里要调得到兜底函数） ---------- */
+initG()
+stubUpstream({ dropAfter: 1000 })
+{
+  const res = new FakeRes()
+  await SP.handleStreamRequest(reqOf('throwparse', 'bytes=0-'), res)
+}
+{
+  logLines.length = 0
+  const G = initG()
+  G.online.getPlayable = async () => { throw new Error('boom-parse-failed') }
+  const res = new FakeRes()
+  await SP.handleStreamRequest(reqOf('throwparse', 'bytes=0-'), res)
+  ok('解析抛错时日志保留真因，且不出现 ReferenceError',
+    logLines.some((l) => l.includes('boom-parse-failed')) &&
+    !logLines.some((l) => l.includes('is not defined')),
+    logLines.join(' | '))
+  ok('解析抛错仍回 500，残片原样在盘上',
+    res.status === 500 && partsInCache().length === 1, 'status=' + res.status + ' parts=' + partsInCache().length)
+}
+{
+  initG()
+  puts.length = 0
+  const ranges = stubUpstream()
+  const res = new FakeRes()
+  await SP.handleStreamRequest(reqOf('throwparse', 'bytes=0-'), res)
+  ok('抛错之后残片还能续上', ranges[0] === 'bytes=1000-' && res.body().length === 3000,
+    'ranges=' + JSON.stringify(ranges) + ' len=' + res.body().length)
+}
+
+/* ---------- ⑦ 上游打不开：keepResume 必须在 catch 分支真的执行 ---------- */
+initG()
+stubUpstream({ dropAfter: 1000 })
+{
+  const res = new FakeRes()
+  await SP.handleStreamRequest(reqOf('fetchfail', 'bytes=0-'), res)
+}
+{
+  initG()
+  puts.length = 0
+  logLines.length = 0
+  const realFetch = global.fetch
+  global.fetch = async () => { throw new Error('connect ECONNREFUSED 127.0.0.1') }
+  const res = new FakeRes()
+  await SP.handleStreamRequest(reqOf('fetchfail', 'bytes=0-'), res)
+  ok('上游打不开 → 502 且残片归还（不再变孤儿）',
+    res.status === 502 && partsInCache().length === 1 &&
+    logLines.some((l) => l.includes('上游打开失败')) &&
+    !logLines.some((l) => l.includes('is not defined')),
+    'status=' + res.status + ' parts=' + partsInCache().length + ' logs=' + logLines.join(' | '))
+  global.fetch = realFetch
+}
+{
+  initG()
+  const ranges = stubUpstream()
+  const res = new FakeRes()
+  await SP.handleStreamRequest(reqOf('fetchfail', 'bytes=0-'), res)
+  ok('上游恢复后从残片末尾续上', ranges[0] === 'bytes=1000-' && res.body().length === 3000,
+    'ranges=' + JSON.stringify(ranges) + ' len=' + res.body().length)
+}
+
 global.fetch = REAL_FETCH
 try { fs.rmSync(CACHE, { recursive: true, force: true }) } catch (e) { /* 忽略 */ }
 console.log(fail ? `\n${pass} 通过 / ${fail} 失败` : `\n全部通过（${pass} 项）`)
