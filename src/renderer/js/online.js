@@ -113,6 +113,9 @@ const Online = {  list: [],            // 当前搜索结果（OnlineSong）
     const cur = player.current
     if (!cur || !cur.online || !p) return
     if ((cur.onlineKey || '') !== p.id) return
+    // v3.3.71（T02-04）：主进程真的开始出流了 —— 加载态到这里就该收，
+    // 不用等固定延时去猜「解析大概结束了没有」。
+    if (typeof setPlaybackLoading === 'function') setPlaybackLoading(false)
     let spec = null
     if (p.lossless && !cur.lossless) {
       cur.lossless = true
