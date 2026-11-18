@@ -2631,8 +2631,33 @@ body:not(.uix-playing) #fsCover[data-fx] img { animation-play-state: paused; }
 #fsLyrics:focus-within::-webkit-scrollbar-thumb:hover {
   background: color-mix(in srgb, var(--accent) 55%, transparent);
 }
-#fsHeadTools { display: flex; align-items: center; gap: 4px; }
+#fsHeadTools {
+  display: flex; align-items: center; gap: 4px;
+  /* v2.8.57 / v3.3.70：给右上角窗口控制条让位（4×38 + 分隔 9 ≈ 161，留 168 免压键） */
+  margin-right: 168px;
+}
 #fsHeadTools .uix-btn { font-size: 11px; }
+
+/* --- v2.8.57 / v3.3.70：全屏页右上角窗口控制条（独占输出 / 最小化 / 最大化 / 关闭）
+       贴住窗口右上角，高度与标题栏 .wbtn 手感一致（34px），不加圆角 —— 位置就是
+       系统窗口按钮的位置，用户不用回头找。--- */
+.fs-winbar {
+  position: absolute; top: 0; right: 0; z-index: 2;
+  display: flex; align-items: center;
+  height: 34px; padding-left: 4px;
+}
+.fs-win {
+  width: 38px; height: 34px;
+  display: grid; place-items: center;
+  color: var(--txt-2);
+  transition: background .12s, color .12s;
+}
+.fs-win svg { width: 15px; height: 15px; }
+.fs-win:hover { background: var(--bg-hover); color: var(--txt); }
+.fs-win.on { color: var(--accent); }
+.fs-win.on:hover { background: var(--accent-soft); }
+.fs-win.danger:hover { background: var(--danger); color: #fff; }
+.fs-win-sep { width: 1px; height: 14px; background: var(--line); margin: 0 4px; }
 
 /* --- P3 #18 唱片 / CD / 磁带 封面特效 --- */
 @keyframes uixSpin { to { transform: rotate(360deg); } }
