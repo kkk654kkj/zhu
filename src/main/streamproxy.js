@@ -329,12 +329,89 @@ async function handleStreamRequest(req, res) {
   }
 }
 
+/* ---------- v3.3.71：断流残片保留与续传（T02-02） ---------- */
+
+/**
+ * 断流时不再把 .part 一删了之，而是登记下来等下一次同曲请求续上。
+ *
+ * 现实场景：在线音频播到一半上游掐断（CDN 抖动 / 切网），播放器带着
+ * `Range: bytes=<已收字节>-` 重连。以前这条请求不写缓存、残片当场删掉，
+ * 于是同一首歌每次断流都要从上游重新拉一遍（缓存永远补不齐）。
+ *
+ * 约定：只登记「从 0 开始、已连续写入」的残片；条目上限 MAX_RESUME，
+ * 超出的按登记顺序淘汰（连文件一起删），不占用户磁盘。
+ */
+const resumeParts = new Map()
+const MAX_RESUME = 3
+
+/** 取走一条残片（取出即从登记表移除，由本次请求独占） */
+function peelResume(key) {
+  const rec = resumeParts.get(key)
+  if (!rec) return null
+  resumeParts.delete(key)
+  try {
+    const st = fs.statSync(rec.path)
+    if (!st.isFile() || st.size !== rec.bytes) return null
+  } catch (e) {
+    return null
+  }
+  return rec
+}
+
+/** 放回/登记一条残片；bytes 为 0 的直接作废 */
+function putResume(key, rec) {
+  if (!rec) return
+  if (!rec.bytes || !rec.path) { if (rec.path) removePartFile(rec.path, null); return }
+  const old = resumeParts.get(key)
+  if (old && old.path !== rec.path) removePartFile(old.path, null)
+  resumeParts.delete(key)
+  rec.at = rec.at || Date.now()
+  resumeParts.set(key, rec)
+  while (resumeParts.size > MAX_RESUME) {
+    const first = resumeParts.entries().next().value
+    if (!first) break
+    resumeParts.delete(first[0])
+    removePartFile(first[1].path, null)
+  }
+}
+
+/** 把残片已下好的前缀按序写给所有订阅者（客户端要的是「从 0 开始整段」） */
+async function writeResumePrefix(flight, file, bytes) {
+  let rs
+  try {
+    rs = fs.createReadStream(file, { start: 0, end: bytes - 1 })
+  } catch (e) {
+    return false
+  }
+  try {
+    for await (const chunk of rs) {
+      const alive = liveSubs(flight)
+      if (!alive.length) return false
+      const waits = []
+      for (const sub of alive) {
+        try {
+          if (!sub.res.write(chunk)) waits.push(waitDrain(sub.res))
+        } catch (e) {
+          sub.alive = false
+          flight.subs.delete(sub)
+        }
+      }
+      if (waits.length) await Promise.all(waits)
+    }
+    return true
+  } catch (e) {
+    G.logLine('[cache] 残片前缀读取失败', (e && e.message) || e)
+    return false
+  } finally {
+    try { rs.destroy() } catch (e) { /* 已结束 */ }
+  }
+}
+
 /**
  * 领头请求：解析 → 打开上游 → 发头（此时封口）→ 广播正文 → 写缓存。
  * 其余订阅者在这个函数跑的同时收字节，谁都不再单独拉一次上游。
  */
-async function runFlight(flight, ctx) {
-  const { song, source, id, prefer, rangeHdr, cacheOn } = ctx
+async function runFlight(flight, ctx) {  const { song, source, id, prefer, rangeHdr, cacheOn } = ctx
   // 缓存残片的兜底清理：正常路径在 pumpFlightBody 的 finally 里做；
   // 这里提到外层声明，好在任何早期异常时也能清掉
   let dropPart = () => {}
@@ -370,6 +447,25 @@ async function runFlight(flight, ctx) {
     }
 
     let headers = buildUpstreamHeaders(info, ctx.req)
+    // v3.3.71（T02-02）：同曲有残片就只补缺的后半段。
+    //  · 客户端要「从 0 开始整段」→ 前缀由本地残片供给，上游从残片末尾续；
+    //  · 客户端要的就是「从残片末尾开始」→ 边转发边把残片补齐，缓存能最终落盘。
+    const cKey = DC.cacheKeyOf(song, DC.cacheClassOf(info))
+    const plainRange = !rangeHdr || /^bytes=0-(\d*)$/.test(rangeHdr)
+    let resume = null
+    let startAt = 0
+    if (cacheOn) {
+      const rec = peelResume(cKey)
+      if (rec) {
+        if (plainRange || new RegExp('^bytes=' + rec.bytes + '-$').test(rangeHdr)) {
+          resume = rec
+          startAt = rec.bytes
+        } else {
+          putResume(cKey, rec)   // 客户端要的是别的段，残片留着下次用
+        }
+      }
+    }
+    if (resume && startAt > 0) headers.Range = 'bytes=' + startAt + '-'
     let opened
     try {
       opened = await openUpstream(info, headers, flight.ctrl.signal)
@@ -386,6 +482,8 @@ async function runFlight(flight, ctx) {
           const alt = await G.online.getPlayable(song, 'best', { signal: flight.ctrl.signal })
           if (alt && alt.url && !dead()) {
             info = alt
+            // 降级换了档位 → 缓存键也换了，原残片不能往新档位里拼
+            if (resume) { removePartFile(resume.path, null); resume = null; startAt = 0 }
             headers = buildUpstreamHeaders(alt, ctx.req)
             opened = await openUpstream(alt, headers, flight.ctrl.signal)
             G.logLine('[online] 上游降级重试成功', source, id)
@@ -418,28 +516,62 @@ async function runFlight(flight, ctx) {
       failAll(flight, 502, 'upstream ' + upstream.status)
       return
     }
+    // 上游给了什么「整段凭据」：第四轮 §4.5.5 #2 指出只比 Content-Length 会被残片骗过 ——
+    // 上游对 bytes=0- 回一段 206 时，bytes === Content-Length 成立，于是残片被 rename 成完整缓存，
+    // 重播只听到开头。这里解析 Content-Range 的分母，只认「真的覆盖到 total-1」。
+    const crHdr = String((upstream.headers && upstream.headers.get && upstream.headers.get('content-range')) || '')
+    const crTotal = Number(crHdr.split('/')[1]) || 0
+    const crEnd = Number((crHdr.match(/bytes\s+\d+-(\d+)/) || [])[1])
+    const crStart = Number((crHdr.match(/bytes\s+(\d+)-/) || [])[1])
+    // 残片只有在「上游确实从残片末尾续上」时才成立：认 Range 的上游会回
+    // 206 + Content-Range: bytes <startAt>-.../<total>；不认的会直接回 200 整段，
+    // 那这次的字节是从 0 开始的，硬拼前缀会把整首歌接成重复的两段。
+    let useResume = false
+    if (resume && startAt > 0) {
+      if (upstream.status === 206 && crTotal > startAt && crStart === startAt) {
+        useResume = true
+      } else {
+        G.logLine('[cache] 上游未按 Range 续传，残片作废', song.source, song.id)
+        removePartFile(resume.path, null)
+        resume = null
+        startAt = 0
+      }
+    }
     const out = buildProxyHeaders(upstream)
+    if (useResume && plainRange) {
+      // 客户端要的是「从 0 开始整段」：前缀由本地残片补，长度按整首算，不再是 206 片段
+      out['Content-Length'] = String(crTotal)
+      delete out['Content-Range']
+    }
 
     // 只有「从头整段请求」才顺手存缓存；用户拖进度条发来的 Range 请求
     // 存下来的是一段残片，反而会把缓存搞脏。
     // v3.3.58：Chromium / mpv 的首请求不只会发 bytes=0-，也会发 bytes=0-N
     // 这类从 0 起的整段请求；以前只认精确字面，绝大多数歌曲直接不缓存。
     // 上游若只回了其中一段，finishCache 的 Content-Range 校验仍会拦下残片。
-    const canCache = cacheOn && (!rangeHdr || /^bytes=0-(\d*)$/.test(rangeHdr))
-    const cKey = DC.cacheKeyOf(song, DC.cacheClassOf(info))
+    // v3.3.71：能从残片续上的请求（不论客户端要 0- 还是 <残片末尾>-）也允许缓存。
+    const canCache = cacheOn && (plainRange || useResume)
     // part：本次请求的缓存残片。stream=null 表示「不缓存」或「已收尾」
-    const part = { path: null, stream: null, bytes: 0 }
+    const part = { path: null, stream: null, bytes: 0, base: 0 }
     // 后台写盘队列在 dropPart 之后创建；error 回调可能在创建前就触发，用 let 提前声明
     let writer = null
 
     if (canCache) {
       try {
         fs.mkdirSync(DC.cacheDirPath(), { recursive: true })
-        // 每个请求用自己的临时文件名：同一首歌可能被连点两次，
-        // 共用一个 .part 的话，先结束的那个会把后一个正在写的文件删掉。
-        const uniq = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-        part.path = path.join(DC.cacheDirPath(), `${cKey}.${uniq}.part`)
-        part.stream = fs.createWriteStream(part.path)
+        if (useResume) {
+          // 续传：沿用原 .part，追加模式，字节数从残片末尾起算
+          part.path = resume.path
+          part.bytes = startAt
+          part.base = startAt
+          part.stream = fs.createWriteStream(part.path, { flags: 'a' })
+        } else {
+          // 每个请求用自己的临时文件名：同一首歌可能被连点两次，
+          // 共用一个 .part 的话，先结束的那个会把后一个正在写的文件删掉。
+          const uniq = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+          part.path = path.join(DC.cacheDirPath(), `${cKey}.${uniq}.part`)
+          part.stream = fs.createWriteStream(part.path)
+        }
         // v3.3.13：error 回调捕获「这个具体 .part」——finishCache 清空 part.path
         // 后写流才报错时，仍能定位并删掉半截残片
         const errP = part.path
@@ -467,14 +599,38 @@ async function runFlight(flight, ctx) {
       part.path = null
       removePartFile(p, ps)
     }
+    // v3.3.71（T02-02）：中途断流不再一删了之 —— 已连续写入的残片登记起来，
+    // 下一次同曲请求（不论从 0 还是从残片末尾）接着补，缓存才有可能真正落盘。
+    // 必须是异步的：先等后台写盘队列落完、写流真正 close，磁盘上的字节数才可信。
+    const parkPart = async () => {
+      if (writer) {
+        try { await writer.flush() } catch (e) { /* 忽略 */ }
+        writer.stop()
+      }
+      const ps = part.stream
+      const p = part.path
+      const n = part.bytes
+      part.stream = null
+      part.path = null
+      if (!p || !n) { removePartFile(p, ps); return }
+      await new Promise((resolve) => {
+        if (!ps) { resolve(); return }
+        let done = false
+        const fin = () => {
+          if (done) return
+          done = true
+          try { ps.off('close', fin); ps.off('error', fin) } catch (e) { /* 已结束 */ }
+          resolve()
+        }
+        ps.once('close', fin)
+        ps.once('error', fin)
+        try { ps.end(fin) } catch (e) { fin() }
+      })
+      putResume(cKey, { path: p, bytes: n })
+      G.logLine('[cache] 断流残片已保留，待续传', path.basename(p), n + 'B')
+    }
     // v3.3.58：写盘改走后台队列。主转发循环只做同步投递，磁盘再慢也不占着音频。
     if (canCache && part.stream) writer = createCacheWriter(part, () => dropPart())
-    // 上游是否给了「整段」的凭据：第四轮 §4.5.5 #2 指出只比 Content-Length 会被残片骗过 ——
-    // 上游对 bytes=0- 回一段 206 时，bytes === Content-Length 成立，于是残片被 rename 成完整缓存，
-    // 重播只听到开头。这里解析 Content-Range 的分母，只认「真的覆盖到 total-1」。
-    const crHdr = String((upstream.headers && upstream.headers.get && upstream.headers.get('content-range')) || '')
-    const crTotal = Number(crHdr.split('/')[1]) || 0
-    const crEnd = Number((crHdr.match(/bytes\s+\d+-(\d+)/) || [])[1])
     // v2.8.53 / v3.3.62：206 必须凭 Content-Range **证明**覆盖到 total-1 才算整段。
     // 以前 `!crTotal` 直接判真（缺头 / `bytes 0-1023/*` 让 Number('*') 得 0），
     // 配合下面 expect = declared || bytes 的自证，1KB 探针残片会被 rename 成完整缓存，
@@ -495,7 +651,9 @@ async function runFlight(flight, ctx) {
       if (!part.stream || !part.path) return
       const declared = Number(out['Content-Length']) || 0
       const bytes = part.bytes
-      const expect = declared || bytes
+      // 续传时 part.bytes 从残片末尾起算，declared 只是「后半段」的长度；
+      // 有 Content-Range 分母就以它为准（整首总长），否则补上 base。
+      const expect = crTotal || (declared ? declared + (part.base || 0) : bytes)
       const target = part.path
       const key = cKey
       const meta = {
@@ -556,9 +714,11 @@ async function runFlight(flight, ctx) {
     if (dead()) { dropPart(); return }
     // 封口：从这里开始正文要按序发出，半路再插队的请求只能自己另起一条上游
     flight.sealed = true
+    // 续传时客户端要的是「从 0 开始整段」，前缀由本地残片补，状态码必须是 200 而不是 206
+    const resStatus = useResume && plainRange ? 200 : (upstream.status === 206 ? 206 : 200)
     for (const sub of liveSubs(flight)) {
       try {
-        sub.res.writeHead(upstream.status === 206 ? 206 : 200, out)
+        sub.res.writeHead(resStatus, out)
       } catch (e) {
         sub.alive = false
         flight.subs.delete(sub)
@@ -579,6 +739,17 @@ async function runFlight(flight, ctx) {
       for (const sub of liveSubs(flight)) { try { sub.res.end() } catch (e) { /* 已断开 */ } }
       return
     }
+    // 续传：客户端要「从 0 开始整段」时，先把本地已有的前缀发出去，
+    // 客户端才能从第 0 字节连续听下来；要「从残片末尾开始」的请求不走这里。
+    if (useResume && plainRange && startAt > 0) {
+      const okPrefix = await writeResumePrefix(flight, resume.path, startAt)
+      if (!okPrefix) {
+        // 前缀没发全，响应已经不可信：断开而不是让客户端把半首当整首
+        for (const sub of liveSubs(flight)) { try { sub.res.destroy() } catch (e) { /* 已断开 */ } }
+        dropPart()
+        return
+      }
+    }
     const reader = upstream.body.getReader()
     flight.reader = reader
     await pumpFlightBody({
@@ -586,6 +757,7 @@ async function runFlight(flight, ctx) {
       reader,
       part,
       dropPart,
+      parkPart,
       finishCache,
       cacheWrite: writer ? writer.write : null
     })
@@ -694,7 +866,7 @@ function buildProxyHeaders(upstream) {
  * @param {() => Promise<void>} p.finishCache
  * @param {((buf:Buffer)=>void)|null} p.cacheWrite 后台写盘队列的同步投递口
  */
-async function pumpFlightBody({ flight, reader, part, dropPart, finishCache, cacheWrite }) {
+async function pumpFlightBody({ flight, reader, part, dropPart, parkPart, finishCache, cacheWrite }) {
   // 正文阶段：可刷新的空闲看门狗 —— 每读到一个 chunk 就刷新 20 秒，
   // 慢速但持续的大文件不会被误杀，真正卡死的连接才会被 abort
   let idleTimer = null
@@ -759,6 +931,7 @@ async function pumpFlightBody({ flight, reader, part, dropPart, finishCache, cac
     }
     // 正常读完才落缓存；中途断开就把残片丢掉。finishCache 内部会等后台队列写完。
     if (complete) await finishCache()
+    else if (parkPart) await parkPart()   // v3.3.71：断流残片留着续传，不再直接删
     else dropPart()
   }
 }

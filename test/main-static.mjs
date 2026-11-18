@@ -851,13 +851,14 @@ function main() {
 
       ok('收尾先等后台队列写完再校验，chunked 上游按实际正文长度落盘',
         /if \(writer\) await writer\.flush\(\)/.test(spSrc) &&
-        /const expect = declared \|\| bytes/.test(spSrc) &&
+        /const expect = crTotal \|\| \(declared \? declared \+ \(part\.base \|\| 0\) : bytes\)/.test(spSrc) &&
         /stream\.end\(fin\)/.test(spSrc) &&
         !/上游无 Content-Length（chunked），跳过缓存/.test(spSrc))
 
       ok('start=0 的 Range 首请求允许缓存，拖进度条的 Range 仍不写脏缓存',
         spSrc.includes('/^bytes=0-(\\d*)$/') &&
-        /const canCache = cacheOn && \(!rangeHdr \|\|/.test(spSrc))
+        /const plainRange = !rangeHdr \|\| \/\^bytes=0-\(\\d\*\)\$\//.test(spSrc) &&
+        /const canCache = cacheOn && \(plainRange \|\| useResume\)/.test(spSrc))
 
       ok('正文最低速率看门狗（20 秒窗口 / 32KB / 不被 chunk 刷新 / 收尾清掉）',
         /const RATE_MIN_BYTES = 32 \* 1024/.test(spSrc) &&
