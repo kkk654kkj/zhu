@@ -31,7 +31,7 @@ const UI = {
       'mvCur', 'mvDur', 'mvBar', 'mvFill', 'mvDot',
       'mvMode', 'mvPrev', 'mvPlay', 'mvNext', 'mvFav',
       'miniRestore', 'miniMin', 'miniClose',
-      'btnHifi', 'hifiBadge',
+      'btnHifi', 'fsHifi', 'hifiBadge',
       'logo',
       'fsView', 'fsClose', 'fsCover', 'fsTitle', 'fsArtist', 'fsQ', 'fsLyric', 'fsLyrics',
       'fsCur', 'fsDur', 'fsBar', 'fsFill', 'fsDot',
@@ -697,13 +697,16 @@ const UI = {
   /** 标题栏的「位完美」按钮 + 播放条状态标签
    *  kind: perfect（绿）| warn（琥珀）| idle/probing（灰） */
   setHifi({ on, text, hint, perfect, kind }) {
-    const btn = this.els.btnHifi
-    if (btn) {
+    // v3.3.70 / v2.8.57：标题栏与全屏页右上角各有一颗独占开关，状态必须同源，
+    // 否则全屏页里开着独占、图标却是灰的（或反过来）。标题也只算一次。
+    const title = on
+      ? (hint || '独占输出已开启')
+      : '独占输出（位完美）：改用 WASAPI 独占直出，其他程序将没有声音'
+    for (const btn of [this.els.btnHifi, this.els.fsHifi]) {
+      if (!btn) continue
       btn.classList.toggle('on', !!on)
       btn.classList.toggle('warn', !!on && kind === 'warn')
-      btn.title = on
-        ? (hint || '独占输出已开启')
-        : '独占输出（位完美）：改用 WASAPI 独占直出，其他程序将没有声音'
+      btn.title = title
     }
     const badge = this.els.hifiBadge
     if (!badge) return

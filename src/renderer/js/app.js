@@ -352,7 +352,7 @@ async function boot() {
   const maxToken = maxIntent
   window.api.isMaximized().then((max) => {
     if (maxToken !== maxIntent) return
-    document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
+    setMaxIcon(max)
   }).catch(() => {})
 }
 
@@ -1684,6 +1684,16 @@ function bindPopupUi() {
 
 }
 
+/** 最大化图标：标题栏与全屏页右上角是同一个窗口状态，必须一起翻
+ *  （v3.3.70 / v2.8.57：以前只写 btnMax，全屏页那颗一直是初始的「最大化」，点完看着没反应） */
+function setMaxIcon(max) {
+  const svg = icon(max ? 'restore' : 'max')
+  for (const id of ['btnMax', 'fsMax']) {
+    const el = document.getElementById(id)
+    if (el) el.innerHTML = svg
+  }
+}
+
 /** 窗口控制：最小化/最大化/关闭、标题栏双击、迷你模式切换 */
 function bindWindowUi() {
   // 窗口控制
@@ -1692,13 +1702,11 @@ function bindWindowUi() {
     maxIntent++                       // 作废启动时 isMaximized 的异步回调
     const max = await window.api.toggleMaximize().catch(() => null)
     if (max == null) return
-    document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
+    setMaxIcon(max)
   })
   // v2.8.26/3.3.27：主进程事件推送最大化状态（含外部贴边最大化/快速连点兜底）
   if (window.api.onMaxState) {
-    window.api.onMaxState((max) => {
-      document.getElementById('btnMax').innerHTML = icon(max ? 'restore' : 'max')
-    })
+    window.api.onMaxState(setMaxIcon)
   }
   document.getElementById('btnClose').addEventListener('click', async () => {
     // 第四轮 §4.3（退出链）：必须串行等待 —— 以前 fire-and-forget 地发 flush 后立刻关窗，
