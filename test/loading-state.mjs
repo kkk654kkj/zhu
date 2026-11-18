@@ -123,6 +123,14 @@ player.setQueue([t4], 0, false)
 ok('代理未就绪时立刻报 NO_PROXY 且退出加载态',
   !!noProxy && player.loading === false, noProxy && noProxy.message)
 
+// 本地空地址（盘掉线 / 文件被删）：不打 NO_PROXY，要走原失败链
+let localErr = null
+player.on('error', (e) => { if (e && !e.code) localErr = e })
+player.setQueue([{ id: 'local:gone', audio: '', title: '本地空地址' }], 0, false)
+ok('本地空地址不冒充 NO_PROXY（仍交给失败链自动跳下一首）',
+  !!localErr && !localErr.code && player.loading === false,
+  localErr ? 'code=' + String(localErr.code) : 'no error')
+
 // 既有 setQueue 行为不被加载态改变：同 id 早退
 const loadsBefore = audio.loads
 player.setQueue([t4], 0, false)

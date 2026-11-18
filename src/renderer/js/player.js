@@ -236,7 +236,9 @@ class Player extends Emitter {
     // v2.8.58：地址为空（文件被删 / 记录坏了）时明确报错，不去 load 一个空地址
     if (!track.audio) {
       const err = new Error('曲目地址为空（文件可能已被移动或删除）')
-      err.code = 'NO_PROXY'
+      // v2.8.58 修：本地版没有代理，空地址一律走原失败链（计数 → 自动跳下一首），
+      // 不能打 NO_PROXY —— 那会让整队停在这一首等一个永远不会就绪的端口。
+      if (track.online) err.code = 'NO_PROXY'
       this._clearLoadWatchdog()
       this._setLoading(false)
       this.emit('track-change', track)
