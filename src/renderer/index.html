@@ -368,6 +368,16 @@
 <!-- ============ 全屏播放页（v2.8.25：点播放条封面展开） ============ -->
 <div id="fsView">
   <canvas id="fsSpectrum" height="108"></canvas>
+  <!-- v3.3.70 / v2.8.57：全屏页右上角窗口控制条。
+       #fsView 是 inset:0 的覆盖层，把标题栏整层压住，进全屏后就没地方点最小化/关闭了。
+       四个键一律转发给标题栏同名按钮（见 fullscreen.js），逻辑只有一份。 -->
+  <div class="fs-winbar" id="fsWinbar" role="toolbar" aria-label="窗口控制">
+    <button class="fs-win" id="fsHifi" title="独占输出（位完美）" aria-label="独占输出"><svg><use href="#i-hifi"/></svg></button>
+    <span class="fs-win-sep"></span>
+    <button class="fs-win" id="fsMin" title="最小化" aria-label="最小化"><svg><use href="#i-min"/></svg></button>
+    <button class="fs-win" id="fsMax" title="最大化" aria-label="最大化"><svg><use href="#i-max"/></svg></button>
+    <button class="fs-win danger" id="fsWinClose" title="关闭" aria-label="关闭"><svg><use href="#i-close"/></svg></button>
+  </div>
   <div class="fs-head">
     <span>正在播放</span>
     <div id="fsHeadTools" role="toolbar" aria-label="全屏播放页工具">
