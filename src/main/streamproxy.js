@@ -187,26 +187,84 @@ function startStreamServer() {
   return streamBase
 }
 
+/* ================= v3.3.71：同曲并发单飞 ================= */
+
 /**
- * 处理一个 /stream 请求：缓存命中 → 解析直链 → 上游取流 → 边转边缓存。
+ * 同一条「源 + 曲 + 音质 + Range」只向上游拉一次，正文广播给所有订阅者。
+ *
+ * 真实触发场景：<audio> 与 mpv 先后加载同一首、列表连点、播放器重连探针叠在一起。
+ * 以前每个请求各解析各拉流，同一首歌在几秒内能把上游打三次（无损解析 1~7 秒，
+ * 用户看到的是「点了没反应又点一次」）。
+ *
+ * 约定（改前必读）：
+ *  - 只有「还没发响应头」的请求能并入；已开始转发就不能半路插队（会缺开头）；
+ *  - Range 不同不并 —— 各段要的字节不同，共用一条上游必然是错的；
+ *  - 缓存只由领头请求写一份；订阅者不写盘、不参与 finishCache；
+ *  - 订阅者全部断开才收上游；单个断开只摘掉自己（切歌不该踢掉另一个正在播的）。
+ */
+const inflight = new Map()
+
+function flightKeyOf(source, id, prefer, rangeHdr) {
+  return [source, id, prefer, String(rangeHdr || '').trim()].join('\u0000')
+}
+
+function newFlight(key) {
+  return {
+    key,
+    subs: new Set(),
+    sealed: false,        // 已发响应头 → 不再接受新订阅者
+    aborted: false,
+    ctrl: new AbortController(),   // 解析 + 握手用
+    upstreamCtrl: null,            // 正文阶段（空闲/速率看门狗）用
+    reader: null
+  }
+}
+
+function attachSub(flight, req, res) {
+  const sub = { req, res, alive: true }
+  flight.subs.add(sub)
+  const onClose = () => {
+    if (res.writableFinished) return
+    sub.alive = false
+    flight.subs.delete(sub)
+    if (!flight.subs.size) abortFlight(flight)
+  }
+  res.on('close', onClose)
+  sub.cleanup = () => { try { res.off('close', onClose) } catch (e) { /* 忽略 */ } }
+  return sub
+}
+
+function abortFlight(flight) {
+  if (flight.aborted) return
+  flight.aborted = true
+  try { flight.ctrl.abort() } catch (e) { /* 已结束 */ }
+  try { if (flight.upstreamCtrl) flight.upstreamCtrl.abort() } catch (e) { /* 已结束 */ }
+  try { if (flight.reader) Promise.resolve(flight.reader.cancel()).catch(() => {}) } catch (e) { /* 已结束 */ }
+}
+
+function liveSubs(flight) {
+  return Array.from(flight.subs).filter((s) => s.alive)
+}
+
+/** 给所有还活着的订阅者回同一个错误状态（已发头的只能断开） */
+function failAll(flight, status, body) {
+  for (const sub of liveSubs(flight)) {
+    try {
+      if (sub.res.writableEnded) continue
+      if (!sub.res.headersSent) sub.res.writeHead(status, { 'Access-Control-Allow-Origin': '*' })
+      sub.res.end(body || undefined)
+    } catch (e) { /* 已断开 */ }
+  }
+}
+
+/**
+ * 处理一个 /stream 请求：缓存命中 → 单飞登记 → 解析直链 → 上游取流 → 边转边缓存。
  *
  * 这是在线音频唯一的取流入口（<audio> 与 mpv 都走这里），所以也是全项目
- * 最容易出「卡住/截断/脏缓存」的地方，改动前请先读函数尾部的收尾约定。
+ * 最容易出「卡住/截断/脏缓存」的地方，改动前请先读 runFlight 尾部的收尾约定。
  */
 async function handleStreamRequest(req, res) {
-  // 缓存残片的兜底清理：正常路径在 pumpUpstreamBody 的 finally 里做；
-  // 这里提到外层声明，好在任何早期异常时也能清掉
-  let dropPart = () => {}
-  // v3.3.18：客户端断开（切歌 / 拖进度）必须能收掉解析与上游握手。
-  // 以前只在 pumpUpstreamBody 里监听 close，早于正文阶段的断开永远收不到。
-  let clientGone = false
-  const reqCtrl = new AbortController()
-  const onClientClose = () => {
-    if (res.writableFinished) return
-    clientGone = true
-    try { reqCtrl.abort() } catch (e) { /* 忽略 */ }
-  }
-  res.on('close', onClientClose)
+  let flight = null
   try {
     const u = new URL(req.url, 'http://127.0.0.1')
     if (u.pathname !== '/stream') {
@@ -236,24 +294,74 @@ async function handleStreamRequest(req, res) {
       if (hit) { sendCachedStream(req, res, song, hit, null); return }
     }
 
-    let info = await G.online.getPlayable(song, prefer, { signal: reqCtrl.signal })
-    if (clientGone) return
+    const rangeHdr = String(req.headers.range || '').trim()
+    // HEAD 只问元数据、正文为零，并进单飞反而要等别人的正文，单独走
+    const joinable = req.method !== 'HEAD'
+    const key = flightKeyOf(source, id, prefer, rangeHdr)
+    if (joinable) {
+      const live = inflight.get(key)
+      if (live && !live.sealed) {
+        attachSub(live, req, res)
+        G.logLine('[stream] 单飞合并', source, id, 'subs=' + live.subs.size)
+        return
+      }
+    }
+    flight = newFlight(key)
+    attachSub(flight, req, res)
+    if (joinable) inflight.set(key, flight)
+    await runFlight(flight, { song, source, id, prefer, req, rangeHdr, cacheOn })
+  } catch (err) {
+    G.logLine('[online] 代理异常', (err && err.message) || err)
+    if (flight) failAll(flight, 500, 'proxy error')
+    else { try { if (res.headersSent) res.destroy(); else res.writeHead(500).end('proxy error') } catch (e) { /* 已断开 */ } }
+  } finally {
+    if (flight) {
+      if (inflight.get(flight.key) === flight) inflight.delete(flight.key)
+      for (const sub of Array.from(flight.subs)) {
+        try { sub.cleanup() } catch (e) { /* 忽略 */ }
+        try { if (!sub.res.writableEnded) sub.res.end() } catch (e) { /* 已断开 */ }
+      }
+      flight.subs.clear()
+    }
+  }
+}
+
+/**
+ * 领头请求：解析 → 打开上游 → 发头（此时封口）→ 广播正文 → 写缓存。
+ * 其余订阅者在这个函数跑的同时收字节，谁都不再单独拉一次上游。
+ */
+async function runFlight(flight, ctx) {
+  const { song, source, id, prefer, rangeHdr, cacheOn } = ctx
+  // 缓存残片的兜底清理：正常路径在 pumpFlightBody 的 finally 里做；
+  // 这里提到外层声明，好在任何早期异常时也能清掉
+  let dropPart = () => {}
+  const dead = () => flight.aborted || !liveSubs(flight).length
+  try {
+    let info = await G.online.getPlayable(song, prefer, { signal: flight.ctrl.signal })
+    if (dead()) return
     if (!info || !info.url) {
       G.logLine('[online] 代理无地址', source, id)
-      if (!res.writableEnded) res.writeHead(404).end('no source')
+      failAll(flight, 404, 'no source')
       return
     }
     // 解析出来的实际音质如果正好有缓存，就别再拉一遍流。
     // （无损请求在「网易没这首/只有 mp3」时会降级，降级档位同样值得复用缓存）
     if (cacheOn) {
       const hit2 = DC.cacheTry(song, DC.cacheClassOf(info))
-      if (hit2) { sendCachedStream(req, res, song, hit2, info); return }
+      if (hit2) {
+        // 解析出来正好有缓存：所有订阅者都从磁盘出流，谁也不用再拉上游。
+        // 事件只推一次 —— 多个订阅者只是同一首歌的多个搬运工，界面不该收两条。
+        G.logLine('[cache] 命中(降级档)', path.basename(hit2.path))
+        G.sendToRenderer('online:now-playing', cacheNowPlaying(song, hit2, info))
+        for (const sub of liveSubs(flight)) serveLocalFile(hit2.path, sub.req, sub.res)
+        return
+      }
     }
 
-    let headers = buildUpstreamHeaders(info, req)
+    let headers = buildUpstreamHeaders(info, ctx.req)
     let opened
     try {
-      opened = await openUpstream(info, headers, reqCtrl.signal)
+      opened = await openUpstream(info, headers, flight.ctrl.signal)
     } catch (err) {
       // 第四轮 §4.5.2 #1：openUpstream 抛错（握手超时 / DNS / TLS）以前直接冒到外层，
       // 既不回 502 也不作废直链缓存 —— 死链会继续在 20 分钟缓存里被反复命中。
@@ -261,14 +369,14 @@ async function handleStreamRequest(req, res) {
       try { G.online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
       // v2.8.49 / v3.3.57：母带 / 无损档的上游打不开（真机日志里的
       // 「上游打开失败 This operation was aborted」）以前直接 502，界面卡在 0:00。
-      // 这里作废坏链后降级到普通档再取一次：只试一次，客户端已断开就不试。
-      if (!clientGone && (prefer === 'master' || prefer === 'lossless')) {
+      // 这里作废坏链后降级到普通档再取一次：只试一次，订阅者已全断就不试。
+      if (!dead() && (prefer === 'master' || prefer === 'lossless')) {
         try {
-          const alt = await G.online.getPlayable(song, 'best', { signal: reqCtrl.signal })
-          if (alt && alt.url && !clientGone) {
+          const alt = await G.online.getPlayable(song, 'best', { signal: flight.ctrl.signal })
+          if (alt && alt.url && !dead()) {
             info = alt
-            headers = buildUpstreamHeaders(alt, req)
-            opened = await openUpstream(alt, headers, reqCtrl.signal)
+            headers = buildUpstreamHeaders(alt, ctx.req)
+            opened = await openUpstream(alt, headers, flight.ctrl.signal)
             G.logLine('[online] 上游降级重试成功', source, id)
           }
         } catch (e2) {
@@ -276,12 +384,13 @@ async function handleStreamRequest(req, res) {
         }
       }
       if (!opened) {
-        if (!res.writableEnded) res.writeHead(502).end('upstream error')
+        failAll(flight, 502, 'upstream error')
         return
       }
     }
     const upstream = opened.upstream
-    if (clientGone) {
+    flight.upstreamCtrl = opened.ctrl
+    if (dead()) {
       try { Promise.resolve(upstream.body && upstream.body.cancel()).catch(() => {}) } catch (e) { /* 忽略 */ }
       return
     }
@@ -295,7 +404,7 @@ async function handleStreamRequest(req, res) {
       try { G.online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
       // 第四轮 §4.5.2 #1：非 2xx 的响应体不取消会一直占着连接
       try { Promise.resolve(upstream.body && upstream.body.cancel()).catch(() => {}) } catch (e) { /* 忽略 */ }
-      if (!res.writableEnded) res.writeHead(502).end('upstream ' + upstream.status)
+      failAll(flight, 502, 'upstream ' + upstream.status)
       return
     }
     const out = buildProxyHeaders(upstream)
@@ -305,7 +414,6 @@ async function handleStreamRequest(req, res) {
     // v3.3.58：Chromium / mpv 的首请求不只会发 bytes=0-，也会发 bytes=0-N
     // 这类从 0 起的整段请求；以前只认精确字面，绝大多数歌曲直接不缓存。
     // 上游若只回了其中一段，finishCache 的 Content-Range 校验仍会拦下残片。
-    const rangeHdr = String(req.headers.range || '').trim()
     const canCache = cacheOn && (!rangeHdr || /^bytes=0-(\d*)$/.test(rangeHdr))
     const cKey = DC.cacheKeyOf(song, DC.cacheClassOf(info))
     // part：本次请求的缓存残片。stream=null 表示「不缓存」或「已收尾」
@@ -434,8 +542,17 @@ async function handleStreamRequest(req, res) {
       }
     }
 
-    if (clientGone) { dropPart(); return }
-    res.writeHead(upstream.status === 206 ? 206 : 200, out)
+    if (dead()) { dropPart(); return }
+    // 封口：从这里开始正文要按序发出，半路再插队的请求只能自己另起一条上游
+    flight.sealed = true
+    for (const sub of liveSubs(flight)) {
+      try {
+        sub.res.writeHead(upstream.status === 206 ? 206 : 200, out)
+      } catch (e) {
+        sub.alive = false
+        flight.subs.delete(sub)
+      }
+    }
     // 告诉界面「这首实际是什么音质」——界面拿到的是解析时那一刻的结论，
     // 而真正取流发生在这里，两边可能不一致（第一次解析失败、重试成功之类）。
     G.sendToRenderer('online:now-playing', {
@@ -448,13 +565,14 @@ async function handleStreamRequest(req, res) {
     })
     if (!upstream.body) {
       dropPart()
-      try { res.end() } catch (e) { /* 已断开 */ }
+      for (const sub of liveSubs(flight)) { try { sub.res.end() } catch (e) { /* 已断开 */ } }
       return
     }
-    await pumpUpstreamBody({
-      reader: upstream.body.getReader(),
-      res,
-      ctrl: opened.ctrl,
+    const reader = upstream.body.getReader()
+    flight.reader = reader
+    await pumpFlightBody({
+      flight,
+      reader,
       part,
       dropPart,
       finishCache,
@@ -462,29 +580,32 @@ async function handleStreamRequest(req, res) {
     })
   } catch (err) {
     try { dropPart() } catch (e) { /* 忽略 */ }
-    G.logLine('[online] 代理异常', err.message)
-    try {
-      if (res.headersSent) res.destroy()      // 头已发出，不能再次 writeHead
-      else res.writeHead(500).end('proxy error')
-    } catch (e) { try { res.destroy() } catch (e2) { /* 已断开 */ } }
+    G.logLine('[online] 代理异常', (err && err.message) || err)
+    // 头已发出的订阅者只能断开（再 writeHead 会抛）；没发的补一个 500
+    failAll(flight, 500, 'proxy error')
   }
 }
 
 /**
- * 两条缓存命中路径的统一响应：推「实际音质」给界面，再从磁盘按 Range 出流。
+ * 缓存命中时推给界面的「实际音质」载荷。
+ * v3.3.71：单飞里的多个订阅者共用一份载荷，事件只推一次。
  * @param {object} hit cacheHit / cacheTry 的结果
  * @param {object|null} fallback 降级档命中时的解析信息（首选档命中传 null）
  */
-function sendCachedStream(req, res, song, hit, fallback) {
-  G.logLine(fallback ? '[cache] 命中(降级档)' : '[cache] 命中', path.basename(hit.path))
-  G.sendToRenderer('online:now-playing', {
+function cacheNowPlaying(song, hit, fallback) {
+  return {
     id: `${song.source}:${song.id}`,
     song: { title: hit.rec.title || song.title, artist: hit.rec.artist || song.artist },
     lossless: hit.cls === 'flac' || hit.cls === 'master',
     bitrate: fallback ? (fallback.bitrate || 0) : 0,
     ext: hit.rec.ext || (fallback && fallback.ext) || path.extname(hit.path).slice(1),
     cached: true
-  })
+  }
+}
+
+function sendCachedStream(req, res, song, hit, fallback) {
+  G.logLine(fallback ? '[cache] 命中(降级档)' : '[cache] 命中', path.basename(hit.path))
+  G.sendToRenderer('online:now-playing', cacheNowPlaying(song, hit, fallback))
   serveLocalFile(hit.path, req, res)
 }
 
@@ -544,31 +665,31 @@ function buildProxyHeaders(upstream) {
 }
 
 /**
- * 把上游响应体边转发给浏览器边写缓存。
+ * 把上游响应体广播给所有订阅者，同时（领头请求）边转边写缓存。
  *
  * 约定（改之前务必读）：
- *  - 客户端断开（切歌/拖进度条）要同时收掉上游读者与写盘，否则请求会永远悬着；
+ *  - 订阅者全部断开（切歌/拖进度条）才算断开：要同时收掉上游读者与写盘；
+ *    只走掉一个订阅者时只摘掉它，另一个接着播；
  *  - 只有「正常读完」才落缓存，中途断开一律丢弃残片；
- *  - 无论成功/异常/断开，响应连接都必须收掉；
+ *  - 无论成功/异常/断开，每个订阅者的响应连接都必须收掉；
  *  - v3.3.58：缓存写盘只做同步投递，等磁盘的动作留在后台队列里。
  *    主循环里除了网络背压（res）不允许等写盘，否则音频会「断一下」。
  *
  * @param {object} p
+ * @param {object} p.flight 单飞上下文（subs / ctrl / upstreamCtrl / reader）
  * @param {ReadableStreamDefaultReader} p.reader 上游 body reader
- * @param {import('http').ServerResponse} p.res
- * @param {AbortController} p.ctrl 正文空闲看门狗用
  * @param {{path:string|null, stream:fs.WriteStream|null, bytes:number}} p.part 缓存残片状态
  * @param {() => void} p.dropPart
  * @param {() => Promise<void>} p.finishCache
  * @param {((buf:Buffer)=>void)|null} p.cacheWrite 后台写盘队列的同步投递口
  */
-async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache, cacheWrite }) {
+async function pumpFlightBody({ flight, reader, part, dropPart, finishCache, cacheWrite }) {
   // 正文阶段：可刷新的空闲看门狗 —— 每读到一个 chunk 就刷新 20 秒，
   // 慢速但持续的大文件不会被误杀，真正卡死的连接才会被 abort
   let idleTimer = null
   const touch = () => {
     if (idleTimer) clearTimeout(idleTimer)
-    idleTimer = setTimeout(() => { try { ctrl.abort() } catch (e) { /* 忽略 */ } }, 20000)
+    idleTimer = setTimeout(() => abortFlight(flight), 20000)
   }
   touch()   // 启动正文空闲看门狗（首字节也要限时）
 
@@ -581,51 +702,84 @@ async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache
   const rateTimer = setInterval(() => {
     if (rateBytes < RATE_MIN_BYTES) {
       G.logLine('[online] 上游速率过低，终止取流', rateBytes)
-      try { ctrl.abort() } catch (e) { /* 忽略 */ }
+      abortFlight(flight)
     }
     rateBytes = 0
   }, 20000)
-
-  // 客户端一断开（切歌、拖进度条）就把上游和写盘一起收掉。
-  // 只等 'drain' 是不够的：连接没了就没有 drain，这个请求会永远悬着。
-  let aborted = false
-  const onClose = () => {
-    if (res.writableFinished) return
-    aborted = true
-    try { ctrl.abort() } catch (e) { /* 已结束 */ }
-    try { Promise.resolve(reader.cancel()).catch(() => {}) } catch (e) { /* 已结束 */ }
-    dropPart()
-  }
-  res.on('close', onClose)
 
   let complete = false
   try {
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
-      if (aborted) break
+      if (flight.aborted) break
+      const alive = liveSubs(flight)
+      if (!alive.length) break
       touch()   // 每读到一个 chunk 就刷新空闲看门狗
       const buf = Buffer.from(value)
       rateBytes += buf.length
-      // v2.8.49 / v3.3.57：先把音频数据送给 <audio>，缓存写盘绝不阻塞播放。
+      // v2.8.49 / v3.3.57：先把音频数据送给订阅者，缓存写盘绝不阻塞播放。
       // v3.3.58：以前一见写盘背压就丢掉整首缓存（WriteStream 16KB 水位，
       // 第一个音频块就返回 false），结果在线播放永远缓存不上。改成同步投递到
       // 后台队列，磁盘的 drain 由队列自己等，主循环这里一步都不停。
-      if (!res.write(buf)) await waitDrain(res)
+      const waits = []
+      for (const sub of alive) {
+        try {
+          if (!sub.res.write(buf)) waits.push(waitDrain(sub.res))
+        } catch (e) {
+          sub.alive = false
+          flight.subs.delete(sub)
+        }
+      }
+      // 慢的那个订阅者不该把快的拖成卡顿：只等「本次写回了 false」的连接，
+      // 且每个连接自带 3 秒兜底（见 waitDrain）。
+      if (waits.length) await Promise.all(waits)
       if (cacheWrite) cacheWrite(buf)
     }
-    complete = !aborted
+    complete = !flight.aborted && liveSubs(flight).length > 0
   } catch (err) {
     complete = false
   } finally {
     clearTimeout(idleTimer)
     clearInterval(rateTimer)
-    res.off('close', onClose)
-    // v3.3.13：无论成功/异常/断开，连接都必须收掉。先 end，客户端不必等写盘收尾。
-    try { if (!res.writableEnded) res.end() } catch (e) { /* 已断开 */ }
+    // v3.3.13：无论成功/异常/断开，每个连接都必须收掉。先 end，客户端不必等写盘收尾。
+    for (const sub of liveSubs(flight)) {
+      try { if (!sub.res.writableEnded) sub.res.end() } catch (e) { /* 已断开 */ }
+    }
     // 正常读完才落缓存；中途断开就把残片丢掉。finishCache 内部会等后台队列写完。
     if (complete) await finishCache()
     else dropPart()
+  }
+}
+
+/**
+ * 单请求转发（v3.3.71 起是 pumpFlightBody 的单订阅者包装）。
+ * 保留这个入口：测试与将来的非单飞路径都按「一个 reader → 一个 res」调用。
+ */
+async function pumpUpstreamBody({ reader, res, ctrl, part, dropPart, finishCache, cacheWrite }) {
+  const ctrl0 = ctrl instanceof AbortController ? ctrl : new AbortController()
+  const flight = {
+    subs: new Set(),
+    sealed: true,
+    aborted: false,
+    ctrl: ctrl0,
+    upstreamCtrl: ctrl0,
+    reader
+  }
+  const sub = { req: null, res, alive: true }
+  flight.subs.add(sub)
+  const onClose = () => {
+    if (res.writableFinished) return
+    sub.alive = false
+    flight.subs.delete(sub)
+    abortFlight(flight)
+    try { dropPart() } catch (e) { /* 忽略 */ }
+  }
+  res.on('close', onClose)
+  try {
+    await pumpFlightBody({ flight, reader, part, dropPart, finishCache, cacheWrite })
+  } finally {
+    try { res.off('close', onClose) } catch (e) { /* 已结束 */ }
   }
 }
 

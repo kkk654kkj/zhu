@@ -827,18 +827,19 @@ function main() {
         /cacheIdx = left/.test(read('src/main/dircache.js')))
 
       ok('转发顺序：先 res.write 给 <audio>，缓存只做同步投递，不再一见背压就丢',
-        /if \(!res\.write\(buf\)\) await waitDrain\(res\)\r?\n      if \(cacheWrite\) cacheWrite\(buf\)/.test(spSrc) &&
+        /if \(!sub\.res\.write\(buf\)\) waits\.push\(waitDrain\(sub\.res\)\)/.test(spSrc) &&
+        /if \(cacheWrite\) cacheWrite\(buf\)/.test(spSrc) &&
         !/const ps = part\.stream\r?\n      if \(ps\)/.test(spSrc) &&
         !/await waitDrain\(ps\)/.test(spSrc))
 
       ok('主转发循环里没有写盘 drain 的 await（音频不被磁盘阻塞）',
         (() => {
-          const from = spSrc.indexOf('async function pumpUpstreamBody(')
+          const from = spSrc.indexOf('async function pumpFlightBody(')
           const to = spSrc.indexOf('function waitDrain(', from)
           if (from < 0 || to < 0) return false
           const seg = spSrc.slice(from, to)
-          const m = seg.match(/await waitDrain\([^)]*\)/g) || []
-          return m.length === 1 && m[0] === 'await waitDrain(res)'
+          // 只允许「等网络背压」的聚合等待：await Promise.all(waits)
+          return !/await waitDrain\(/.test(seg) && /await Promise\.all\(waits\)/.test(seg)
         })())
 
       ok('缓存后台写盘队列：磁盘 drain 只在独立协程里等，32MB 上限保护内存',
@@ -866,9 +867,9 @@ function main() {
 
       ok('母带 / 无损上游失败：作废坏链 + 降级 best 只重试一次 + 客户端断开不重试',
         /let info = await G\.online\.getPlayable/.test(spSrc) &&
-        /!clientGone && \(prefer === 'master' \|\| prefer === 'lossless'\)/.test(spSrc) &&
-        /getPlayable\(song, 'best', \{ signal: reqCtrl\.signal \}\)/.test(spSrc) &&
-        /if \(!opened\) \{\r?\n        if \(!res\.writableEnded\) res\.writeHead\(502\)/.test(spSrc) &&
+        /!dead\(\) && \(prefer === 'master' \|\| prefer === 'lossless'\)/.test(spSrc) &&
+        /getPlayable\(song, 'best', \{ signal: flight\.ctrl\.signal \}\)/.test(spSrc) &&
+        /if \(!opened\) \{\r?\n        failAll\(flight, 502, 'upstream error'\)/.test(spSrc) &&
         /上游降级重试成功/.test(spSrc))
 
       ok('渲染层加载看门狗：20 秒无数据明确报错，progress 续期，元数据到达收掉',
