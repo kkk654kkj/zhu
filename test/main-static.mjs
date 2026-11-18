@@ -959,8 +959,10 @@ function main() {
       fs55.includes('}, true)') &&
       mv55.includes('this.proc.exitCode === null && this.proc.signalCode === null'))
 
+    // v2.8.57：原来写死 2.8.55，升到 2.8.56 就假失败；改成「2.8.x 且不低于 55」
     ok('v2.8.55：版本号已升 + 扫描作用域回归测试入仓',
-      pkg55.includes('"version": "2.8.55"') &&
+      /"version": "2\.8\.(\d+)"/.test(pkg55) &&
+      Number(/"version": "2\.8\.(\d+)"/.exec(pkg55)[1]) >= 55 &&
       fs.existsSync(path.join(ROOT, 'test/scan-scope.mjs')))
   }
 
@@ -973,6 +975,30 @@ function main() {
       /playlists:addTracks', \(e, \{ id, trackIds \} = \{\}\) => \{[\s\S]{0,120}Array\.isArray\(trackIds\)/.test(mj56) &&
       /playlists:removeTracks', \(e, \{ id, trackIds \} = \{\}\) => \{[\s\S]{0,120}Array\.isArray\(trackIds\)/.test(mj56) &&
       (mj56.match(/typeof t === 'string' && t\)/g) || []).length >= 2)
+  }
+
+  // ===== v2.8.57 全屏页右上角窗口控制条（独占 / 最小化 / 最大化 / 关闭，两版同源） =====
+  {
+    const html57 = read('src/renderer/index.html')
+    const css57 = read('src/renderer/css/app.css')
+    const fs57 = read('src/renderer/js/fullscreen.js')
+    const app57 = read('src/renderer/js/app.js')
+    const ui57 = read('src/renderer/js/ui.js')
+    ok('v2.8.57：全屏页四个窗口键齐全且都在 #fsView 内',
+      /<div class="fs-winbar"[\s\S]{0,900}id="fsHifi"[\s\S]{0,400}id="fsMin"[\s\S]{0,400}id="fsMax"[\s\S]{0,400}id="fsWinClose"/.test(html57) &&
+      html57.indexOf('id="fsWinbar"') > html57.indexOf('<div id="fsView">'))
+    ok('v2.8.57：控制条贴右上角 + 工具组让位 + 关闭键危险态',
+      /\.fs-winbar\s*\{[^}]*position:\s*absolute[^}]*right:\s*0/.test(css57) &&
+      /#fsHeadTools\s*\{[^}]*margin-right:\s*168px/.test(css57) &&
+      /\.fs-win\s*\{[^}]*width:\s*38px[^}]*height:\s*34px/.test(css57) &&
+      /\.fs-win\.danger:hover\s*\{[^}]*var\(--danger\)/.test(css57))
+    ok('v2.8.57：四键只转发不给逻辑，最大化图标与独占态两处同源',
+      /fsWin\('fsMin', 'btnMin'\)/.test(fs57) &&
+      /fsWin\('fsMax', 'btnMax'\)/.test(fs57) &&
+      /fsWin\('fsWinClose', 'btnClose'\)/.test(fs57) &&
+      /fsWin\('fsHifi', 'btnHifi'/.test(fs57) &&
+      /for \(const id of \['btnMax', 'fsMax'\]\)/.test(app57) &&
+      /\[this\.els\.btnHifi, this\.els\.fsHifi\]/.test(ui57))
   }
 
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
