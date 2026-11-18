@@ -29,6 +29,40 @@
     }
   }, true)
 
+  /* v3.3.70 / v2.8.57：右上角窗口控制条（独占输出 / 最小化 / 最大化 / 关闭）。
+     全屏页是 inset:0 的覆盖层，标题栏被整层压住 —— 以前进来就没有窗口出口。
+     这里一个业务分支都不写，全部转发到标题栏同名按钮：最大化图标同步、
+     退出前串行落盘、独占开关的释放/重载都只有 app.js 那一份。 */
+  const fsWin = (fromId, toId, before) => {
+    const from = $(fromId)
+    if (!from) return
+    from.addEventListener('click', () => {
+      if (before) { try { before() } catch (e) { /* 忽略 */ } }
+      const to = $(toId)
+      if (to) to.click()
+    })
+  }
+  fsWin('fsMin', 'btnMin')
+  fsWin('fsMax', 'btnMax')
+  fsWin('fsWinClose', 'btnClose')
+  // 独占开关走的是「释放 → 落盘 → location.reload()」的整页重载，全屏页会被一起冲掉。
+  // 点之前记一笔，重载后把页面展开回来，用户不会莫名其妙掉回主界面。
+  fsWin('fsHifi', 'btnHifi', () => {
+    if (UI.isFullscreen()) sessionStorage.setItem('lx_fs_reopen', '1')
+  })
+
+  /* 重载后恢复全屏页（只在「从全屏页里点了独占」时才有标记，其它路径不受影响） */
+  let reopenFs = false
+  try {
+    reopenFs = sessionStorage.getItem('lx_fs_reopen') === '1'
+    if (reopenFs) sessionStorage.removeItem('lx_fs_reopen')
+  } catch (e) { /* 无 sessionStorage（隐私模式）：当作没标记 */ }
+  if (reopenFs) {
+    const openFs = () => { try { UI.setFullscreen(true) } catch (e) { /* 忽略 */ } }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', openFs, { once: true })
+    else openFs()
+  }
+
   /* v2.8.37 / v3.3.45：全屏页自己的播放队列入口。
      复用主界面的 #queuePanel（同一份 UI.renderQueue / 清空 / 行尾 ×），
      CSS 用 body.fs-open 把它抬到 #fsView 之上并挪到页面右侧。
