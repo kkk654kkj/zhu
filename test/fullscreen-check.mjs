@@ -76,14 +76,17 @@ const make = (id, tag = 'div') => {
 const ids = [
   'pbCover', 'fsView', 'fsClose', 'fsQueue', 'queuePanel',
   'fsPlay', 'btnPlay', 'fsPrev', 'btnPrev', 'fsNext', 'btnNext',
-  'fsMode', 'btnMode', 'fsFav', 'btnFav', 'fsBar', 'titlebar'
+  'fsMode', 'btnMode', 'fsFav', 'btnFav', 'fsBar', 'titlebar',
+  // v3.3.70 / v2.8.57：全屏页右上角窗口控制条（转发目标也要在，才能数点击）
+  'fsHifi', 'fsMin', 'fsMax', 'fsWinClose', 'btnHifi', 'btnMin', 'btnMax', 'btnClose'
 ]
 ids.forEach((id) => make(id, /^(btn|fs|pb)/.test(id) ? 'button' : 'div'))
 els.get('fsView').tagName = 'DIV'
 els.get('queuePanel').hidden = true
 // 控件挂在 #fsView 下，closest 才能沿父链找到 BLOCK 命中
 const fsView = els.get('fsView')
-for (const id of ['fsPlay', 'fsPrev', 'fsNext', 'fsMode', 'fsFav', 'fsFav', 'fsQueue', 'fsClose', 'fsBar']) {
+for (const id of ['fsPlay', 'fsPrev', 'fsNext', 'fsMode', 'fsFav', 'fsFav', 'fsQueue', 'fsClose', 'fsBar',
+  'fsHifi', 'fsMin', 'fsMax', 'fsWinClose']) {
   const e = els.get(id)
   if (e) e.parentElement = fsView
 }
@@ -107,6 +110,18 @@ const document = {
 }
 const winLs = {}
 const calls = { dragStart: 0, dragMove: [], dragEnd: 0, queueToggle: 0, setFs: [], seekRatios: [] }
+// 标题栏同名按钮的点击计数：全屏页只做转发，不该自己写逻辑
+for (const id of ['btnHifi', 'btnMin', 'btnMax', 'btnClose']) {
+  const e = els.get(id)
+  e.addEventListener('click', () => { calls[id] = (calls[id] || 0) + 1 })
+}
+// v3.3.70：独占开关重载后要能恢复全屏页，靠 sessionStorage 传话
+const store = new Map()
+const sessionStorage = {
+  getItem: (k) => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => store.set(k, String(v)),
+  removeItem: (k) => store.delete(k)
+}
 const window = {
   api: {
     dragStart: () => { calls.dragStart++ },
@@ -134,7 +149,7 @@ const fireWin = (type, ev) => {
 }
 
 const ctx = vm.createContext({
-  console, document, window, MutationObserver: MO, UI,
+  console, document, window, MutationObserver: MO, UI, sessionStorage,
   requestAnimationFrame: (fn) => { fn(); return 1 },
   cancelAnimationFrame: () => {},
   player: { seekRatio: (r) => calls.seekRatios.push(r) },
@@ -198,9 +213,73 @@ ok('右上角收起按钮 → UI.setFullscreen(false)',
   calls.setFs.length === 1 && calls.setFs[0] === false, JSON.stringify(calls.setFs))
 calls.setFs.length = 0
 fsView.classList.add('open')
-for (const l of (document._ls.keydown || [])) l.fn({ key: 'Escape', preventDefault() {} })
+for (const l of (document._ls.keydown || [])) {
+  // v3.3.70：v3.3.67 起 Esc 处理里多了 e.stopPropagation()（全屏退出优先，别让主界面再吃一次），
+  // 假事件缺这个方法就会 TypeError 直接中断整套断言。
+  l.fn({ key: 'Escape', preventDefault() {}, stopPropagation() {} })
+}
 ok('Esc 在全屏页打开时 → UI.setFullscreen(false)',
   calls.setFs.length === 1 && calls.setFs[0] === false, JSON.stringify(calls.setFs))
+
+/* ---------------- 5) 右上角窗口控制条（v3.3.70 / v2.8.57） ---------------- */
+const fireClick = (id) => {
+  const ev = { target: els.get(id), preventDefault() {}, stopPropagation() { this.__stopped = true } }
+  els.get(id).fire('click', ev)
+  return ev
+}
+fireClick('fsMin')
+ok('全屏页最小化 → 转发给标题栏 #btnMin', calls.btnMin === 1, String(calls.btnMin))
+fireClick('fsMax')
+ok('全屏页最大化 → 转发给标题栏 #btnMax（图标同步靠 app.js 的 setMaxIcon）',
+  calls.btnMax === 1)
+fireClick('fsWinClose')
+ok('全屏页关闭 → 转发给标题栏 #btnClose（退出前串行落盘只有那一份）',
+  calls.btnClose === 1)
+
+store.delete('lx_fs_reopen')
+fsView.classList.add('open')
+fireClick('fsHifi')
+ok('全屏页独占开关 → 转发给标题栏 #btnHifi，且留下重载恢复标记',
+  calls.btnHifi === 1 && store.get('lx_fs_reopen') === '1')
+store.delete('lx_fs_reopen')
+fsView.classList.remove('open')
+fireClick('fsHifi')
+ok('不在全屏页时点同一个键 → 不留恢复标记（重载后仍停主界面）',
+  calls.btnHifi === 2 && !store.has('lx_fs_reopen'))
+
+/* 重载后恢复：新开一个干净 vm，sessionStorage 预置标记，脚本应在 DOM 就绪后展开全屏页 */
+const reopenStore = new Map([['lx_fs_reopen', '1']])
+const reopenCalls = []
+const reopenView = { classList: { _s: new Set(), add(c) { this._s.add(c) }, remove(c) { this._s.delete(c) }, contains(c) { return this._s.has(c) }, toggle(c, f) { const on = f == null ? !this._s.has(c) : !!f; on ? this._s.add(c) : this._s.delete(c); return on } } }
+const reopenCtx = vm.createContext({
+  console,
+  document: {
+    readyState: 'complete',
+    body: new El('body', 'body'),
+    getElementById: (id) => (id === 'fsView' ? reopenView : null),
+    querySelector: () => null,
+    addEventListener: () => {}
+  },
+  window: { api: {}, addEventListener: () => {} },
+  MutationObserver: MO,
+  sessionStorage: {
+    getItem: (k) => (reopenStore.has(k) ? reopenStore.get(k) : null),
+    setItem: (k, v) => reopenStore.set(k, String(v)),
+    removeItem: (k) => reopenStore.delete(k)
+  },
+  UI: {
+    els: { fsView: reopenView },
+    isFullscreen: () => reopenView.classList.contains('open'),
+    setFullscreen: (s) => { reopenCalls.push(s); reopenView.classList.toggle('open', s !== false); return !!s },
+    toggleQueue: () => {}
+  },
+  setTimeout, clearTimeout
+})
+vm.runInContext(fs.readFileSync(path.join(ROOT, 'src/renderer/js/fullscreen.js'), 'utf8'), reopenCtx,
+  { filename: 'fullscreen.js#reopen' })
+ok('独占开关重载后自动展开全屏页，标记只用一次',
+  reopenCalls.length === 1 && reopenCalls[0] === true && !reopenStore.has('lx_fs_reopen'),
+  JSON.stringify(reopenCalls))
 
 console.log(fail ? `\n${pass} 通过 / ${fail} 失败` : `\n全部通过（${pass} 项）`)
 process.exit(fail ? 1 : 0)

@@ -1267,8 +1267,10 @@ function main() {
         /if \(!want \|\| hasSpec\) return true/.test(ol67) &&
         /Object\.assign\(\{\}, have, \{ spec: want \}\)/.test(ol67))
 
+      // v3.3.70：原来是 (67|68) 白名单，升到 3.3.69 就假失败一次；改成「3.3.x 且不低于 67」
       ok('v3.3.67：版本号已升（package.json）',
-        /"version": "3\.3\.(67|68)"/.test(pkg67))
+        /"version": "3\.3\.(\d+)"/.test(pkg67) &&
+        Number(/"version": "3\.3\.(\d+)"/.exec(pkg67)[1]) >= 67)
 
       ok('v3.3.67：扫描作用域有真跑的回归测试（缺依赖时明确 SKIP 而非假通过）',
         fs.existsSync(path.join(ROOT, 'test/scan-scope.mjs')) &&
@@ -1311,6 +1313,30 @@ function main() {
         /playlists:addTracks', \(e, \{ id, trackIds \} = \{\}\) => \{[\s\S]{0,120}Array\.isArray\(trackIds\)/.test(mj69) &&
         /playlists:removeTracks', \(e, \{ id, trackIds \} = \{\}\) => \{[\s\S]{0,120}Array\.isArray\(trackIds\)/.test(mj69) &&
         (mj69.match(/typeof t === 'string' && t\)/g) || []).length >= 2)
+    }
+
+    // ===== v3.3.70 全屏页右上角窗口控制条（独占 / 最小化 / 最大化 / 关闭，两版同源） =====
+    {
+      const html70 = read('src/renderer/index.html')
+      const css70 = read('src/renderer/css/app.css')
+      const fs70 = read('src/renderer/js/fullscreen.js')
+      const app70 = read('src/renderer/js/app.js')
+      const ui70 = read('src/renderer/js/ui.js')
+      ok('v3.3.70：全屏页四个窗口键齐全且都在 #fsView 内',
+        /<div class="fs-winbar"[\s\S]{0,900}id="fsHifi"[\s\S]{0,400}id="fsMin"[\s\S]{0,400}id="fsMax"[\s\S]{0,400}id="fsWinClose"/.test(html70) &&
+        html70.indexOf('id="fsWinbar"') > html70.indexOf('<div id="fsView">'))
+      ok('v3.3.70：控制条贴右上角 + 工具组让位 + 关闭键危险态',
+        /\.fs-winbar\s*\{[^}]*position:\s*absolute[^}]*right:\s*0/.test(css70) &&
+        /#fsHeadTools\s*\{[^}]*margin-right:\s*168px/.test(css70) &&
+        /\.fs-win\s*\{[^}]*width:\s*38px[^}]*height:\s*34px/.test(css70) &&
+        /\.fs-win\.danger:hover\s*\{[^}]*var\(--danger\)/.test(css70))
+      ok('v3.3.70：四键只转发不给逻辑，最大化图标与独占态两处同源',
+        /fsWin\('fsMin', 'btnMin'\)/.test(fs70) &&
+        /fsWin\('fsMax', 'btnMax'\)/.test(fs70) &&
+        /fsWin\('fsWinClose', 'btnClose'\)/.test(fs70) &&
+        /fsWin\('fsHifi', 'btnHifi'/.test(fs70) &&
+        /for \(const id of \['btnMax', 'fsMax'\]\)/.test(app70) &&
+        /\[this\.els\.btnHifi, this\.els\.fsHifi\]/.test(ui70))
     }
 
   }
