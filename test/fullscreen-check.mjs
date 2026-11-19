@@ -109,7 +109,7 @@ const document = {
   _ls: {}
 }
 const winLs = {}
-const calls = { dragStart: 0, dragMove: [], dragEnd: 0, queueToggle: 0, setFs: [], seekRatios: [] }
+const calls = { dragStart: 0, dragMove: [], dragEnd: 0, queueToggle: 0, setFs: [], seekRatios: [], audioPanel: 0 }
 // 标题栏同名按钮的点击计数：全屏页只做转发，不该自己写逻辑
 for (const id of ['btnHifi', 'btnMin', 'btnMax', 'btnClose']) {
   const e = els.get(id)
@@ -154,6 +154,8 @@ const ctx = vm.createContext({
   cancelAnimationFrame: () => {},
   player: { seekRatio: (r) => calls.seekRatios.push(r) },
   audio: { duration: 200, currentTime: 0 },
+  // v3.3.72 / v2.8.59：全屏页右键独占键要开设备面板（真实环境里由 exclusive.js 提供）
+  openAudioPanel: () => { calls.audioPanel++ },
   setTimeout, clearTimeout
 })
 for (const rel of ['src/renderer/js/dragwin.js', 'src/renderer/js/fullscreen.js']) {
@@ -246,6 +248,14 @@ fsView.classList.remove('open')
 fireClick('fsHifi')
 ok('不在全屏页时点同一个键 → 不留恢复标记（重载后仍停主界面）',
   calls.btnHifi === 2 && !store.has('lx_fs_reopen'))
+
+/* ---------------- 6) 全屏页右键独占键 → 设备面板（v2.8.59 / v3.3.72） ---------------- */
+// 右键只开面板，不能顺手把独占开/关（那是左键的事，且会触发整页重载）
+const ctxEv = { target: els.get('fsHifi'), preventDefault() { this.__pd = true }, stopPropagation() { this.__stopped = true } }
+els.get('fsHifi').fire('contextmenu', ctxEv)
+ok('全屏页右键独占键 → 打开音频设备面板，且吃掉默认菜单与冒泡',
+  calls.audioPanel === 1 && calls.btnHifi === 2 && ctxEv.__pd === true && ctxEv.__stopped === true,
+  JSON.stringify({ panel: calls.audioPanel, hifi: calls.btnHifi }))
 
 /* 重载后恢复：新开一个干净 vm，sessionStorage 预置标记，脚本应在 DOM 就绪后展开全屏页 */
 const reopenStore = new Map([['lx_fs_reopen', '1']])

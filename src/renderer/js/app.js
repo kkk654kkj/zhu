@@ -1691,7 +1691,9 @@ function bindPopupUi() {
     if (!e.target.closest('#ctxMenu')) UI.hideContextMenu()
     if (!e.target.closest('#eqPanel') && !e.target.closest('#btnEq')) UI.toggleEq(false)
     if (!e.target.closest('#sleepPanel') && !e.target.closest('#btnSleep')) toggleSleepPanel(false)
-    if (!e.target.closest('#audioPanel') && !e.target.closest('#btnHifi') && !e.target.closest('#hifiBadge')) toggleAudioPanel(false)
+    // v2.8.59 / v3.3.72：#fsHifi 也能开设备面板（全屏页右键），算「面板内部」，不算点外部
+    if (!e.target.closest('#audioPanel') && !e.target.closest('#btnHifi') &&
+      !e.target.closest('#hifiBadge') && !e.target.closest('#fsHifi')) toggleAudioPanel(false)
   })
 
   // 右键菜单动作
