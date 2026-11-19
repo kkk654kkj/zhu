@@ -56,6 +56,12 @@ function realpathCached(p) {
   // 满了就逐条淘汰最早的，而不是整表 clear()：clear 会让每个 Range 请求
   // 都把所有 root 重新 realpathSync 一遍（主进程同步 IO）
   while (realpathCache.size >= REALPATH_MAX) realpathCache.delete(realpathCache.keys().next().value)
+  // v2.8.59 / v3.3.72（P2 重审）：**负结果不入缓存**。
+  // 5 秒 TTL 对「junction 被重新指向」是好事，对「文件刚写完」是灾：下载完成的
+  // .part 刚改名成正式文件时，若此前探过一次（不存在），5 秒内 lxfile 一律拒绝，
+  // 用户看到的是「刚下完的曲子一播就跳下一首」。不缓存失败只多一次 realpathSync，
+  // 而失败请求本来就要被拒绝，代价可以忽略。
+  if (val === null) return null
   realpathCache.set(p, { val, at: now })
   return val
 }

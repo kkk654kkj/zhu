@@ -36,9 +36,12 @@ function bindDirModal() {
     if (!draftDirs.length) { toast('请至少添加一个文件夹'); return }
     const chk = document.getElementById('chkWatchFolders')
     const watchFolders = chk ? chk.checked : true
-    // v3.3.63：这里原来直接调裸 patchSettings（绕过 persist.js 的重试与失败提示），
-    // 磁盘只读/被占用时：弹窗已经关了、目录看起来保存成功、没有任何提示、扫描也不启动。
-    // 改成走 saveSettings（自带重试 + toast），失败就别关弹窗、别改内存。
+    // v3.3.63：这里原来直接调裸 patchSettings 且不看结果。现在至少能拦住 IPC 层失败
+    // （入参被 sanitize 拒绝 / 主进程抛错）。
+    // v2.8.59 / v3.3.72（P3 重审·结论不改契约）：`settings:patch` 是「内存即时生效 +
+    // 去抖落盘」语义，磁盘写失败由主进程 store 的 3 次重试链兜底（onError 进日志），
+    // 渲染层拿不到写盘回包。要让这里真等到「落盘成功」，得把 settings:patch 改成
+    // 同步 flush 并改 20+ 个调用点 —— 收益不抵风险，按「不改」结案。
     try {
       await window.api.patchSettings({ musicDirs: draftDirs.slice(), watchFolders })
     } catch (err) {

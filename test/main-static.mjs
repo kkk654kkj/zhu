@@ -1001,6 +1001,31 @@ function main() {
       /\[this\.els\.btnHifi, this\.els\.fsHifi\]/.test(ui57))
   }
 
+  // ===== v2.8.59 / v3.3.72 全屏页右键独占键 → 音频设备面板（两版同源） =====
+  {
+    const css72 = read('src/renderer/css/app.css')
+    const fs72 = read('src/renderer/js/fullscreen.js')
+    const app72 = read('src/renderer/js/app.js')
+    ok('v2.8.59：全屏页右键独占键开设备面板，面板抬到 #fsView(50) 之上',
+      /fsHifi\.addEventListener\('contextmenu'/.test(fs72) &&
+      /typeof openAudioPanel === 'function'/.test(fs72) &&
+      /body\.fs-open #audioPanel\s*\{[^}]*z-index:\s*60/.test(css72) &&
+      /!e\.target\.closest\('#fsHifi'\)/.test(app72))
+  }
+
+  // ===== v2.8.59 / v3.3.72 放宽口径重审余下 P2/P3（两版同源） =====
+  {
+    const proto72 = read('src/main/protocols.js')
+    const mj72 = read('src/main/main.js')
+    const ui72 = read('src/renderer/js/ui.js')
+    const eq72 = read('src/renderer/js/eq.js')
+    ok('v2.8.59：realpath 负结果不入缓存 / 设备回滚带 reverted 回包 / 行播放态尊重参数',
+      /if \(val === null\) return null/.test(proto72) &&
+      /reverted: true,\s*device: prevDevice/.test(mj72) &&
+      /const hit = on && el\.dataset\.id === id/.test(ui72) &&
+      /Esc 可中断/.test(eq72))
+  }
+
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)
 }
