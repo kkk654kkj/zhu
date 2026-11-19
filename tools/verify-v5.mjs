@@ -38,7 +38,7 @@ for (const f of files) {
   if (r.status !== 0) { syntaxBad++; console.log('  ✗', path.relative(REPO, f), (r.stderr || '').slice(0, 200)) }
 }
 ok(`全量 node --check（${files.length} 个文件）`, syntaxBad === 0, syntaxBad ? `${syntaxBad} 个失败` : '')
-for (const f of ['pack-one.sh', 'install-one.sh']) {
+for (const f of ['tools/stage-asar.sh', 'tools/deploy.sh']) {
   const r = spawnSync('bash', ['-n', path.join(REPO, f)], { encoding: 'utf8' })
   ok(`bash -n ${f}`, r.status === 0, r.status ? (r.stderr || '').slice(0, 160) : '')
 }

@@ -26,7 +26,7 @@ for (const f of ['tools/check-dist.mjs', 'test/smoke.mjs', 'make-lnk.js', 'make-
   if (fs.existsSync(p)) { const r = spawnSync(process.execPath, ['--check', p], { encoding: 'utf8' }); if (r.status !== 0) { bad++; console.log('  ✗', f) } }
 }
 ok('全量 node --check', bad === 0, bad ? `${bad} 个失败` : '')
-for (const f of ['pack-one.sh', 'install-one.sh']) {
+for (const f of ['tools/stage-asar.sh', 'tools/deploy.sh']) {
   const r = spawnSync('bash', ['-n', path.join(REPO, f)], { encoding: 'utf8' })
   ok(`bash -n ${f}`, r.status === 0)
 }
@@ -101,8 +101,8 @@ ok('dragdrop 对象引用', /dragQRef|indexOf\(/.test(R('src/renderer/js/dragdro
 
 console.log('\n=== 5) 冲突标记 / 版本号 / 脚本 ===')
 ok('无冲突标记', !/^<<<<<<<|^>>>>>>>/m.test(m + a + p))
-ok('install-one.sh 有 PIPESTATUS', /PIPESTATUS/.test(R('install-one.sh')))
-ok('pack-one.sh 有参数校验', /:\s*"\$\{1:\?|exit 1/.test(R('pack-one.sh')))
+ok('tools/deploy.sh 备份旧 asar 再换装', /backup-asar/.test(R('tools/deploy.sh')) && /check-dist\.mjs/.test(R('tools/deploy.sh')))
+ok('tools/stage-asar.sh 有参数校验与绝对路径守卫', /绝对路径/.test(R('tools/stage-asar.sh')) && /exit 1/.test(R('tools/stage-asar.sh')))
 ok('check-dist 有 size 校验', /\.size > 0/.test(R('tools/check-dist.mjs')))
 ok('smoke 断言加强', /v\.hit\s*>\s*0|hit > 0/.test(R('test/smoke.mjs')))
 
