@@ -52,13 +52,28 @@ SHORT="$(git -C "$REPO" rev-parse --short "$SHA")"
 echo "== 来源: $REF → $SHORT =="
 
 STAGE="$WORK/stage-$(echo "$REF" | tr '/\\:' '___')"
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
-# 只取已提交内容；MSYS_NO_PATHCONV 防 git-bash 把 -C 的路径参数改写
-git -C "$REPO" archive --format=tar "$SHA" | MSYS_NO_PATHCONV=1 tar -xf - -C "$STAGE"
+if [ "$DO_INSTALL" = "0" ] && [ -f "$STAGE/src/main/main.js" ]; then
+  # --no-install 的语义就是「复用现成 stage 只为重打 asar」，别把它删了再报缺依赖
+  echo "== 复用已有 stage（--no-install）: $STAGE =="
+else
+  rm -rf "$STAGE"
+  mkdir -p "$STAGE"
+  # 只取已提交内容；MSYS_NO_PATHCONV 防 git-bash 把 -C 的路径参数改写
+  git -C "$REPO" archive --format=tar "$SHA" | MSYS_NO_PATHCONV=1 tar -xf - -C "$STAGE"
+fi
 test -f "$STAGE/package.json" || { echo "!! stage 里没有 package.json"; exit 1; }
 test -f "$STAGE/src/main/main.js" || { echo "!! stage 里没有 src/main/main.js"; exit 1; }
 rm -rf "$STAGE/data"   # 万一把用户目录带进来就是隐私事故
+# 白名单之外的根条目一律删：运行期只读 package.json + src/（renderer/assets）+ node_modules。
+# 以前是逐个点名删 test/tools/docs，结果 .gitignore、pnpm-lock.yaml、截图、交接文档.md
+# 都跟着进了包（白涨体积，还把仓库文档分发出去了）。
+for entry in "$STAGE"/* "$STAGE"/.[!.]* "$STAGE"/..?*; do
+  [ -e "$entry" ] || continue
+  case "$(basename "$entry")" in
+    package.json|src|node_modules) ;;
+    *) rm -rf "$entry" ;;
+  esac
+done
 
 echo "== 版本号 → $VER =="
 node -e '
@@ -89,7 +104,8 @@ test -f "$ASAR" || { echo "!! asar CLI 不可用: $ASAR"; exit 1; }
 
 echo "== asar pack =="
 mkdir -p "$(dirname "$OUT")"
-rm -f "$OUT"
+# 不先删旧包：asar pack 本身会覆盖。某些环境（沙箱/安全软件）对「删除文件」有额外拦截，
+# 保留旧包让 pack 直接覆盖，少一步可失败的写操作。
 node "$ASAR" pack "$STAGE" "$OUT"
 
 # 自检：入口与依赖真在包里，别等换装完才发现打了个空壳
