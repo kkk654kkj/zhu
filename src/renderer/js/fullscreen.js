@@ -50,6 +50,18 @@
     if (UI.isFullscreen()) sessionStorage.setItem('lx_fs_reopen', '1')
   })
 
+  /* v2.8.59 / v3.3.72：全屏页独占键补右键「音频设备面板」（设备选择 + 高精度音量）。
+     标题栏那颗的右键绑在 app.js（openAudioPanel），这里只补同一个入口，不复制逻辑。
+     #audioPanel 默认 z-index:40，被 #fsView(50) 整层压住 —— 靠 CSS body.fs-open 抬到 60 并挪位。 */
+  const fsHifi = $('fsHifi')
+  if (fsHifi) {
+    fsHifi.addEventListener('contextmenu', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (typeof openAudioPanel === 'function') openAudioPanel()
+    })
+  }
+
   /* 重载后恢复全屏页（只在「从全屏页里点了独占」时才有标记，其它路径不受影响）。
      成品实测踩到的坑：不能在 document 上等 DOMContentLoaded —— app.js 的 boot 挂在
      window 上，document 阶段的监听先跑，那一刻 UI.els 还是空的，setFullscreen() 直接返回

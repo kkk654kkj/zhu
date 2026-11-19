@@ -3013,6 +3013,20 @@ html[data-theme="light"] body.fs-open #queuePanel {
   box-shadow: 0 16px 44px rgba(24,36,56,.24);
 }
 
+/* v2.8.59 / v3.3.72：#audioPanel 默认 z-index:40，同样被 #fsView(50) 整层压住。
+   全屏页里右键独占键打开设备面板时抬到 60，并避开底部控制条（全屏页下主播放条是藏起来的，
+   不能再按 --pb-h 定位）。 */
+body.fs-open #audioPanel {
+  z-index: 60;
+  right: 32px;
+  bottom: 118px;
+  max-height: min(60vh, 520px);
+  box-shadow: 0 18px 52px rgba(0,0,0,.60);
+}
+html[data-theme="light"] body.fs-open #audioPanel {
+  box-shadow: 0 16px 44px rgba(24,36,56,.24);
+}
+
 /* =========================================================================
    v2.8.40 / v3.3.48「九条 UI 建议全实装」轮
    ---------------------------------------------------------------------------
