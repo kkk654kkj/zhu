@@ -2520,13 +2520,22 @@ function registerMpvIpc() {
     const startVolume = Math.max(0, Math.min(1, Number(store.get().settings.volume ?? 1)))
     const r = await MPVM.mpvEngine.restart({ exclusive: true, audioDevice: name, volume: startVolume })
     // v3.3.13：重启彻底失败 → 设置回退到调用前的值，避免界面显示的设备与实际不符
+    // v2.8.59 / v3.3.72（P2 重审）：只写回 audioDevice 这一个键（以前把整份 settings 铺进
+    // patch 重放一遍，运行期才改的键会被当成用户意图再写一次）；并且**必须带 reverted 回包** ——
+    // 只回滚磁盘不回包，面板还把失败设备标成「（当前）」，界面与实际仍然不一致。
     if (!r.ok) {
-      store.patch({ settings: { ...store.get().settings, audioDevice: prevDevice } })
-      return { ok: false, applied: true, error: r.error }
+      store.patch({ settings: { audioDevice: prevDevice } })
+      return {
+        ok: false,
+        applied: true,
+        reverted: true,
+        device: prevDevice,
+        error: '切换失败，已回退原设备' + (r.error ? '：' + r.error : '')
+      }
     }
     // 新设备起不来时 mpv.js 会退回原设备；这时设置也得跟着回退，否则界面显示的和实际用的不一致
     if (r.audioDevice && r.audioDevice !== name) {
-      store.patch({ settings: { ...store.get().settings, audioDevice: r.audioDevice } })
+      store.patch({ settings: { audioDevice: r.audioDevice } })
       return { ok: true, applied: true, reverted: true, device: r.audioDevice, error: '该设备不可用，已退回原设备' }
     }
     return { ok: true, applied: true, error: r.error }

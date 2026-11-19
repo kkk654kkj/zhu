@@ -119,7 +119,10 @@ async function analyzeLibraryLoudness() {
 
   state.analyzing = true
   state.abortAnalysis = false
-  UI.showScan('正在分析响度…', 'analyze')
+  // v2.8.59 / v3.3.72（P2 重审·结论不改逻辑）：中断其实一直有 —— Esc 会把 abortAnalysis
+  // 置真，循环每首前检查、已完成部分照常落盘。缺的只是「能看出来可以停」，
+  // 所以把入口写进标题，不加按钮、不引入 AbortController 贯穿解码。
+  UI.showScan('正在分析响度…（Esc 可中断）', 'analyze')
   const target = state.settings.targetLufs || LUFS_DEFAULT_TARGET
   const gains = Object.assign({}, state.settings.trackGains || {})
   let done = 0

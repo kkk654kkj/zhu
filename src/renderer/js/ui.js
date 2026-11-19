@@ -312,14 +312,17 @@ const UI = {
   },
 
   setRowPlaying(id, playing) {
-    // 虚拟滚动后可视窗口重画需要最新的当前曲 id（ctx 里的会过时）
-    if (playing) this._tCurrentId = id
+    // v2.8.59 / v3.3.72（P3 重审）：参数 playing 以前被完全忽略 —— 传 false 反而会给
+    // 那一行加上 .playing（于是 queue-tools 只能绕开本函数手抠 DOM）。语义现在与名字一致：
+    // true = 只点亮 id 这一行；false = 清掉当前行（id 命中则连 _tCurrentId 一起归零）。
+    const on = !!playing
+    if (on) this._tCurrentId = id
     else if (this._tCurrentId === id) this._tCurrentId = null
     $$('#tableBody .tr, #tableBody .mc').forEach((el) => {
-      const on = el.dataset.id === id
-      el.classList.toggle('playing', on)
+      const hit = on && el.dataset.id === id
+      el.classList.toggle('playing', hit)
       // v2.8.41：非当前行必须把 paused 一起摘掉 —— 否则上一首会留下 tr.paused 脏类
-      if (!on) el.classList.remove('paused')
+      if (!hit) el.classList.remove('paused')
     })
   },
 

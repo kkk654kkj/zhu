@@ -63,8 +63,8 @@ const QT = (() => {
   function resetPlaybackUi() {
     try {
       if (typeof state !== 'undefined') state.currentId = null
-      // UI.setRowPlaying(id, false) 的语义是「只给 id 那一行加 playing」，
-      // 传旧 id + false 反而会把高亮留在旧行上；这里直接清干净。
+      // v2.8.59 / v3.3.72：UI.setRowPlaying(id, false) 已修成语义正确（清空所有行），
+      // 但这里仍直接抠 DOM —— 清空队列时连「不在 _tCurrentId 记录里的脏高亮」也要一次抹掉。
       UI._tCurrentId = null
       // v3.3.67：网格模式的行是 .mc，以前只清 .tr.playing，清空队列后网格里
       // 仍留着「正在播放」高亮（且播放条已经归零，看起来像卡住）
