@@ -146,6 +146,9 @@ function showReleaseNotice() {
   if (!rel) return
   if (rel.blocked) {
     toast('声卡仍被占用，其它程序可能还是没声音。已清理本程序的残留进程，若仍无声请重启声卡设备。', 6000)
+  } else if (rel.uncertain) {
+    // v3.3.73（A03）：探测超时/无输出时不能报「已释放」—— 那会让用户以为不用再处理
+    toast('已关闭独占输出，但没能确认声卡是否已释放；若其它程序仍无声，请重试一次或重启声卡设备。', 6000)
   } else if (rel.leftover && rel.leftover.length) {
     toast('已关闭独占输出，并清理了 ' + rel.leftover.length + ' 个残留进程。其它程序若没声音，重新播放一下即可。', 5000)
   } else {

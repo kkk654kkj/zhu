@@ -207,14 +207,21 @@ async function releaseMpvOnce({ probe = true } = {}) {
     G.logLine('[mpv] 残留孤儿进程已清理: ' + leftover.join(','))
   }
   let blocked = false
+  let uncertain = false
   let detail = ''
   if (probe) {
     const p = await probeDeviceFree()
-    blocked = !!p.blocked
+    // v3.3.73（A03）：探测可能「没结论」（超时 / 无输出，probeDeviceFree 返回 blocked:null）。
+    // 以前 !!null 压成 false 且把 uncertain 丢掉 → 界面报「声卡已释放」，别的程序却仍然没声音。
+    uncertain = !!p.uncertain || p.blocked === null
+    blocked = uncertain ? false : !!p.blocked
     detail = p.detail || ''
-    pushMpvLog(blocked ? 'warn' : 'info', blocked ? '声卡仍被占用：别的程序可能还是没声音' : '声卡已释放，其他程序可以正常发声')
+    pushMpvLog(uncertain ? 'warn' : (blocked ? 'warn' : 'info'),
+      uncertain
+        ? '声卡占用状态未取到结论：' + (detail || '探测超时或无输出')
+        : (blocked ? '声卡仍被占用：别的程序可能还是没声音' : '声卡已释放，其他程序可以正常发声'))
   }
-  return { ok: true, exited, leftover, blocked, detail }
+  return { ok: true, exited, leftover, blocked, uncertain, detail }
 }
 
 /** 列出（并杀掉）属于本进程的残留 mpv —— 竞态产生的孤儿会一直霸着声卡 */
@@ -326,6 +333,11 @@ let deviceWatchId = null
 
 let lostDevice = ''
 
+/** v3.3.73（A06）：设备断开且「切回默认」失败时，8 秒一轮会反复推同一条 device-lost。
+ *  界面靠 toast 30 秒去重顶着，但事件本身仍在刷（每次都 updateHifiBadge）。
+ *  这里只在该状态第一次出现时通知，恢复或设备换回来时复位。 */
+let lostGoneNotified = false
+
 let deviceWatchBusy = false
 
 function startDeviceWatch() {
@@ -362,10 +374,14 @@ function startDeviceWatch() {
       let ok = false
       try { ok = !!(await eng.restart({ exclusive: true, audioDevice: '' })).ok } catch (e) { ok = false }
       if (!ok) {
-        pushMpvLog('error', '切回系统默认设备失败，独占可能已中断')
-        G.sendToRenderer('device-lost', { device: cur, restored: false, error: '切回系统默认设备失败，请手动重开独占' })
+        if (!lostGoneNotified) {
+          lostGoneNotified = true
+          pushMpvLog('error', '切回系统默认设备失败，独占可能已中断')
+          G.sendToRenderer('device-lost', { device: cur, restored: false, error: '切回系统默认设备失败，请手动重开独占' })
+        }
         return
       }
+      lostGoneNotified = false
       G.store.patch({ settings: { audioDevice: '' } })
       G.sendToRenderer('device-lost', { device: cur, restored: false })
       return
@@ -395,6 +411,7 @@ function startDeviceWatch() {
 function stopDeviceWatch() {
   if (deviceWatchId) { clearInterval(deviceWatchId); deviceWatchId = null }
   lostDevice = ''
+  lostGoneNotified = false
 }
 
 module.exports = {
