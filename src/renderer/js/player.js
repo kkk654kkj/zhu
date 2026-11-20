@@ -239,6 +239,14 @@ class Player extends Emitter {
       // v2.8.58 修：本地版没有代理，空地址一律走原失败链（计数 → 自动跳下一首），
       // 不能打 NO_PROXY —— 那会让整队停在这一首等一个永远不会就绪的端口。
       if (track.online) err.code = 'NO_PROXY'
+      // v2.8.60（A02）：以前这里只报错、不动上一首 —— audio 里还是上一首的 src、上一首
+      // 也还在响。后果：① 用户再点播放，play() 看到 src 非空直接把上一首放出来（界面显示
+      // 这首、耳朵听另一首）；② 下次切歌时 track-leave 拿上一首的 currentTime 记到这首
+      // 头上，长音轨的断点被写错。先收干净再报错。
+      this._loadedTrack = null
+      try { this.audio.pause() } catch (e) { /* 忽略 */ }
+      try { this.audio.removeAttribute('src') } catch (e) { /* 忽略 */ }
+      try { this.audio.load() } catch (e) { /* 忽略 */ }
       this._clearLoadWatchdog()
       this._setLoading(false)
       this.emit('track-change', track)
@@ -261,6 +269,9 @@ class Player extends Emitter {
     // 第四轮 §4.6(e)：停止后 current 还在、src 已被清掉。以前直接 audio.play()，
     // 界面显示「播放中」却没有声音、进度按插值空走（假播放）。这里重新加载当前曲。
     if (!this.audio.src) { this._loadCurrent(true); return }
+    // v2.8.60（A02）：当前曲压根没有地址（文件已不在）时，audio 里可能还留着上一首的
+    // src —— 直接 play() 会把上一首放出来。走一次 _loadCurrent 让它报错。
+    if (!this.current.audio) { this._loadCurrent(true); return }
     const p = this.audio.play()
     if (p && p.catch) p.catch((err) => {
       // 自动播放策略拒绝（NotAllowedError）不是文件坏了，别触发自动跳曲

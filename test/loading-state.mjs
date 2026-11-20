@@ -131,9 +131,18 @@ ok('本地空地址不冒充 NO_PROXY（仍交给失败链自动跳下一首）'
   !!localErr && !localErr.code && player.loading === false,
   localErr ? 'code=' + String(localErr.code) : 'no error')
 
-// 既有 setQueue 行为不被加载态改变：同 id 早退
+// v2.8.60（A02）：空地址早退必须把上一首的音源收干净 ——
+// 否则 audio.src 还指着上一首，用户点播放会放出上一首（界面显示这首）。
+ok('空地址早退清掉上一首的 src（点播放不会放出上一首）', audio.src === '', 'src=' + JSON.stringify(audio.src))
+
+// 既有 setQueue 行为不被加载态改变：同 id 早退。
+// v2.8.60：原断言（旧代码下）实际换到了别的 id，只是靠「空地址分支不 load」才碰巧成立；
+// 这里改成真正的同 id 场景：先正常载入一首，再对它 setQueue 一次。
+const reT = { id: 'local:ok', audio: 'lxfile://local/D:/m/a.flac', title: '本地正常' }
+player.setQueue([reT], 0, false)
+audio.emit('loadedmetadata')
 const loadsBefore = audio.loads
-player.setQueue([t4], 0, false)
+player.setQueue([reT], 0, false)
 ok('同 id 不带 force 仍早退（player-recover 口径不变）', audio.loads === loadsBefore)
 
 console.log(fail ? `\n${pass} 通过 / ${fail} 失败` : `\n全部通过（${pass} 项）`)
