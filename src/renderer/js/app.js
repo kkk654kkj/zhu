@@ -39,6 +39,7 @@ const state = {
   gainsCleared: false,   // 分析途中点了「清除分析数据」→ 收尾时不要再写回
   consecutiveFails: 0,   // 连续播放失败次数（在线/本地共用，>=3 就停止自动跳过）
   autoSkipping: false,   // 本次 track-change 是否由「失败自动跳曲」触发（决定是否清零计数）
+  recoveringId: null,    // v3.3.73（A05）：正在由换源逻辑重载的曲目 id（这段时间不清换源守卫）
   skipTimer: null,       // 失败自动跳曲的延时器（可取消）
   sessionTimer: null
 }
@@ -720,7 +721,10 @@ function bindPlayer() {
     if (!state.autoSkipping && state.consecutiveFails) state.consecutiveFails = 0
     cancelSkipTimer()
     state.lastErrKey = null        // 换曲后允许重新记错误
-    state.fallbackTried.delete(track.id)   // v3.3.64：换曲后允许再做一次在线换源重试
+    // v3.3.73（A05）：换源重载会同步触发 track-change，以前在这里无条件清守卫，
+    // 等于「换源只试一次」从未生效 —— 换到的源仍放不出来时会 error → 再换源 → 再清，
+    // 变成无限换源。换源自己引发的那次不清，真正播起来（time > 3s）或用户手动切走再清。
+    if (state.recoveringId !== track.id) state.fallbackTried.delete(track.id)
     if (track.online) Online.markPlaying(track.id)
     resetAb()                       // A-B 是"这一首之内"的事，换歌就作废
     updateMediaSession(track)
@@ -792,6 +796,8 @@ function bindPlayer() {
   player.on('time', (cur, dur) => {
     // 播过 3 秒 = 真的在出声，连续失败计数清零（计数只认「没播出来」）
     if (cur > 3 && state.consecutiveFails) state.consecutiveFails = 0
+    // v3.3.73（A05）：真的放出来了才允许这首再享受一次换源兜底
+    if (cur > 3 && player.current && state.fallbackTried.size) state.fallbackTried.delete(player.current.id)
     UI.setProgress(cur, dur)
     UI.updateLyricIndex(cur + state.lyricOffset)
     pushDesktopLyric()
@@ -919,7 +925,9 @@ async function recoverOnlineTrack(cur) {
   state.fallbackTried.add(cur.id)
   // v3.3.66：必须带 force —— id 没变（上面刻意保持），只传三参会被
   // setQueue 的「同一首不重载」早退吞掉，新地址永远不加载
-  player.setQueue(tracks, idx, true, true)
+  // v3.3.73（A05）：这次 track-change 是换源自己引发的，不能清换源守卫
+  state.recoveringId = cur.id
+  try { player.setQueue(tracks, idx, true, true) } finally { state.recoveringId = null }
 }
 
 /**
