@@ -330,8 +330,10 @@ function cacheStats() {
  * @returns {boolean} 可读
  */
 function isReadableFromCacheOrData(filePath) {
-  let realFile = null
-  try { realFile = fs.realpathSync.native(filePath) } catch (e) { realFile = null }
+  // v3.3.73（A06）：这里以前每次都 fs.realpathSync.native —— 播放一首歌会来几十次
+  // Range 请求，等于几十次同步磁盘 IO 压在主进程上。改走 protocol 层那份带 5 秒 TTL
+  // 的缓存（负结果不入缓存，所以刚下完改名的文件不会被 5 秒挡住）。
+  const realFile = PROTO.realpathCached(filePath)
   if (!realFile) return false
   return [cacheDirPath(), G.DATA_DIR].some((d) => {
     let rd = PROTO.realpathCached(d)

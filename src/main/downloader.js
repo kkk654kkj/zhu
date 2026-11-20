@@ -444,6 +444,11 @@ async function dlRun(task) {
         const cand = path.join(dir, `${base} (${n})${ext}`)
         if (!fs.existsSync(cand)) { task.path = cand; break }
       }
+      // v3.3.73（A06）：(2)..(99) 全被占时 task.path 仍是那个已存在的文件，
+      // 后面的 renameSync 会在 Windows 上静默覆盖别人的文件。改用时间戳后缀收尾。
+      if (fs.existsSync(task.path)) {
+        task.path = path.join(dir, `${base} (${Date.now().toString(36)})${ext}`)
+      }
       G.logLine('[dl] 目标文件已存在，改名保存', path.basename(task.path))
     }
     fs.renameSync(part, task.path)

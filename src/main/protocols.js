@@ -162,16 +162,17 @@ function registerFileProtocol() {
         }
         if (raw.includes(',')) {
           // 多段 Range 不支持：按 200 全量返回（不能假装满足任一单段）
+          const headers = {
+            'Content-Type': type,
+            'Content-Length': String(total),
+            'Accept-Ranges': 'bytes',
+            'Cache-Control': 'no-store'
+          }
+          // v3.3.73（A06）：HEAD 只要头。以前 Range 分支排在 HEAD 之前，带 Range 的 HEAD
+          // 会真的 createReadStream 把整段读出来当正文回，白耗 IO 且协议违规。
+          if (request.method === 'HEAD') return new Response(null, { status: 200, headers })
           const stream = fs.createReadStream(filePath)
-          return new Response(G.Readable.toWeb(stream), {
-            status: 200,
-            headers: {
-              'Content-Type': type,
-              'Content-Length': String(total),
-              'Accept-Ranges': 'bytes',
-              'Cache-Control': 'no-store'
-            }
-          })
+          return new Response(G.Readable.toWeb(stream), { status: 200, headers })
         }
         const m = /^bytes=(\d*)-(\d*)$/.exec(raw)
         let start = 0
@@ -192,17 +193,17 @@ function registerFileProtocol() {
         if (start > end || start >= total) {
           return new Response('bad range', { status: 416, headers: { 'Content-Range': `bytes */${total}` } })
         }
+        const partHeaders = {
+          'Content-Type': type,
+          'Content-Length': String(end - start + 1),
+          'Content-Range': `bytes ${start}-${end}/${total}`,
+          'Accept-Ranges': 'bytes',
+          'Cache-Control': 'no-store'
+        }
+        // v3.3.73（A06）：HEAD 带 Range 也只要头，不开读流
+        if (request.method === 'HEAD') return new Response(null, { status: 206, headers: partHeaders })
         const stream = fs.createReadStream(filePath, { start, end })
-        return new Response(G.Readable.toWeb(stream), {
-          status: 206,
-          headers: {
-            'Content-Type': type,
-            'Content-Length': String(end - start + 1),
-            'Content-Range': `bytes ${start}-${end}/${total}`,
-            'Accept-Ranges': 'bytes',
-            'Cache-Control': 'no-store'
-          }
-        })
+        return new Response(G.Readable.toWeb(stream), { status: 206, headers: partHeaders })
       }
 
       // HEAD 只要头不要体（媒体元数据探测会用）

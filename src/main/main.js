@@ -2400,6 +2400,29 @@ function registerDlyricIpc() {
 }
 
 /** 独占输出（mpv 后端）：启停 / 加载 / 传输控制 / 设备枚举与切换 / 释放 */
+/**
+ * v3.3.73（A06）：mpv:load 对本地文件走媒体白名单，但 http(s) 以前一律放行 ——
+ * 渲染层一旦被注入（恶意歌词 / 外部链接），可以借 mpv 去请求内网地址（SSRF-lite）。
+ * 本地代理只监听回环，所以：回环放行，其余私有网段一律拦；公网直链不受影响。
+ * @returns {boolean} true = 应当拒绝
+ */
+function isBlockedMpvHttp(u) {
+  let host = ''
+  try { host = new URL(u).hostname.replace(/^\[|\]$/g, '').toLowerCase() } catch (e) { return true }
+  if (!host) return true
+  if (host === 'localhost' || host === '::1') return false
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (!m) return false            // 域名 → 公网直链，放行
+  const a = Number(m[1])
+  const b = Number(m[2])
+  if (a === 127) return false     // 127.0.0.0/8 = 本机代理
+  if (a === 0 || a === 10) return true
+  if (a === 192 && b === 168) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 169 && b === 254) return true
+  return false
+}
+
 function registerMpvIpc() {
   // —— 独占输出（mpv 后端） ——
   ipcMain.handle('mpv:start', (e, exclusive) => MPVM.ensureMpv(exclusive !== false, { forceMode: true }))
@@ -2419,6 +2442,11 @@ function registerMpvIpc() {
     // v3.3.9：本地文件只放行曲库/下载/数据目录之内（网址不受限，播放走的是本机代理）
     if (!/^https?:\/\//i.test(target) && !PROTO.isAllowedMediaPath(target)) {
       logLine('[mpv] 拒绝加载曲库目录之外的文件:', target)
+      return false
+    }
+    // v3.3.73（A06）：网址不再无条件放行 —— 私有网段/非法地址一律拒，回环（本地代理）照旧
+    if (/^https?:\/\//i.test(target) && isBlockedMpvHttp(target)) {
+      logLine('[mpv] 拒绝加载内网或非法地址:', target)
       return false
     }
     MPVM.mpvEngine.load(target, opts || {})
