@@ -351,11 +351,12 @@ function peelResume(key) {
   resumeParts.delete(key)
   try {
     const st = fs.statSync(rec.path)
-    if (!st.isFile() || st.size !== rec.bytes) return null
-  } catch (e) {
-    return null
-  }
-  return rec
+    if (st.isFile() && st.size === rec.bytes) return rec
+  } catch (e) { /* 文件已不在 */ }
+  // v3.3.73（A01）：登记表取走但磁盘对不上（被外部改动 / 上次写流没收尾）→ 这份残片
+  // 既不能续传也不会被回收，只能等到下次启动的 cacheCleanupParts。当场连文件一起清掉。
+  removePartFile(rec.path, null)
+  return null
 }
 
 /** 放回/登记一条残片；bytes 为 0 的直接作废 */
@@ -372,6 +373,45 @@ function putResume(key, rec) {
     if (!first) break
     resumeParts.delete(first[0])
     removePartFile(first[1].path, null)
+  }
+}
+
+/** 缓存文件允许的扩展名（ext 来自网络字段，必须收口；finishCache 与残片转正共用） */
+const CACHE_EXTS = ['mp3', 'm4a', 'flac', 'ogg', 'aac']
+
+/**
+ * v3.3.73（A01）：把「已经收满整首」的残片直接转正成缓存。
+ *
+ * 场景：正文全部到达、订阅者才断开 → parkPart 会把完整文件登记成「断点」→
+ * 下次按 `Range: bytes=<total>-` 续传，上游按 RFC 回 416，该曲在本会话内再也放不出来。
+ * 这里既用于 parkPart 的提前拦截，也用于 416 分支的补救。
+ * @returns {string|null} 缓存文件绝对路径；失败返回 null
+ */
+function promoteResumeToCache(srcPath, key, info, song, bytes) {
+  try {
+    fs.mkdirSync(DC.cacheDirPath(), { recursive: true })
+    const ext = String((info && info.ext) || '').toLowerCase()
+    const safeExt = CACHE_EXTS.includes(ext) ? ext : 'mp3'
+    const file = `${key}.${safeExt}`
+    const target = path.join(DC.cacheDirPath(), file)
+    const idxNow = DC.cacheLoad()
+    // 并发请求已经写完并登记过 → 用它的，删掉自己这份
+    if (fs.existsSync(target) && idxNow && idxNow[key]) {
+      try { fs.unlinkSync(srcPath) } catch (e) { /* 忽略 */ }
+      return target
+    }
+    try { if (fs.existsSync(target)) fs.unlinkSync(target) } catch (e) { /* 忽略 */ }
+    fs.renameSync(srcPath, target)
+    DC.cachePut(key, file, {
+      title: (info && info.song ? info.song.title : song.title) || '',
+      artist: (info && info.song ? info.song.artist : song.artist) || '',
+      ext: (info && info.ext) || ''
+    }, bytes)
+    G.logLine('[cache] 残片已完整，直接落成缓存', file, (bytes / 1048576).toFixed(1) + 'MB')
+    return target
+  } catch (err) {
+    G.logLine('[cache] 残片转缓存失败', (err && err.message) || err)
+    return null
   }
 }
 
@@ -526,6 +566,43 @@ async function runFlight(flight, ctx) {
       let safeUrl = ''
       try { const u = new URL(info.url); safeUrl = u.origin + u.pathname.slice(0, 40) } catch (e) { safeUrl = '(非法 URL)' }
       G.logLine('[online] 上游失败', upstream.status, safeUrl)
+      // v3.3.73（A01）：残片可能已经是整首（上次正文收完、订阅者才断），这时
+      // `Range: bytes=<total>-` 会被上游判 416。以前一律 keepResume + 502 —— 残片原样
+      // 回到登记表，下次再发同一条必 416 的请求，该曲在本会话内永久放不出来。
+      if (upstream.status === 416 && resume && startAt > 0) {
+        const star = String((upstream.headers && upstream.headers.get && upstream.headers.get('content-range')) || '')
+        const total416 = Number((star.match(/\/(\d+)/) || [])[1]) || 0
+        try { Promise.resolve(upstream.body && upstream.body.cancel()).catch(() => {}) } catch (e) { /* 忽略 */ }
+        try { G.online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
+        G.logLine('[cache] 上游 416：残片 ' + startAt + 'B / 总长 ' + (total416 || '?') + 'B', song.source, song.id)
+        const promoted = (total416 > 0 && total416 === startAt)
+          ? promoteResumeToCache(resume.path, cKey, info, song, startAt)
+          : null
+        if (promoted) {
+          const servedBytes = startAt
+          resume = null
+          startAt = 0
+          G.sendToRenderer('online:now-playing', {
+            id: `${source}:${id}`,
+            song: info.song ? { title: info.song.title, artist: info.song.artist } : null,
+            lossless: !!info.lossless,
+            bitrate: info.bitrate || 0,
+            ext: info.ext || 'mp3',
+            cached: true,
+            size: servedBytes
+          })
+          for (const sub of liveSubs(flight)) {
+            sub.owned = true
+            serveLocalFile(promoted, sub.req, sub.res)
+          }
+          return
+        }
+        // 残片不是整首（或转正失败）：直接丢掉，别把死循环留在登记表里。
+        // 本次仍然 502，但下一次请求会从头下载，能自愈。
+        removePartFile(resume.path, null)
+        resume = null
+        startAt = 0
+      }
       // v3.3.18：签名直链提前失效时不能让 20 分钟的直链缓存继续命中
       try { G.online.invalidateUrl(song, prefer) } catch (e) { /* 忽略 */ }
       // 第四轮 §4.5.2 #1：非 2xx 的响应体不取消会一直占着连接
@@ -561,6 +638,18 @@ async function runFlight(flight, ctx) {
       out['Content-Length'] = String(crTotal)
       delete out['Content-Range']
     }
+    // v2.8.53 / v3.3.62：206 必须凭 Content-Range **证明**覆盖到 total-1 才算整段。
+    // 以前 `!crTotal` 直接判真（缺头 / `bytes 0-1023/*` 让 Number('*') 得 0），
+    // 配合下面 expect = declared || bytes 的自证，1KB 探针残片会被 rename 成完整缓存，
+    // 此后每次播放都命中这个坏缓存（只播开头几秒，且不自愈）——本轮审查 P1。
+    // 200 才允许「没有 Content-Range」：整段响应本来就不带它，那属于正常形态。
+    const crCoversAll = upstream.status === 206
+      ? (crTotal > 0 && !Number.isNaN(crEnd) && crEnd === crTotal - 1)
+      : (!crTotal || (!Number.isNaN(crEnd) && crEnd === crTotal - 1))
+    // v3.3.73（A01）：整首总长（续传时 part.bytes 从残片末尾起算，得补上 base）。
+    // parkPart 用它判断「残片是否其实已经收满」—— 收满的绝不能再登记成断点。
+    const declaredTotal = Number(out['Content-Length']) || 0
+    const expectTotal = crTotal || (declaredTotal ? declaredTotal + (useResume ? startAt : 0) : 0)
 
     // 只有「从头整段请求」才顺手存缓存；用户拖进度条发来的 Range 请求
     // 存下来的是一段残片，反而会把缓存搞脏。
@@ -625,6 +714,13 @@ async function runFlight(flight, ctx) {
         try { await writer.flush() } catch (e) { /* 忽略 */ }
         writer.stop()
       }
+      // v3.3.73（A01）：残片其实已经收满整首（正文读完、订阅者才断）时绝不能登记成
+      // 「断点」—— 下次按 bytes=<total>- 续传必被上游 416，该曲在本会话内再也放不出来。
+      // 直接走正常收尾（flush / end / 校验 / rename）落成缓存。
+      if (part.stream && part.path && expectTotal > 0 && part.bytes >= expectTotal && crCoversAll) {
+        await finishCache()
+        return
+      }
       const ps = part.stream
       const p = part.path
       const n = part.bytes
@@ -649,14 +745,6 @@ async function runFlight(flight, ctx) {
     }
     // v3.3.58：写盘改走后台队列。主转发循环只做同步投递，磁盘再慢也不占着音频。
     if (canCache && part.stream) writer = createCacheWriter(part, () => dropPart())
-    // v2.8.53 / v3.3.62：206 必须凭 Content-Range **证明**覆盖到 total-1 才算整段。
-    // 以前 `!crTotal` 直接判真（缺头 / `bytes 0-1023/*` 让 Number('*') 得 0），
-    // 配合下面 expect = declared || bytes 的自证，1KB 探针残片会被 rename 成完整缓存，
-    // 此后每次播放都命中这个坏缓存（只播开头几秒，且不自愈）——本轮审查 P1。
-    // 200 才允许「没有 Content-Range」：整段响应本来就不带它，那属于正常形态。
-    const crCoversAll = upstream.status === 206
-      ? (crTotal > 0 && !Number.isNaN(crEnd) && crEnd === crTotal - 1)
-      : (!crTotal || (!Number.isNaN(crEnd) && crEnd === crTotal - 1))
     // 收尾：字节数、Range 覆盖范围都一致才算缓存成功，半截的直接丢。
     // v3.3.58：① 先等后台队列把排队的 chunk 写完再取字节数，否则会拿半截的
     // part.bytes 去比对 Content-Length，明明写完了也被判残片删掉；
@@ -703,7 +791,6 @@ async function runFlight(flight, ctx) {
         return
       }
       // v3.3.13：ext 来自网络字段，只放行白名单扩展名，否则退回 mp3
-      const CACHE_EXTS = ['mp3', 'm4a', 'flac', 'ogg', 'aac']
       const ext = String(meta.ext || '').toLowerCase()
       const safeExt = CACHE_EXTS.includes(ext) ? ext : 'mp3'
       const file = `${key}.${safeExt}`
