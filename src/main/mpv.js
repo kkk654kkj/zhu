@@ -13,7 +13,7 @@
  *
  * 通信：`--input-ipc-server` 命名管道 + 逐行 JSON（mpv 的 JSON IPC 协议）。
  */
-const { spawn, execFileSync } = require('child_process')
+const { spawn, execFile } = require('child_process')
 const net = require('net')
 const fs = require('fs')
 const path = require('path')
@@ -822,10 +822,13 @@ class MpvEngine {
       removeExit()
     })
     if (ok) return { ok: true, exited: true, pid: p.pid }
-    // 最后一刀：任务管理器式的强杀，保证不留占着声卡的孤儿
-    try {
-      execFileSync('taskkill', ['/PID', String(p.pid), '/F'], { windowsHide: true, timeout: 5000 })
-    } catch (err) { /* 忽略 */ }
+    // 最后一刀：任务管理器式的强杀，保证不留占着声卡的孤儿。
+    // v3.3.73（A04）：这里以前是 execFileSync —— mpv 卡在 WASAPI 里 3 秒不退时，主进程
+    // 事件循环被同步杀掉最多 5 秒：流代理停摆（在线音频断流）、所有 IPC 排队、退出链变慢。
+    // 同一类坑在 sweepOurMpv / killOrphanMpv 都已改成异步，这里补齐。
+    await new Promise((resolve) => {
+      execFile('taskkill', ['/PID', String(p.pid), '/F'], { windowsHide: true, timeout: 5000 }, () => resolve())
+    })
     await sleep(200)
     return { ok: false, exited: false, pid: p.pid }
   }
