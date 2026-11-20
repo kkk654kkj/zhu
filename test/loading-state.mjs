@@ -131,9 +131,21 @@ ok('本地空地址不冒充 NO_PROXY（仍交给失败链自动跳下一首）'
   !!localErr && !localErr.code && player.loading === false,
   localErr ? 'code=' + String(localErr.code) : 'no error')
 
-// v2.8.60（A02）：空地址早退必须把上一首的音源收干净 ——
-// 否则 audio.src 还指着上一首，用户点播放会放出上一首（界面显示这首）。
-ok('空地址早退清掉上一首的 src（点播放不会放出上一首）', audio.src === '', 'src=' + JSON.stringify(audio.src))
+// v2.8.60（A02）：从「正在播的一首」切到空地址曲 —— 早退必须把上一首的音源收干净。
+// 场景必须自己造出「src 非空」的前置：上一段 stop() 之后 src 本来就是空，
+// 直接断言 audio.src === '' 在旧代码下也会绿（假断言，监督 gate 抓到）。
+const prevT = { id: 'local:prev', audio: 'lxfile://local/D:/m/prev.flac', title: '上一首' }
+player.setQueue([prevT], 0, true)
+audio.emit('loadedmetadata')
+const srcBefore = audio.src
+player.setQueue([{ id: 'local:gone2', audio: '', title: '空地址2' }], 0, false)
+ok('空地址早退清掉上一首的 src（旧代码下 src 会残留）',
+  srcBefore !== '' && audio.src === '',
+  'before=' + JSON.stringify(srcBefore) + ' after=' + JSON.stringify(audio.src))
+const playsBefore = audio.plays
+player.play()
+ok('空地址曲点播放不会放出上一首（旧代码下会真的 play）',
+  audio.plays === playsBefore, 'plays ' + playsBefore + '→' + audio.plays)
 
 // 既有 setQueue 行为不被加载态改变：同 id 早退。
 // v2.8.60：原断言（旧代码下）实际换到了别的 id，只是靠「空地址分支不 load」才碰巧成立；
