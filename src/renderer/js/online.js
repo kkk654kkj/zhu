@@ -17,6 +17,19 @@ function qualityKey() {
 }
 
 /**
+ * 换源时是否跳过「正在播的那条源」（v3.3.74 / R02-01）。
+ *
+ * 配置键 `onlineRecoverSkipCurrent`（DEFAULT_SETTINGS，默认 true），落点 = settings.json；
+ * 走 `settings:patch` 也能改（schema 白名单已含该键）。本轮不上面板控件。
+ * 老 settings.json 里没有这个键时按开处理：默认行为必须是「换到别家」，
+ * 否则换源等于把同一条死链再取一遍。
+ */
+function recoverSkipCurrent() {
+  const s = (typeof state !== 'undefined' && state && state.settings) || {}
+  return s.onlineRecoverSkipCurrent !== false
+}
+
+/**
  * 安全的事件绑定：元素不存在就跳过。
  * 在线面板有 12 处直接 getElementById(...).addEventListener，任一处缺失
  * （裁剪版 / 热替换 / DOM 改动）都会抛 TypeError 让整条 bind() 中断，
@@ -784,17 +797,27 @@ const Online = {  list: [],            // 当前搜索结果（OnlineSong）
    * 原音源失效时的换源兜底（error 链调用）。
    * 用「标题 + 歌手」在全部音源里重搜，按标题/歌手/时长打分挑一条；
    * 分数不够就返回 null（宁可说找不到，也不拿一首别的歌糊弄用户）。
+   *
+   * v3.3.74（R02-01）：候选默认**跳过正在播的那条源**。原实现把 meta.source 也塞进
+   * sources，搜索结果里同一首在死源上依旧分数最高、排在最前，换源就把同一条死链
+   * 原样又取了一遍 —— toast 说「已换源」，几秒后再次失败（交接 §六.1）。
+   * 跳过与否由 settings.onlineRecoverSkipCurrent 控制（默认 true）；只剩一个音源时
+   * 直接返回 null，交给上层走失败链，不再拿死链空转一轮。
+   * opts.allowCurrent = true 可强制包含当前源（诊断/一次性重试用）。
    */
-  async recoverFromSources(meta) {
+  async recoverFromSources(meta, opts) {
     if (!meta) return null
     const kw = ((meta.title || '') + ' ' + (meta.artist || '')).trim()
     if (!kw) return null
     try { await this.init() } catch (err) { /* 下面按 proxyBase 判断 */ }
     if (!this.proxyBase) return null
-    const sources = this.sources.map((s) => s.id)
+    const allowCurrent = !!(opts && opts.allowCurrent === true)
+    const curSrc = allowCurrent || !recoverSkipCurrent() ? '' : String(meta.source || '')
+    const sources = this.sources.map((s) => s.id).filter((id) => !curSrc || String(id) !== curSrc)
     if (!sources.length) return null
     const r = await window.api.onlineSearch({ keyword: kw, page: 1, limit: 15, sources }).catch(() => null)
-    const list = (r && r.list) || []
+    // 代理层不保证只回请求里的源（有的网关会四家全查），再按 source 过一遍才算数
+    const list = ((r && r.list) || []).filter((s) => !curSrc || String(s.source) !== curSrc)
     let best = null
     let bestScore = 0
     for (const s of list) {

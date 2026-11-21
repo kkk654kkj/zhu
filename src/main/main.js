@@ -314,7 +314,8 @@ const DEFAULT_SETTINGS = {
   onlineCacheDir: '',          // 缓存目录，'' = 数据目录\music-cache
   onlineCacheLimitMB: 4096,    // 缓存上限（MB），0 = 不限；超了按最久没放的删
   onlineCacheClearOnExit: false, // v3.3.58：退出时自动清空在线缓存（默认保留缓存，面板可切换）
-  onlineChkszKey: ''           // 可选：ChKSz API 的 apikey，填了就能给 QQ/酷狗 的歌拿无损
+  onlineChkszKey: '',          // 可选：ChKSz API 的 apikey，填了就能给 QQ/酷狗 的歌拿无损
+  onlineRecoverSkipCurrent: true // v3.3.74（R02-01）：换源默认跳过「正在播的那条源」，避免又搜回同一条死链
 }
 
 // 迷你卡片默认尺寸 / 尺寸下限
