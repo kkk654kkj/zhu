@@ -35,13 +35,35 @@ class MpvAudio {
     this._endedEpoch = -1     // 上次真正触发 ended 的 load 代次
     this._aoLost = false
     this._exclusiveLost = false
+    this._disposed = false
 
-    window.api.onMpvEvent((e) => this._onEvent(e))
+    // v3.3.74（R02-05a）：以前 onMpvEvent 返回的取消函数直接丢掉、_tick 也从不清理 ——
+    // 每建一次实例就多一份 200ms 定时器 + 一路 mpv 事件订阅，旧实例还在往已经换掉的
+    // audio 上 emit。当前每页只建一次实例（createAudioEngine 只在启动跑一次），无实害；
+    // 这里把两个句柄收好并给 dispose() 留出口，重建引擎时不会再叠加。
+    this._offMpvEvent = typeof window.api.onMpvEvent === 'function'
+      ? window.api.onMpvEvent((e) => this._onEvent(e))
+      : null
 
     // 200ms 一次：进度条与歌词都够用，又不至于让渲染层忙
     this._tick = setInterval(() => {
       if (!this._paused && !this._ended) this._emit('timeupdate')
     }, 200)
+  }
+
+  /**
+   * 收掉 mpv 事件订阅与进度定时器（幂等）。
+   *
+   * 不调 mpvStop：引擎归主进程 / Player 管，停声音是上层的事，这里只断本实例的引用，
+   * 否则 dispose 会顺带把「用户正在听的那首」停掉。
+   */
+  dispose() {
+    if (this._disposed) return
+    this._disposed = true
+    if (this._tick) { clearInterval(this._tick); this._tick = null }
+    try { if (typeof this._offMpvEvent === 'function') this._offMpvEvent() } catch (e) { /* 主进程通道已断也不能炸 */ }
+    this._offMpvEvent = null
+    if (this._listeners) this._listeners.clear()
   }
 
   /* ---------------- HTMLMediaElement 子集 ---------------- */
@@ -226,7 +248,7 @@ class MpvAudio {
   }
 
   _onEvent(e) {
-    if (!e) return
+    if (!e || this._disposed) return
     switch (e.type) {
       case 'time': {
         const pos = typeof e.pos === 'number' ? e.pos : 0
