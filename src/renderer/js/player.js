@@ -195,26 +195,49 @@ class Player extends Emitter {
 
   /* ---------- 播放控制 ---------- */
 
-  playTrack(track, queue) {
+  /**
+   * 播放一首，可指定它在队列里的位置。
+   *
+   * v3.3.74（R02-05b）：以前一律按 id 定位 —— 队列里同一首出现两次时（重复添加、
+   * 收藏里同一 id 的两个副本）点第二条永远跳回第一条播。现在三层定位：
+   * 显式 startIndex（调用方知道位置）→ 对象引用（track 就是队列里那个对象）
+   * → id（旧调用点的兜底，只有一份时结果不变）。
+   * 本函数当前无显式调用点（牌面 R02-05b 的 grep 清单：仅定义），改签名不影响现有链路。
+   */
+  playTrack(track, queue, startIndex) {
     if (!track) return
+    const explicit = Number.isInteger(startIndex) && startIndex >= 0
+    const locate = (arr) => {
+      if (!Array.isArray(arr) || !arr.length) return -1
+      if (explicit && startIndex < arr.length) {
+        const hit = arr[startIndex]
+        if (hit && (hit === track || String(hit.id) === String(track.id))) return startIndex
+      }
+      const byRef = arr.indexOf(track)
+      if (byRef >= 0) return byRef
+      return arr.findIndex((t) => t && String(t.id) === String(track.id))
+    }
     if (queue && queue.length) {
-      const idx = queue.findIndex((t) => t.id === track.id)
+      const idx = locate(queue)
       this.setQueue(queue, idx >= 0 ? idx : 0, true)
       return
     }
-    if (this.current && this.current.id === track.id) {
+    // 给了位置就按位置播：队里第 2 个副本正在播时，点第 1 个要真的换过去
+    if (!explicit && this.current && String(this.current.id) === String(track.id)) {
       this.play()
       return
     }
-    const idx = this.tracks.findIndex((t) => t.id === track.id)
-    if (idx >= 0) {
-      this.index = idx
-      this._loadCurrent(true)
-    } else {
+    const idx = locate(this.tracks)
+    if (idx < 0) {
       this.addToQueue(track)
       this.index = this.tracks.length - 1
       this._loadCurrent(true)
+      return
     }
+    // 显式指到「正停在这一条上」就不重载，与 setQueue 的同 id 早退口径一致
+    if (explicit && this.index === idx) { this.play(); return }
+    this.index = idx
+    this._loadCurrent(true)
   }
 
   _loadCurrent(autoplay = true) {
