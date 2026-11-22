@@ -98,6 +98,13 @@ async function loadInitialData() {
  * 独占起不来就退回共享输出，并把设置里的 exclusiveOutput 落成 false（下次启动不再白试）。
  */
 async function createAudioEngine(settings) {
+  // v3.3.75（R02-08）：重建引擎前先把旧实例收掉 —— MpvAudio 持有 mpv 事件订阅与
+  // 200ms 进度定时器，不 dispose 就换掉的话，旧实例会继续收事件、继续跑定时器，
+  // 往已经没人听的 audio 上 emit。当前每页只建一次，这里属于「换引擎才走」的兜底。
+  if (audio && typeof audio.dispose === 'function') {
+    try { audio.dispose() } catch (err) { /* 已释放 / 通道断了都不能拦住建引擎 */ }
+    audio = null
+  }
   let exclusiveOK = false
   if (settings.exclusiveOutput === true) {
     const r = await window.api.mpvStart(true).catch((err) => ({ ok: false, error: err && err.message }))
