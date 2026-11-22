@@ -1093,6 +1093,37 @@ class Library {
       dirNameCache = null
     }
   }
+
+  /**
+   * v3.3.77（P2-3）：用户把音乐文件夹从设置里移除后，prune 掉该目录下的曲目。
+   * 以前 scan 的清理逻辑是「本次没扫到的根不动」，被移除的根下的曲目于是永久
+   * 留在库里 —— 能显示、点了播不出来（lxfile 白名单已不含那个目录）。
+   * dirs 为空直接返回：绝不能因为一次空设置把整库清空。
+   * @param {string[]} dirs
+   * @returns {Promise<number>} 删掉的曲目数
+   */
+  async pruneOutsideRoots(dirs) {
+    const roots = (Array.isArray(dirs) ? dirs : [])
+      .filter((r) => r && typeof r === 'string' && String(r).trim())
+      .map((r) => path.resolve(r).toLowerCase())
+    if (!roots.length) return 0
+    let removed = 0
+    for (const id of Array.from(this.tracks.keys())) {
+      const t = this.tracks.get(id)
+      if (!t || !t.path) continue
+      const lp = path.resolve(t.path).toLowerCase()
+      const keep = roots.some((r) => lp === r || lp.startsWith(r.endsWith(path.sep) ? r : r + path.sep))
+      if (keep) continue
+      // 内嵌歌词是程序生成的文件，曲目移除时一起清掉，别在 data\lyrics 里留孤儿
+      if (t.lyric && this.lyricDir && path.dirname(t.lyric) === this.lyricDir) {
+        try { fs.unlinkSync(t.lyric) } catch {}
+      }
+      this.tracks.delete(id)
+      removed++
+    }
+    if (removed) await this.persist()
+    return removed
+  }
 }
 
 module.exports = {

@@ -175,6 +175,23 @@ function dlLoad() {
 }
 
 /** 删残片要重试：Windows 上写流还没 close 时 unlink 会失败（EBUSY/EPERM） */
+/**
+ * v3.3.77（P2-7）：只有「空占位」才删 .part。
+ * 以前任何错误路径都删残片 —— 和同文件 v3.3.71 起的续传设计直接冲突：
+ * 一次 CDN 抖动就把已经下好的几百 MB 扔掉，用户点继续又从 0 开始。
+ * 残片留着，下次 continue 用 Range 从实际大小续；真正作废由 dlDelete /
+ * 成功 rename / 续传起点校验负责。
+ * @param {{path?:string}} task
+ */
+function dropPartIfEmpty(task) {
+  if (!task || !task.path) return
+  const part = task.path + '.part'
+  try {
+    const st = fs.statSync(part)
+    if (st.isFile() && st.size === 0) dlUnlinkRetry(part)
+  } catch (e) { /* 文件不存在 / 正被占用：都不用管 */ }
+}
+
 function dlUnlinkRetry(p, tries = 0) {
   if (!p) return
   try {
@@ -299,12 +316,12 @@ async function dlRun(task) {
       if (from > 0) h.Range = 'bytes=' + from + '-'
       else delete h.Range
       try {
-        return await fetch(info.url, {
+        // v3.3.77（P2-6）：下载直链同样来自远端接口，每跳过私网闸门
+        return await HTTPU.fetchSafe(info.url, {
           headers: h,
           signal: typeof AbortSignal.any === 'function'
             ? AbortSignal.any([ctrl.signal, headCtrl.signal])
-            : ctrl.signal,
-          redirect: 'follow'
+            : ctrl.signal
         })
       } finally {
         clearTimeout(headTimer)
@@ -490,15 +507,15 @@ async function dlRun(task) {
       task.status = 'error'
       task.error = '连接超时或已中断'
       task.speed = 0
-      // v3.3.20：占位的 .part 记得清掉，否则重试时 'wx' 会误以为名字被占而换新文件名，
-      // 旧的空占位永远留在下载目录里
-      dlUnlinkRetry(task.path ? task.path + '.part' : '')
+      // v3.3.20：占位的空 .part 记得清掉，否则重试时 'wx' 会误以为名字被占而换新文件名。
+      // v3.3.77（P2-7）：已下好的残片不能删 —— 留着下次 Range 续传。
+      dropPartIfEmpty(task)
       G.logLine('[dl] 中断', path.basename(task.path || ''), task.error)
     } else {
       task.status = 'error'
       task.error = (err && err.message) || '下载失败'
       task.speed = 0
-      dlUnlinkRetry(task.path ? task.path + '.part' : '')
+      dropPartIfEmpty(task)   // v3.3.77（P2-7）：残片留着续传，空占位才清
       G.logLine('[dl] 失败', task.error)
     }
   } finally {

@@ -508,6 +508,9 @@ const Online = {  list: [],            // 当前搜索结果（OnlineSong）
     // v3.3.71（T02-03）：init 时拿到的是当时的结论，可能早已过期（端口重绑过 / 当时被拦），
     // 播放前现问一次（内部有限重试），别拿旧空串直接拒绝用户。
     await this.ensureBase()
+    // v3.3.77（P2-11）：ensureBase 也是 await（端口重绑可能几秒）。上面 497 行那次
+    // 复检之后用户可能又点了别的歌，这里回来必须再判一次，否则旧请求会把新点的歌覆盖掉。
+    if (token !== this._playToken) return
     if (!this.proxyBase) {
       if (!stale) this.setStatus('❌ 本地代理未就绪（端口绑定失败），请稍后重试', this.hasMore)
       toast('本地代理未就绪，在线播放暂不可用。稍后重试或重启应用', 4000)

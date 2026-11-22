@@ -49,6 +49,11 @@ Module._load = function (request) {
   return origLoad.apply(this, arguments)
 }
 const SP = require2(path.join(ROOT, 'src/main/streamproxy.js'))
+const HTTPU_T = require2(path.join(ROOT, 'src/main/http-util.js'))
+// v3.3.77（P2-6）：上游取流现在逐跳校验协议/私网/DNS；这些单测的上游是 127.0.0.1 打桩，
+// 用测试接缝统一放行（生产路径仍然走 checkUrlAllowed，见 http-util 单测）。
+HTTPU_T.__setUrlGuard(async () => ({ ok: true }))
+
 Module._load = origLoad
 
 const REAL_FETCH = global.fetch

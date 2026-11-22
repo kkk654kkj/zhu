@@ -584,6 +584,9 @@ class MpvEngine {
     this._loadAt = Date.now() // file-loaded 不来时，看门狗用这个时刻兜底
     this._lastAoLog = ''
     this._lastLog = ''   // 同 AO 记忆一起清：否则坏文件的 toast 会带上上一首的 warn 文案
+    // v3.3.77（P1-1）：新 load = 新的一次播放尝试，不能继承上一首的停车原因，
+    // 否则独占看门狗会把「上一首播完」的 eof 记到新歌头上（见 _wdTick 的 idle-after-eof）。
+    this._lastEndReason = ''
     if (paused) this._send(['set_property', 'pause', true])
     this._send(['loadfile', filePath, 'replace'])
   }
@@ -912,6 +915,18 @@ class MpvEngine {
       this._wdDiag('idle-while-want-playing')
       // 渲染层刚发的 reload 在途时给 2 秒窗口，避免 reload 与 restart 抢同一首
       if (Date.now() - this._loadAt < 2000) { this._aoLostAt = 0; return }
+      // v3.3.77（P1-1）：idle 已过 reload 窗口、且停下来的原因是 end-file(eof) ——
+      // 这是「这首 / 整队播完了」，不是 AO 丢失。顺序模式整队播完时渲染层只发
+      // state-change(false) + queue-end，不会再 load，而播放意图还留在 true：
+      // 以前 2.5 秒后看门狗重启引擎，把末曲从头重播一遍，三次后误报
+      // 「声卡被其他程序占用」。曲末 idle 即播放终止，意图跟着清零。
+      // 注意：只有 eof 能走这里；error/stop 等异常 idle 仍按 AO 丢失恢复。
+      if (this._lastEndReason === 'eof') {
+        this._wdDiag('idle-after-eof')
+        this._wantPlaying = false
+        this._aoLostAt = 0
+        return
+      }
     }
     // 主动状态判定：AO 参数回来就清零计数（H2 的关键）
     if (this._aoParams) {

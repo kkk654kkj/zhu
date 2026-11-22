@@ -624,8 +624,13 @@ const Daily = {
           : '还没有推荐内容，点「换一批」重试')
         return
       }
+      // v3.3.77（P2-11）：与行内点播共用播放代次 —— 以前这里一路 await 完直接写队列，
+      // 用户在等待期间点了某一首，播放全部后完成会把用户的选择覆盖掉。
+      const token = (Online._playToken || 0) + 1
+      Online._playToken = token
       try { await Online.init() } catch { /* 下面按 proxyBase 判断 */ }
       await Online.ensureBase()
+      if (token !== Online._playToken) return
       if (!Online.proxyBase) {
         toast('本地代理未就绪，在线播放暂不可用。稍后重试或重启应用', 4000)
         return

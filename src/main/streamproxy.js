@@ -566,6 +566,25 @@ async function runFlight(flight, ctx) {
       let safeUrl = ''
       try { const u = new URL(info.url); safeUrl = u.origin + u.pathname.slice(0, 40) } catch (e) { safeUrl = '(非法 URL)' }
       G.logLine('[online] 上游失败', upstream.status, safeUrl)
+      // v3.3.77（P2-10）：客户端自己请求的区间越界（首请求就 416 / 无残片）时，
+      // 416 是 RFC 正解。以前落进通用失败路径被改写成 502 —— 渲染层当成「上游挂了」
+      // 触发换源 + 重试链，把一次正常的越界放大成整首歌放不出来。
+      if (upstream.status === 416 && !(resume && startAt > 0)) {
+        const cr = String((upstream.headers && upstream.headers.get && upstream.headers.get('content-range')) || '')
+        try { Promise.resolve(upstream.body && upstream.body.cancel()).catch(() => {}) } catch (e) { /* 忽略 */ }
+        for (const sub of liveSubs(flight)) {
+          sub.owned = true
+          try {
+            if (!sub.res.headersSent) {
+              const h = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' }
+              if (cr) h['Content-Range'] = cr
+              sub.res.writeHead(416, h)
+            }
+            sub.res.end()
+          } catch (e) { /* 客户端已断 */ }
+        }
+        return
+      }
       // v3.3.73（A01）：残片可能已经是整首（上次正文收完、订阅者才断），这时
       // `Range: bytes=<total>-` 会被上游判 416。以前一律 keepResume + 502 —— 残片原样
       // 回到登记表，下次再发同一条必 416 的请求，该曲在本会话内永久放不出来。
@@ -930,7 +949,9 @@ async function openUpstream(info, headers, externalSignal) {
     else externalSignal.addEventListener('abort', () => { try { ctrl.abort() } catch (e) { /* 忽略 */ } }, { once: true })
   }
   try {
-    const upstream = await fetch(info.url, { headers, redirect: 'follow', signal: ctrl.signal })
+    // v3.3.77（P2-6）：直链来自第三方接口/网关，是远端数据 —— 以前零校验就 fetch，
+    // 还能 follow 到内网。现在每跳都过私网闸门（见 http-util.fetchSafe）。
+    const upstream = await HTTPU.fetchSafe(info.url, { headers, signal: ctrl.signal })
     return { upstream, ctrl }
   } finally {
     clearTimeout(headTimer)

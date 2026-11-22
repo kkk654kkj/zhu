@@ -789,6 +789,15 @@ function cancelPowerAction() {
 let closeAskBusy = false
 
 async function handleCloseAsk() {
+  // v3.3.77（P3-1）：后台/自动化实例（TEST_HIDDEN）不能弹原生模态框 —— 没人点，
+  // 关窗会永远卡在那里，整条 GUI 测试链断掉。直接按托盘设置执行。
+  if (TEST_HIDDEN()) {
+    if (win && !win.isDestroyed()) {
+      if (store.get().settings.closeToTray) win.hide()
+      else { quitting = true; win.close() }
+    }
+    return
+  }
   if (closeAskBusy) return
   closeAskBusy = true
   try {
@@ -839,6 +848,9 @@ async function handleCloseAsk() {
 function showMainWindow() {
   // v3.3.29：后台实例不把窗口拉到前台（托盘点击 / second-instance 都会走到这里）
   if (TEST_HIDDEN()) return
+  // v3.3.77（P3-2）：退出清理的 20 秒窗口期内窗口已销毁，此时点托盘会重建一个
+  // 新窗口 —— 托盘已经 destroy 掉、quit 已在路上，重建出来的窗口没人管。
+  if (quitting) return
   if (win && !win.isDestroyed()) {
     if (win.isMinimized()) win.restore()
     win.show()
@@ -1016,13 +1028,19 @@ async function runWatchScan() {
   }
   const s = store.get().settings
   if (s.watchFolders === false) return
+  // v3.3.77（P2-1）：文件监视的增量扫描以前直接用 s.musicDirs，是唯一没过
+  // isSafeMediaRoot 的扫描入口 —— settings.json 被写进盘符根/系统目录后，
+  // 每 8 秒的 watch 扫描会把整个盘索引进库（能显示、播不了）。
+  const dirs = (Array.isArray(s.musicDirs) ? s.musicDirs : [])
+    .filter((d) => typeof d === 'string' && PROTO.isSafeMediaRoot(d))
+  if (!dirs.length) return
   logLine('[watch] 检测到文件变化，开始增量扫描')
   // v3.3.10：run 必须声明在 try 外 —— 上一版 const run 在 try 块内，
   // finally 里引用必然 ReferenceError → activeScan 永远清不掉，
   // 后续 watch 扫描全部失效（每 8 秒空转重试）+ 每次一个 unhandledRejection
   let run = null
   try {
-    run = library.scan(s.musicDirs, (p) => {
+    run = library.scan(dirs, (p) => {
       sendToRenderer('lib:scan-progress', {
         phase: p.phase, done: p.done, total: p.total,
         track: p.track ? toClientTrack(p.track) : null
@@ -1374,8 +1392,15 @@ function registerSettingsIpc() {
     const prevWatch = before.watchFolders
     const next = store.patch({ settings: filtered }).settings
     // 目录列表或监视开关变了 → 重新挂 watcher（v1.7）
-    if (JSON.stringify(next.musicDirs || []) !== prevDirs || next.watchFolders !== prevWatch) {
+    const dirsChanged = JSON.stringify(next.musicDirs || []) !== prevDirs
+    if (dirsChanged || next.watchFolders !== prevWatch) {
       startWatching()
+    }
+    // v3.3.77（P2-3）：被移除目录下的曲目要跟着清掉，否则库里留一堆幽灵曲
+    if (dirsChanged) {
+      library.pruneOutsideRoots(next.musicDirs).then((n) => {
+        if (n > 0) logLine('[library] 移除目录后清理曲目 ' + n + ' 首')
+      }).catch((err) => logLine('[library] 清理移除目录失败 ' + (err && err.message)))
     }
     return publicSettings(next)
   })
@@ -1409,7 +1434,8 @@ function registerPlaylistIpc() {
     const list = store.get().playlists || []
     const item = {
       id: 'pl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      name: name || '新建歌单',
+      // v3.3.77（P3）：与 update 同一口径 —— 允许空名回落，但要 trim + 限长
+      name: String(name || '').trim().slice(0, 80) || '新建歌单',
       trackIds: [],
       createdAt: Date.now()
     }
@@ -1480,7 +1506,11 @@ function registerPlaylistIpc() {
    */
   ipcMain.handle('playlist:exportM3u', async (e, { name, trackIds } = {}) => {
     if (!win) return { ok: false, error: '窗口未就绪' }
-    const tracks = (trackIds || []).map((id) => library.get(id)).filter(Boolean)
+    // v3.3.77（P3-1）：后台实例不弹原生保存框（没人点会挂住）
+    if (TEST_HIDDEN()) return { ok: false, canceled: true }
+    // v3.3.77（P3）：trackIds 非数组（真值）以前直接 .map 抛 TypeError
+    const ids = Array.isArray(trackIds) ? trackIds : []
+    const tracks = ids.map((id) => library.get(id)).filter(Boolean)
     if (!tracks.length) return { ok: false, error: '歌单是空的' }
     const safe = String(name || '播放列表').replace(/[\\/:*?"<>|]/g, '_')
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
@@ -1510,6 +1540,7 @@ function registerPlaylistIpc() {
   /** 导入 m3u：路径就地映射成 trackId，未在曲库里的条目单独计数（不报错） */
   ipcMain.handle('playlist:importM3u', async () => {
     if (!win) return { ok: false, error: '窗口未就绪' }
+    if (TEST_HIDDEN()) return { ok: false, canceled: true }
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
       title: '导入 m3u 歌单',
       filters: [{ name: 'M3U 播放列表', extensions: ['m3u8', 'm3u'] }],
@@ -1571,7 +1602,9 @@ function registerUserDataIpc() {
    * 全选几十首点收藏就是几十次同步 fsync，右键菜单看着像卡死。
    */
   ipcMain.handle('favorites:setMany', (e, { ids, fav } = {}) => {
-    const list = Array.isArray(ids) ? ids.filter((x) => typeof x === 'string' && x) : []
+    // v3.3.77（P3）：单次批量上限 —— 每次 setMany 都会全量重写 settings.json，
+    // 渲染层被注入后可以传一个超长数组把主进程拖死
+    const list = Array.isArray(ids) ? ids.filter((x) => typeof x === 'string' && x).slice(0, 1000) : []
     if (!list.length) return store.get().favorites || []
     const set = new Set(store.get().favorites || [])
     for (const id of list) { if (fav) set.add(id); else set.delete(id) }
@@ -2007,7 +2040,7 @@ function registerOnlineIpc() {
   ipcMain.handle('online:pickDownloadDir', async () => {
     const dir = await pickMediaDir('选择下载目录')
     if (!dir) return null
-    store.patch({ settings: { ...store.get().settings, onlineDownloadDir: dir } })
+    store.patch({ settings: { onlineDownloadDir: dir } })
     return dir
   })
 
@@ -2036,7 +2069,7 @@ function registerOnlineIpc() {
     if (!dir) return null
     // 换目录不动老文件：用户可能还想手动找回；真要腾地方有「清理缓存」
     DC.cacheIdx = null
-    store.patch({ settings: { ...store.get().settings, onlineCacheDir: dir } })
+    store.patch({ settings: { onlineCacheDir: dir } })
     return DC.cacheStats()
   })
 
@@ -2063,13 +2096,13 @@ function registerOnlineIpc() {
     const k = String(key || '').trim()
     if (!k) {
       online.setExtraKey('')
-      store.patch({ settings: { ...store.get().settings, onlineChkszKey: '' } })
+      store.patch({ settings: { onlineChkszKey: '' } })
       return { ok: true, cleared: true }
     }
     const r = await online.testExtraKey(k)
     if (!r.ok) return { ok: false, error: r.error }
     online.setExtraKey(k)
-    store.patch({ settings: { ...store.get().settings, onlineChkszKey: k } })
+    store.patch({ settings: { onlineChkszKey: k } })
     logLine('[online] 已配置 ChKSz key')
     return { ok: true, gotUrl: !!r.gotUrl }
   })
@@ -2087,7 +2120,7 @@ function registerOnlineIpc() {
   ipcMain.handle('online:qingSet', (e, on) => {
     const v = on !== false
     online.setQingEnabled(v)
-    store.patch({ settings: { ...store.get().settings, onlineQingOn: v } })
+    store.patch({ settings: { onlineQingOn: v } })
     logLine('[online] 青听网关', v ? '已启用' : '已关闭')
     return { ok: true, on: v }
   })
@@ -2111,6 +2144,7 @@ function registerOnlineIpc() {
  * @returns {Promise<string|null>} 目录绝对路径；用户取消或选了不允许的目录 → null
  */
 async function pickMediaDir(title) {
+  if (TEST_HIDDEN()) return null
   const parent = win && !win.isDestroyed() ? win : undefined
   const res = await dialog.showOpenDialog(parent, {
     title: title || '选择目录',
@@ -2121,15 +2155,18 @@ async function pickMediaDir(title) {
   const picked = String(res.filePaths[0] || '')
   if (!PROTO.isSafeMediaRoot(picked)) {
     // 必须让用户看见原因：目录不安全属于「点了没反应」之外的可解释失败
-    await dialog.showMessageBox(parent, {
-      type: 'warning',
-      title: '目录不可用',
-      message: '这个目录不能用作下载 / 缓存目录',
-      detail: '盘符根目录、系统目录、网络共享（\\\\server\\share）与设备路径都不允许，'
-        + '请换一个普通文件夹（例如 D:\\音乐\\猪专属下载）。',
-      buttons: ['知道了'],
-      noLink: true
-    })
+    // v3.3.77（P3-1）：后台实例不弹原生提示框（没人点会挂住）
+    if (!TEST_HIDDEN()) {
+      await dialog.showMessageBox(parent, {
+        type: 'warning',
+        title: '目录不可用',
+        message: '这个目录不能用作下载 / 缓存目录',
+        detail: '盘符根目录、系统目录、网络共享（\\\\server\\share）与设备路径都不允许，'
+          + '请换一个普通文件夹（例如 D:\\音乐\\猪专属下载）。',
+        buttons: ['知道了'],
+        noLink: true
+      })
+    }
     return null
   }
   return picked
@@ -2139,6 +2176,7 @@ async function pickMediaDir(title) {
 function registerSystemIpc() {
   // —— 对话框 / 系统集成 ——
   ipcMain.handle('dialog:pickDirs', async () => {
+    if (TEST_HIDDEN()) return []
     const res = await dialog.showOpenDialog(win, {
       title: '选择音乐文件夹',
       properties: ['openDirectory', 'multiSelections']
@@ -2165,9 +2203,7 @@ function registerSystemIpc() {
       // v3.3.66：只放行公网 https —— 地址来自渲染层，以前任何 host 都会被主进程
       // 拉一次（盲 SSRF：能探内网服务的 GET 副作用）
       if (!buf && coverUrl && /^https:\/\//i.test(String(coverUrl))) {
-        let okHost = false
-        try { okHost = !HTTPU.isPrivateHost(new URL(String(coverUrl)).hostname) } catch (err) { okHost = false }
-        if (!okHost) return null
+        // v3.3.77（P2-8）：逐跳校验 + 手动跟随都在 fetchCoverBuffer 里做（含 DNS）
         buf = await fetchCoverBuffer(String(coverUrl))
       }
       if (!buf || !buf.length) return null
@@ -2189,19 +2225,47 @@ function registerSystemIpc() {
 /**
  * v3.3.48：「跟随封面」对在线曲也生效 —— 按封面 https 地址拉一次缓冲。
  * 限 512KB / 8 秒，任何失败都返回 null（纯装饰，不能拖慢播放）。
+ * v3.3.77（P2-8）：手动跟随跳转，每一跳都重新过私网闸门 —— 以前默认 follow，
+ * 公网封面 302 到 127.0.0.1 / 169.254.169.254 也会被主进程照样拉一次。
  */
-function fetchCoverBuffer(url) {
+async function fetchCoverBuffer(url) {
+  let cur = String(url)
+  for (let hop = 0; hop <= COVER_MAX_HOPS; hop++) {
+    const chk = await HTTPU.checkUrlAllowed(cur)
+    if (!chk.ok) return null
+    const r = await fetchCoverOnce(cur)
+    if (r.redirect) {
+      try { cur = new URL(r.redirect, cur).href } catch (e) { return null }
+      continue
+    }
+    return r.buf
+  }
+  return null
+}
+
+const COVER_MAX_HOPS = 4
+
+/** 单跳请求；3xx 只回跳转目标，正文交给调用方决定要不要跟 */
+function fetchCoverOnce(url) {
   return new Promise((resolve) => {
     let done = false
     const finish = (v) => { if (!done) { done = true; resolve(v) } }
     let timer = null
     try {
-      const req = net.request({ method: 'GET', url })
-      timer = setTimeout(() => { try { req.abort() } catch { /* 已结束 */ } finish(null) }, 8000)
+      const req = net.request({ method: 'GET', url, redirect: 'manual' })
+      timer = setTimeout(() => { try { req.abort() } catch { /* 已结束 */ } finish({ buf: null }) }, 8000)
       const chunks = []
       let size = 0
       req.on('response', (res) => {
-        if (res.statusCode !== 200) { clearTimeout(timer); finish(null); return }
+        if (res.statusCode >= 300 && res.statusCode < 400) {
+          clearTimeout(timer)
+          const raw = res.headers && res.headers.location
+          const loc = Array.isArray(raw) ? String(raw[0] || '') : String(raw || '')
+          try { res.resume() } catch (e) { /* 忽略 */ }
+          finish({ redirect: loc })
+          return
+        }
+        if (res.statusCode !== 200) { clearTimeout(timer); finish({ buf: null }); return }
         res.on('data', (d) => {
           size += d.length
           if (size > 512 * 1024) {
@@ -2212,14 +2276,14 @@ function fetchCoverBuffer(url) {
           }
           chunks.push(d)
         })
-        res.on('end', () => { clearTimeout(timer); finish(Buffer.concat(chunks)) })
-        res.on('error', () => { clearTimeout(timer); finish(null) })
+        res.on('end', () => { clearTimeout(timer); finish({ buf: Buffer.concat(chunks) }) })
+        res.on('error', () => { clearTimeout(timer); finish({ buf: null }) })
       })
-      req.on('error', () => { clearTimeout(timer); finish(null) })
+      req.on('error', () => { clearTimeout(timer); finish({ buf: null }) })
       req.end()
     } catch {
       if (timer) clearTimeout(timer)
-      finish(null)
+      finish({ buf: null })
     }
   })
 }
@@ -2407,21 +2471,14 @@ function registerDlyricIpc() {
  * 本地代理只监听回环，所以：回环放行，其余私有网段一律拦；公网直链不受影响。
  * @returns {boolean} true = 应当拒绝
  */
-function isBlockedMpvHttp(u) {
-  let host = ''
-  try { host = new URL(u).hostname.replace(/^\[|\]$/g, '').toLowerCase() } catch (e) { return true }
-  if (!host) return true
-  if (host === 'localhost' || host === '::1') return false
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
-  if (!m) return false            // 域名 → 公网直链，放行
-  const a = Number(m[1])
-  const b = Number(m[2])
-  if (a === 127) return false     // 127.0.0.0/8 = 本机代理
-  if (a === 0 || a === 10) return true
-  if (a === 192 && b === 168) return true
-  if (a === 172 && b >= 16 && b <= 31) return true
-  if (a === 169 && b === 254) return true
-  return false
+async function isBlockedMpvHttp(u) {
+  // v3.3.77（P2-9）：以前只认 IPv4 字面量 —— 域名（哪怕是 evil.com 解析到 127.0.0.1）
+  // 直接放行。现在走统一闸门：字面量 + DNS 解析结果都过私网表；
+  // 本机代理（127.0.0.1:port）要照常放行，所以 allowLoopback=true。
+  const chk = await HTTPU.checkUrlAllowed(u, { allowLoopback: true })
+  if (chk.ok) return false
+  logLine('[mpv] 拦截内网或非法地址', String(u).slice(0, 80), chk.reason)
+  return true
 }
 
 function registerMpvIpc() {
@@ -2446,7 +2503,7 @@ function registerMpvIpc() {
       return false
     }
     // v3.3.73（A06）：网址不再无条件放行 —— 私有网段/非法地址一律拒，回环（本地代理）照旧
-    if (/^https?:\/\//i.test(target) && isBlockedMpvHttp(target)) {
+    if (/^https?:\/\//i.test(target) && await isBlockedMpvHttp(target)) {
       logLine('[mpv] 拒绝加载内网或非法地址:', target)
       return false
     }
@@ -2491,6 +2548,7 @@ function registerMpvIpc() {
 
   ipcMain.handle('mpv:confirmEnable', async () => {
     if (!win) return false
+    if (TEST_HIDDEN()) return false   // 后台实例不弹确认框，也不开独占
     const { response } = await dialog.showMessageBox(win, {
       type: 'question',
       buttons: ['开启独占输出', '取消'],
@@ -2924,7 +2982,9 @@ if (gotLock) cleanChromiumCache().catch(() => {})
       // v3.3.67：启动扫描与 lib:scan 用同一把尺子。以前直接用 settings.musicDirs ——
       // settings.json 被手改/被旧版本写进盘符根、系统目录、UNC、设备路径时，
       // 会把整个盘（或共享树）当媒体库索引，曲库瞬间被无关文件撑爆。
-      const startDirs = (store.get().settings.musicDirs || [])
+      // v3.3.77（P2-5）：非数组真值（手改 settings.json 成字符串）以前会直接
+      // `.filter` 抛错 → 启动链 catch 弹「启动失败」并 app.exit(1)。
+      const startDirs = (Array.isArray(store.get().settings.musicDirs) ? store.get().settings.musicDirs : [])
         .filter((d) => typeof d === 'string' && PROTO.isSafeMediaRoot(d))
       if (!startDirs.length && library.list().length === 0) {
         logLine('[library] 启动扫描跳过：没有可用的音乐目录')
@@ -2975,7 +3035,8 @@ if (gotLock) cleanChromiumCache().catch(() => {})
     try { logLine('FATAL 启动失败: ' + ((err && err.stack) || err)) } catch (e) { /* 忽略 */ }
     try {
       const { dialog } = require('electron')
-      dialog.showErrorBox('启动失败', '播放器初始化出错，无法打开窗口。\n\n' + String((err && err.message) || err))
+      // v3.3.77（P3-1）：后台实例用日志代替阻塞式错误框（否则测试链永远等在那里）
+      if (!TEST_HIDDEN()) dialog.showErrorBox('启动失败', '播放器初始化出错，无法打开窗口。\n\n' + String((err && err.message) || err))
     } catch (e) { /* 无 GUI 环境 */ }
     app.exit(1)
   })

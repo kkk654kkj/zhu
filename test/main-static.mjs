@@ -1199,7 +1199,10 @@ function main() {
 
       ok('v3.3.66：下载 done 复用 + 封面主色挡内网地址',
         /t\.status === 'done'\) return \{ ok: false, error: '这首已经下载过了'/.test(mainSrc) &&
-        /HTTPU\.isPrivateHost\(new URL\(String\(coverUrl\)\)\.hostname\)/.test(mainSrc))
+        // v3.3.77（P2-8）：一次性 host 预检换成了逐跳 checkUrlAllowed + 手动跟随 ——
+        // 默认 follow 时第二跳就能跳到内网，预检形同虚设。
+        /await HTTPU\.checkUrlAllowed\(cur\)/.test(mainSrc) &&
+        /redirect: 'manual'/.test(mainSrc))
 
       ok('v3.3.66：probeLimit 同步抛错也唤醒排队 + 封面预热 promise 可结算',
         (dlSrc66.match(/probeWaiting\.shift\(\)/g) || []).length >= 2 &&
@@ -1239,9 +1242,10 @@ function main() {
         /safe\.trackIds = patch\.trackIds\.filter/.test(main67) &&
         /if \(safe\.trackIds\) pruneOnlineTracks\(\)/.test(main67))
 
-      ok('v3.3.67：启动扫描/监视目录过 isSafeMediaRoot + m3u 首字符 # 转义',
-        /const startDirs = \(store\.get\(\)\.settings\.musicDirs \|\| \[\]\)\s*\n\s*\.filter\(\(d\) => typeof d === 'string' && PROTO\.isSafeMediaRoot\(d\)\)/.test(main67) &&
-        /\.filter\(\(d\) => typeof d === 'string' && PROTO\.isSafeMediaRoot\(d\)\)/.test(main67) &&
+      ok('v3.3.67/77：启动扫描与监视扫描都过 isSafeMediaRoot（musicDirs 非数组不炸）',
+        /const startDirs = \(Array\.isArray\(store\.get\(\)\.settings\.musicDirs\) \? store\.get\(\)\.settings\.musicDirs : \[\]\)\s*\n\s*\.filter\(\(d\) => typeof d === 'string' && PROTO\.isSafeMediaRoot\(d\)\)/.test(main67) &&
+        /const dirs = \(Array\.isArray\(s\.musicDirs\) \? s\.musicDirs : \[\]\)\s*\n\s*\.filter\(\(d\) => typeof d === 'string' && PROTO\.isSafeMediaRoot\(d\)\)/.test(main67) &&
+        /run = library\.scan\(dirs, \(p\) =>/.test(main67) &&
         /line\.startsWith\('#'\) \? '\.\/' \+ line : line/.test(main67))
 
       ok('v3.3.67：首屏并发读取逐项兜底（单个接口失败不再整页堆栈）',

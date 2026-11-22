@@ -293,6 +293,12 @@ class MpvAudio {
       }
       case 'eof':
       case 'file-eof': {
+        // v3.3.77（P2-4）：stop()/清 src 之后 mpv 补发的 file-eof 不属于当前会话。
+        // 以前只靠 _loadEpoch/_endedEpoch 对齐 + _endedFired/_lastEndedAt 抑制，
+        // 但 removeAttribute('src') 恰好把这两个条件都清零了（198 行 mpvStop 之后
+        // mpv 还会送一次 eof）→ 停止后凭空多一次 next / queue-end（会触发关机动作）。
+        // _srcPath 为空 = 当前没有在播的曲，任何 eof 都是迟到的，直接丢。
+        if (!this._srcPath) break
         // v3.3.13：mpv 曲末会连发 eof-reached 与 end-file(eof)。
         // 按「同一 load 代次」去重：本代次已触发过（_endedFired），或 700ms 窗口内
         // 再次到来的，都视为同一次曲末的第二个事件 → 抑制。

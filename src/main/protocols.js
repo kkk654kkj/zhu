@@ -99,16 +99,48 @@ function isSafeMediaRoot(r) {
   return !DANGEROUS_ROOT.test(p)
 }
 
+function lowerWithSep(r) {
+  const rl = String(r).toLowerCase()
+  return (rl.endsWith(path.sep) ? rl.slice(0, -path.sep.length) : rl) + path.sep
+}
+
+function inRoot(realLower, rootWithSep) {
+  return realLower.startsWith(rootWithSep) || (realLower + path.sep).startsWith(rootWithSep)
+}
+
+// v3.3.77（P2-2）：DATA_DIR 子树硬闸，只放行 DATA_DIR\covers（旧库绝对路径封面兜底）。
+// 那里还住着 settings.json / library.json / 在线密钥，渲染层一旦被注入就能
+// fetch lxfile:// 读走 —— 遮蔽出口（settings 下发时 delete onlineChkszKey）形同虚设。
+// 只把 DATA_DIR 从根列表拿掉还不够：渲染层能通过 settings:patch 把 musicDirs /
+// downloadDir / cacheDir 指进 DATA_DIR 再间接进白名单，所以必须在唯一收口处硬拒。
+let dataDirGuardCache = null
+function dataDirGuard() {
+  if (dataDirGuardCache) return dataDirGuardCache
+  if (!G.DATA_DIR) return null
+  const base = realpathCached(path.resolve(G.DATA_DIR))
+  if (!base) return null
+  const covers = realpathCached(path.join(path.resolve(G.DATA_DIR), 'covers'))
+  const g = { data: lowerWithSep(base), covers: covers ? lowerWithSep(covers) : '' }
+  // covers 还没建（首次启动）时不缓存，等目录出现后再算一次
+  if (g.covers) dataDirGuardCache = g
+  return g
+}
+
 function isAllowedMediaPath(p) {
   // abs 与每个 root 都取 realpath：曲库里的 junction/符号链接指向系统目录时，
   // real 之后的绝对路径前缀对不上白名单，从而被拒绝
   const abs = realpathCached(path.resolve(fixDriveRoot(p)))
   if (!abs) return false   // realpath 失败（路径不存在/非法）→ 拒绝
   const real = abs.toLowerCase()
+  const guard = dataDirGuard()
+  if (guard && inRoot(real, guard.data) && !(guard.covers && inRoot(real, guard.covers))) return false
+  // v3.3.77（P2-5）：musicDirs 非数组时（settings.json 被手改）不能 `|| []` 后展开 ——
+  // 字符串会被逐字符展开成一堆单字符根，等于白名单失效。
+  const musicDirs = Array.isArray(G.store.get().settings.musicDirs) ? G.store.get().settings.musicDirs : []
   const roots = [
-    ...(G.store.get().settings.musicDirs || []),
+    ...musicDirs,
     G.downloadDir(),
-    G.DATA_DIR,
+    path.join(G.DATA_DIR, 'covers'),
     G.cacheDirPath()
   ]
     .filter((r) => r && String(r).trim() && isSafeMediaRoot(r))
@@ -116,11 +148,8 @@ function isAllowedMediaPath(p) {
     // v3.3.18：原始串通过不代表解析后也安全 —— 'D:/Music/../../Windows'
     // 会解析成系统目录，绕过上面的 DANGEROUS_ROOT 检查当上白名单根
     .filter((r) => r && isSafeMediaRoot(r))
-    .map((r) => {
-      const rl = r.toLowerCase()
-      return (rl.endsWith(path.sep) ? rl.slice(0, -path.sep.length) : rl) + path.sep
-    })
-  return roots.some((r) => real.startsWith(r) || (real + path.sep).startsWith(r))
+    .map(lowerWithSep)
+  return roots.some((r) => inRoot(real, r))
 }
 
 /* ---------------- 自定义协议：支持 Range 的本地文件读取 ---------------- */
