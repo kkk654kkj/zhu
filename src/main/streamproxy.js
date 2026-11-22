@@ -1228,4 +1228,8 @@ module.exports = {
   createCacheWriter,
   waitDrain,
   removePartFile,
+  // v3.3.75（R02-07）：只为桩测试导出，行为不变。上游 416 补救分支在真实音源下不可达
+  // （登记表是进程内 Map + 四家源都回 Content-Length → 收满必先被提前拦截），
+  // 只能靠 test/stream-416-promote.mjs 用桩数据覆盖「残片转正 + 出流」这两步。
+  promoteResumeToCache,
 }
