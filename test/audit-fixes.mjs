@@ -103,7 +103,9 @@ ok('C1 独占看门狗：idle 后 2 秒仍无音频且上是 eof → 清零意�
 ok('C2 停止后 mpv 补发的 eof 被丢弃', /if \(!this\._srcPath\) break/.test(mpvaSrc))
 ok('C3 桌面歌词关→开连点不复用正在关闭的窗口',
   /dlyricClosing = true/.test(dlyricSrc) && /dlyricReopen = false/.test(dlyricSrc))
-ok('C8 监视增量扫描过白名单', /library\.scan\(dirs,/.test(mainSrc) && /Array\.isArray\(s\.musicDirs\)/.test(mainSrc))
+// v3.3.78 / v2.8.64：watch 扫描的入参变量改名为 scanDirs（先收敛 roots 再决定全根/子集），
+// 白名单语义不变，断言跟着改口径
+ok('C8 监视增量扫描过白名单', /library\.scan\(scanDirs,/.test(mainSrc) && /Array\.isArray\(s\.musicDirs\)/.test(mainSrc))
 ok('C9 移除目录后清理幽灵曲', /library\.pruneOutsideRoots\(next\.musicDirs\)/.test(mainSrc))
 ok('C10 退出清理期点托盘不再重建主窗口', /if \(quitting\) return/.test(mainSrc))
 ok('C11 后台实例的关窗询问/原生框不阻塞', /if \(TEST_HIDDEN\(\)\) \{\s*\n\s*if \(win && !win\.isDestroyed\(\)\)/.test(mainSrc))

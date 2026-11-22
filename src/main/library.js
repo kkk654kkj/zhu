@@ -1086,6 +1086,10 @@ class Library {
       await this.persistFailures()
       return {
         added, updated, removed, total: this.tracks.size,
+        // v3.3.78：监视扫描降到 1.2 秒一次之后，「扫了但什么都没变」会变得很常见。
+        // 把「曲库内容是否真的变了」明说出来，渲染层才敢跳过整份 listTracks 刷新
+        // （dirty 覆盖「只有封面/歌词字段变了、曲目数没变」的情况）。
+        changed: !!(dirty || added || updated || removed),
         failed: failedFiles.length,
         failedFiles: failedFiles.slice(0, 10),
         // v1.8：失败清单完整条数（failedFiles 只给前 10 个名字，诊断面板另有完整数据）

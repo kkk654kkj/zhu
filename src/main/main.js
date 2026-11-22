@@ -21,6 +21,7 @@ const DLYW = require('./dlyric-window')
 const MPVM = require('./mpv-manager')
 // v3.3.77（P2-9）：与联网版共用一份地址闸门（协议/私网/DNS 逐地址校验）
 const HTTPU = require('./http-util')
+const WATCHP = require('./watch-plan')   // v3.3.78：监视防抖与「只重扫变化子目录」的策略（纯函数）
 
 const isDev = process.argv.includes('--dev')
 /** v3.3.29 后台守卫：测试/成品实测实例绝不显示窗口、绝不抢前台焦点。
@@ -860,6 +861,17 @@ const WATCH_EXTS = new Set([
 ])
 let watchers = []
 let watchTimer = null
+/* v3.3.78：监视扫描改成「智能防抖 + 子集扫描」。状态说明：
+ *   watchBatchStart  本批第一个事件的时刻（算最大等待预算用）
+ *   watchPendingDirs 本批事件落在哪些目录（只重扫这些，不再全根 walk）
+ *   watchPendingAll  拿不到变化路径（filename 为空）或子集不可信 → 老实全根扫
+ *   watchTailTimer   扫描后的补扫定时器（半截文件）
+ *   watchTailUsed    本轮尾巴补扫是否已排过（避免稳定后每 3 秒空扫一遍） */
+let watchBatchStart = 0
+let watchPendingDirs = new Set()
+let watchPendingAll = false
+let watchTailTimer = null
+let watchTailUsed = false
 
 /** watcher 失效后的重挂定时器（见 startWatching 的 error 回调） */
 let watchRebuildTimer = null
@@ -869,13 +881,21 @@ function stopWatching() {
   for (const w of watchers) { try { w.close() } catch (e) { /* 已关 */ } }
   watchers = []
   if (watchTimer) { clearTimeout(watchTimer); watchTimer = null }
+  if (watchTailTimer) { clearTimeout(watchTailTimer); watchTailTimer = null }
   if (watchRebuildTimer) { clearTimeout(watchRebuildTimer); watchRebuildTimer = null }
+  watchBatchStart = 0
+  watchPendingDirs = new Set()
+  watchPendingAll = false
+  watchTailUsed = false
 }
 
 /**
  * 监听音乐目录（递归）。Windows 支持 recursive，大目录也没问题。
- * 变化后等 8 秒再扫：拷一张专辑会触发几十个事件，防抖能合成一次
- * （增量扫描本来只解析变了的文件，所以这一次很便宜）。
+ *
+ * v3.3.78：以前是「任一事件 → 固定 8 秒后全根重扫」。慢在两点：8 秒是硬延迟（用户
+ * 拷完一首歌要盯着看半天），而全根重扫很贵（递归 walk + 逐文件 stat），所以延迟不敢调小。
+ * 现在改成两件事一起：事件只记「变化发生在哪个目录」，静默 1.2 秒即扫该目录（子集），
+ * 连绵不断的事件最多等 6 秒必扫一次；扫完 3 秒再补一次尾巴扫描，把「拷贝中读到半截」的文件补全。
  */
 /**
  * 排一次「整体重挂」：目录被删/改名、网络盘掉线、句柄耗尽、启动期不可达都走这里。
@@ -900,9 +920,12 @@ function startWatching() {
   for (const dir of dirs) {
     try {
       const w = fs.watch(dir, { recursive: true }, (evt, filename) => {
-        if (!filename) return
-        if (!WATCH_EXTS.has(path.extname(String(filename)).toLowerCase())) return
-        scheduleWatchScan()
+        // v3.3.78：filename 是相对监视根的路径。拿它算出「变化所在目录」，只重扫那一块；
+        // 拿不到（部分网络盘/驱动在 rename、删除时传 null）就退回全根扫。
+        if (!filename) { scheduleWatchScan(null); return }
+        const name = String(filename)
+        if (!WATCH_EXTS.has(path.extname(name).toLowerCase())) return
+        scheduleWatchScan(path.dirname(path.join(dir, name)))
       })
       // v3.3.17：FSWatcher 收到 error（目录被删/改名、网络盘掉线、句柄耗尽）后就永久失效，
       // 但以前它仍留在 watchers 里、也没有任何重建路径 —— 用户拔插移动硬盘或改名再改回，
@@ -927,32 +950,111 @@ function startWatching() {
   logLine('[watch] 监视 ' + watchers.length + ' 个目录')
 }
 
-function scheduleWatchScan() {
+/**
+ * 排一次监视扫描（v3.3.78）。
+ * @param {string|null} dirHint 变化所在目录；null/空表示「不知道变在哪」→ 全根扫
+ */
+function scheduleWatchScan(dirHint) {
+  if (typeof dirHint === 'string' && dirHint) watchPendingDirs.add(dirHint)
+  else watchPendingAll = true
+  const now = Date.now()
+  if (!watchBatchStart) watchBatchStart = now
   if (watchTimer) clearTimeout(watchTimer)
-  watchTimer = setTimeout(runWatchScan, 8000)
+  // 智能防抖：静默 1.2 秒就扫；事件连绵不断时最多等 6 秒（预算在 nextDelayMs 里算）
+  watchTimer = setTimeout(() => { runWatchScan() }, WATCHP.nextDelayMs(watchBatchStart, now))
+  if (watchTimer.unref) watchTimer.unref()
+  // 新事件进来 → 允许再排一次尾巴补扫
+  watchTailUsed = false
 }
 
-async function runWatchScan() {
+/** 取走本批累积的变化目录。取走后新到的事件重新累积，扫描期间的事件不会丢 */
+function takeWatchBatch() {
+  const dirs = Array.from(watchPendingDirs)
+  const all = watchPendingAll
+  watchPendingDirs = new Set()
+  watchPendingAll = false
+  watchBatchStart = 0
+  return { dirs, all }
+}
+
+/**
+ * 把「变化目录」收敛成可以交给 scan 的目录集合。
+ *
+ * 事件可能晚到：目录已被删/改名、连删多层、设置刚换过（路径已在根外）。
+ * 逐个往上找第一个仍可达的祖先；任何一个定位不到就返回 null，调用方退回全根扫 ——
+ * 宁可慢一次，也不能让「目录不存在」进 missingRoots 使整轮跳过清理。
+ *
+ * @param {string[]} hints
+ * @param {string[]} roots 已过 isSafeMediaRoot 的音乐根
+ * @returns {Promise<string[]|null>} null = 不可信，退回全根
+ */
+async function resolveWatchDirs(hints, roots) {
+  const picked = []
+  for (const hint of hints) {
+    let dir = hint
+    let found = ''
+    for (let i = 0; i < 16; i++) {
+      if (!roots.some((r) => WATCHP.insideRoot(dir, r))) break
+      try {
+        const st = await fsp.stat(dir)
+        if (st.isDirectory()) { found = dir; break }
+      } catch (err) { /* 不可达：继续往上找 */ }
+      const up = path.dirname(dir)
+      if (!up || up === dir) break
+      dir = up
+    }
+    if (!found) return null
+    picked.push(found)
+  }
+  const collapsed = WATCHP.collapseDirs(picked)
+  if (!collapsed.length || collapsed.length > WATCHP.TUNING.MAX_DIRS) return null
+  return collapsed
+}
+
+/**
+ * @param {{dirs?:string[]|null, all?:boolean, tail?:boolean}} [opts]
+ *   dirs 有值时用这批（尾巴补扫沿用上一轮目录），否则取走累积批次。
+ */
+async function runWatchScan(opts = {}) {
   watchTimer = null
+  const batch = Array.isArray(opts.dirs) ? { dirs: opts.dirs, all: !!opts.all } : takeWatchBatch()
   if (library.scanning || activeScan) {
-    // 正在扫（可能用户手动点了），等它结束再来
-    scheduleWatchScan()
+    // 正在扫（可能用户手动点了）：把这批目录塞回去，扫完立刻接上
+    for (const d of batch.dirs) watchPendingDirs.add(d)
+    if (batch.all || !batch.dirs.length) watchPendingAll = true
+    if (!watchBatchStart) watchBatchStart = Date.now()
+    if (watchTimer) clearTimeout(watchTimer)
+    watchTimer = setTimeout(() => { runWatchScan(opts) }, WATCHP.TUNING.BUSY_RETRY_MS)
+    if (watchTimer.unref) watchTimer.unref()
     return
   }
   const s = store.get().settings
   if (s.watchFolders === false) return
   // v3.3.77（P2-1）：文件监视是唯一没过滤媒体目录的扫描入口。settings.json 被手改成
   // 盘符根 / UNC / 越界路径时，watch 一触发就整盘索引（曲目能显示、点了却播不了）。
-  const dirs = (Array.isArray(s.musicDirs) ? s.musicDirs : [])
+  const roots = (Array.isArray(s.musicDirs) ? s.musicDirs : [])
     .filter((d) => typeof d === 'string' && PROTO.isSafeMediaRoot(d))
-  if (!dirs.length) return
-  logLine('[watch] 检测到文件变化，开始增量扫描')
+  if (!roots.length) return
+  // v3.3.78：能定位到变化目录就只扫那一块。全根 walk + 逐文件 stat 是「以前不敢把
+  // 防抖降下来」的根本原因；只扫变化目录之后，1.2 秒的感知延迟才真正便宜。
+  let scanDirs = null
+  if (!batch.all && batch.dirs.length) {
+    scanDirs = await resolveWatchDirs(batch.dirs, roots)
+    if (!scanDirs) logLine('[watch] 变化目录定位失败，退回全根扫描')
+  }
+  const wholeTree = !scanDirs
+  if (wholeTree) scanDirs = roots
+  logLine('[watch] 检测到文件变化，开始增量扫描 ' + (wholeTree
+    ? '(全根 ' + roots.length + ')'
+    : '(子集 ' + scanDirs.length + '/' + roots.length + ')'))
   // v3.3.10：run 必须声明在 try 外 —— 上一版 const run 在 try 块内，
   // finally 里引用必然 ReferenceError → activeScan 永远清不掉，
   // 后续 watch 扫描全部失效（每 8 秒空转重试）+ 每次一个 unhandledRejection
+  // v3.3.78：尾巴补扫用「失败清单有没有涨」判断文件是否还在被写
+  const failBefore = library.failures ? library.failures.size : 0
   let run = null
   try {
-    run = library.scan(dirs, (p) => {
+    run = library.scan(scanDirs, (p) => {
       sendToRenderer('lib:scan-progress', {
         phase: p.phase, done: p.done, total: p.total,
         track: p.track ? toClientTrack(p.track) : null
@@ -965,6 +1067,23 @@ async function runWatchScan() {
       added: res.added, updated: res.updated, removed: res.removed, total: res.total, failed: res.failed
     }))
     sendToRenderer('lib:scan-done', res)
+    // v3.3.78：事件到达时文件往往还在拷（读到半截 → duration=0 或解析失败）。
+    // 扫完 3 秒补一次把刚落地的文件补全；补完还有新失败说明还在写，9 秒后再补最后一次。
+    // 最多跳两下，之后必须收敛 —— 否则持续拷贝会变成无限的定时扫描。
+    const failAfter = library.failures ? library.failures.size : 0
+    const dirtyScan = !!(res.added || res.updated || res.removed || res.failed || failAfter > failBefore)
+    const hops = opts.hops || 0
+    if (dirtyScan && hops < 2 && (hops > 0 || !watchTailUsed)) {
+      if (hops === 0) watchTailUsed = true
+      if (watchTailTimer) clearTimeout(watchTailTimer)
+      const snap = wholeTree ? null : scanDirs.slice()
+      const delay = hops === 0 ? WATCHP.TUNING.TAIL_MS : WATCHP.TUNING.TAIL_MS * 3
+      watchTailTimer = setTimeout(() => {
+        watchTailTimer = null
+        runWatchScan({ dirs: snap, all: !snap, tail: true, hops: hops + 1 })
+      }, delay)
+      if (watchTailTimer.unref) watchTailTimer.unref()
+    }
   } catch (err) {
     logLine('[watch] 扫描失败 ' + err.message)
   } finally {

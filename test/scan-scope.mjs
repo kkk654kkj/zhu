@@ -90,6 +90,23 @@ async function main() {
   const r2 = await lib.scan([dirA], () => {})
   ok('子集扫 A：B 的曲目不被连带删除（v3.3.67 核心）',
     lib.list().length === 2 && r2.removed === 0, 'total=' + lib.list().length + ' removed=' + r2.removed)
+  // v3.3.78：监视扫描改成「只扫变化目录」，且 1.2 秒就可能来一轮 —— changed 标记是
+  // 渲染层敢跳过整份 listTracks 刷新（并跳过重建视图）的唯一依据，必须真跑出来。
+  ok('全量扫有变更：changed=true', r1.changed === true, String(r1.changed))
+  ok('子集扫且无变化：changed=false', r2.changed === false, String(r2.changed))
+
+  const fileA2 = path.join(dirA, 'a-two.wav')
+  fs.writeFileSync(fileA2, wavBytes(0.2))
+  const r2b = await lib.scan([dirA], () => {})
+  ok('往 A 加一首后只扫 A：新增 1 且 changed=true',
+    r2b.added === 1 && r2b.changed === true && lib.list().length === 3,
+    'added=' + r2b.added + ' changed=' + r2b.changed + ' total=' + lib.list().length)
+
+  fs.unlinkSync(fileA2)
+  const r2c = await lib.scan([dirA], () => {})
+  ok('删掉刚加的那首：子集扫 removed=1 且 changed=true',
+    r2c.removed === 1 && r2c.changed === true && lib.list().length === 2,
+    'removed=' + r2c.removed + ' changed=' + r2c.changed + ' total=' + lib.list().length)
 
   fs.unlinkSync(fileA)
   const r3 = await lib.scan([dirA], () => {})
