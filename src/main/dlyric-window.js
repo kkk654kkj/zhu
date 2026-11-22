@@ -71,12 +71,22 @@ function notifyDlyricState() {
   })
 }
 
+// v3.3.77（P3-3）：窗口 close() 是异步的。关→开连点时旧窗口还没销毁，
+// 直接复用它会立刻被 closed 回调关掉、并把 enabled 改回 false —— 用户点了开却变关。
+// 关闭期间请求重开就排队，等 closed 里重建。
+let dlyricClosing = false
+let dlyricReopen = false
+
 function createLyricWindow() {
   // v3.3.29：后台实例不创建桌面歌词浮窗。它 skipTaskbar + alwaysOnTop +
   // ready-to-show 里直接 show()，完全不受主窗口隐藏守卫约束，是「窗口弹出」的
   // 另一个来源。dlyricCfg / notifyDlyricState / applyDlyricLock 都容忍 null。
   if (process.env.LX_TEST_HIDDEN === '1') return null
-  if (dlyricWin && !dlyricWin.isDestroyed()) return dlyricWin
+  if (dlyricWin && !dlyricWin.isDestroyed()) {
+    if (!dlyricClosing) return dlyricWin
+    dlyricReopen = true
+    return null
+  }
   const cfg = dlyricCfg()
   const b = cfg.bounds || {}
   // v2.8.48 / v3.3.56：上下行放大到当前句 .6 倍后，三行在 120px 里放不下。
@@ -142,6 +152,14 @@ function createLyricWindow() {
       try { G.store.patch({ settings: { desktopLyric: { bounds: lastLyricBounds } } }) } catch (e) { /* 忽略 */ }
     }
     dlyricWin = null
+    dlyricClosing = false
+    if (dlyricReopen) {
+      // 用户在关闭途中又点了开：不要写 enabled:false，直接重建
+      dlyricReopen = false
+      createLyricWindow()
+      notifyDlyricState()
+      return
+    }
     if (!G.quitting) {
       G.store.patch({ settings: { desktopLyric: { enabled: false } } })
       notifyDlyricState()
@@ -152,8 +170,10 @@ function createLyricWindow() {
 }
 
 function closeLyricWindow() {
-  if (dlyricWin && !dlyricWin.isDestroyed()) dlyricWin.close()
-  else if (dlyricWin) dlyricWin = null
+  if (dlyricWin && !dlyricWin.isDestroyed()) {
+    dlyricClosing = true
+    dlyricWin.close()
+  } else if (dlyricWin) dlyricWin = null
 }
 
 module.exports = {

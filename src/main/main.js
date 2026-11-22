@@ -19,6 +19,8 @@ const PROTO = require('./protocols')
 const SCHEMA = require('./settings-schema')
 const DLYW = require('./dlyric-window')
 const MPVM = require('./mpv-manager')
+// v3.3.77（P2-9）：与联网版共用一份地址闸门（协议/私网/DNS 逐地址校验）
+const HTTPU = require('./http-util')
 
 const isDev = process.argv.includes('--dev')
 /** v3.3.29 后台守卫：测试/成品实测实例绝不显示窗口、绝不抢前台焦点。
@@ -700,6 +702,15 @@ function cancelPowerAction() {
 let closeAskBusy = false
 
 async function handleCloseAsk() {
+  // v3.3.77（P3-1）：后台/自动化实例（TEST_HIDDEN）不能弹原生模态框 —— 没人点，
+  // 关窗会永远卡在那里，整条 GUI 测试链断掉。直接按托盘设置执行。
+  if (TEST_HIDDEN()) {
+    if (win && !win.isDestroyed()) {
+      if (store.get().settings.closeToTray) win.hide()
+      else { quitting = true; win.close() }
+    }
+    return
+  }
   if (closeAskBusy) return
   closeAskBusy = true
   try {
@@ -750,6 +761,9 @@ async function handleCloseAsk() {
 function showMainWindow() {
   // v3.3.29：后台实例不把窗口拉到前台（托盘点击 / second-instance 都会走到这里）
   if (TEST_HIDDEN()) return
+  // v3.3.77（P3-2）：退出清理的 20 秒窗口期内窗口已销毁，此时点托盘会重建一个
+  // 新窗口 —— 托盘已经 destroy 掉、quit 已在路上，重建出来的窗口没人管。
+  if (quitting) return
   if (win && !win.isDestroyed()) {
     if (win.isMinimized()) win.restore()
     win.show()
@@ -927,13 +941,18 @@ async function runWatchScan() {
   }
   const s = store.get().settings
   if (s.watchFolders === false) return
+  // v3.3.77（P2-1）：文件监视是唯一没过滤媒体目录的扫描入口。settings.json 被手改成
+  // 盘符根 / UNC / 越界路径时，watch 一触发就整盘索引（曲目能显示、点了却播不了）。
+  const dirs = (Array.isArray(s.musicDirs) ? s.musicDirs : [])
+    .filter((d) => typeof d === 'string' && PROTO.isSafeMediaRoot(d))
+  if (!dirs.length) return
   logLine('[watch] 检测到文件变化，开始增量扫描')
   // v3.3.10：run 必须声明在 try 外 —— 上一版 const run 在 try 块内，
   // finally 里引用必然 ReferenceError → activeScan 永远清不掉，
   // 后续 watch 扫描全部失效（每 8 秒空转重试）+ 每次一个 unhandledRejection
   let run = null
   try {
-    run = library.scan(s.musicDirs, (p) => {
+    run = library.scan(dirs, (p) => {
       sendToRenderer('lib:scan-progress', {
         phase: p.phase, done: p.done, total: p.total,
         track: p.track ? toClientTrack(p.track) : null
@@ -1266,9 +1285,16 @@ function registerSettingsIpc() {
     const prevDirs = JSON.stringify(before.musicDirs || [])
     const prevWatch = before.watchFolders
     const next = store.patch({ settings: filtered }).settings
+    const dirsChanged = JSON.stringify(next.musicDirs || []) !== prevDirs
     // 目录列表或监视开关变了 → 重新挂 watcher（v1.7）
-    if (JSON.stringify(next.musicDirs || []) !== prevDirs || next.watchFolders !== prevWatch) {
+    if (dirsChanged || next.watchFolders !== prevWatch) {
       startWatching()
+    }
+    // v3.3.77（P2-3）：被移除目录下的曲目要跟着清掉，否则库里留一堆幽灵曲
+    if (dirsChanged) {
+      library.pruneOutsideRoots(next.musicDirs).then((n) => {
+        if (n > 0) logLine('[library] 移除目录后清理曲目 ' + n + ' 首')
+      }).catch((err) => logLine('[library] 清理移除目录失败 ' + err.message))
     }
     return publicSettings(next)
   })
@@ -1283,7 +1309,8 @@ function registerPlaylistIpc() {
     const list = store.get().playlists || []
     const item = {
       id: 'pl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      name: name || '新建歌单',
+      // v3.3.77（P3）：与 update 同一口径 —— 允许空名回落，但要 trim + 限长
+      name: String(name || '').trim().slice(0, 80) || '新建歌单',
       trackIds: [],
       createdAt: Date.now()
     }
@@ -1343,7 +1370,10 @@ function registerPlaylistIpc() {
    */
   ipcMain.handle('playlist:exportM3u', async (e, { name, trackIds } = {}) => {
     if (!win) return { ok: false, error: '窗口未就绪' }
-    const tracks = (trackIds || []).map((id) => library.get(id)).filter(Boolean)
+    if (TEST_HIDDEN()) return { ok: false, canceled: true }   // 后台实例不弹保存框
+    // v3.3.77（P3）：trackIds 非数组（真值）以前直接 .map 抛 TypeError
+    const ids = Array.isArray(trackIds) ? trackIds : []
+    const tracks = ids.map((id) => library.get(id)).filter(Boolean)
     if (!tracks.length) return { ok: false, error: '歌单是空的' }
     const safe = String(name || '播放列表').replace(/[\\/:*?"<>|]/g, '_')
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
@@ -1372,6 +1402,7 @@ function registerPlaylistIpc() {
   /** 导入 m3u：路径就地映射成 trackId，未在曲库里的条目单独计数（不报错） */
   ipcMain.handle('playlist:importM3u', async () => {
     if (!win) return { ok: false, error: '窗口未就绪' }
+    if (TEST_HIDDEN()) return { ok: false, canceled: true }
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
       title: '导入 m3u 歌单',
       filters: [{ name: 'M3U 播放列表', extensions: ['m3u8', 'm3u'] }],
@@ -1418,7 +1449,8 @@ function registerUserDataIpc() {
    * 每首一次 IPC 往返 + 一次整份 settings.json 的原子落盘（含 fsync）。
    */
   ipcMain.handle('favorites:setMany', (e, { ids, fav } = {}) => {
-    const list = Array.isArray(ids) ? ids.filter((x) => typeof x === 'string' && x) : []
+    // v3.3.77（P3）：单次批量上限 —— 每次 setMany 都会全量重写 settings.json
+    const list = Array.isArray(ids) ? ids.filter((x) => typeof x === 'string' && x).slice(0, 1000) : []
     if (!list.length) return store.get().favorites || []
     const set = new Set(store.get().favorites || [])
     for (const id of list) { if (fav) set.add(id); else set.delete(id) }
@@ -1526,6 +1558,7 @@ function registerLyricIpc() {
 function registerSystemIpc() {
   // —— 对话框 / 系统集成 ——
   ipcMain.handle('dialog:pickDirs', async () => {
+    if (TEST_HIDDEN()) return []
     const res = await dialog.showOpenDialog(win, {
       title: '选择音乐文件夹',
       properties: ['openDirectory', 'multiSelections']
@@ -1742,27 +1775,20 @@ function registerDlyricIpc() {
  * 本地版正常情况下不加载网址，这里仍按同一口径拦：回环放行、其余私有网段拒绝。
  * @returns {boolean} true = 应当拒绝
  */
-function isBlockedMpvHttp(u) {
-  let host = ''
-  try { host = new URL(u).hostname.replace(/^\[|\]$/g, '').toLowerCase() } catch (e) { return true }
-  if (!host) return true
-  if (host === 'localhost' || host === '::1') return false
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
-  if (!m) return false            // 域名 → 公网地址，放行
-  const a = Number(m[1])
-  const b = Number(m[2])
-  if (a === 127) return false     // 127.0.0.0/8 = 本机
-  if (a === 0 || a === 10) return true
-  if (a === 192 && b === 168) return true
-  if (a === 172 && b >= 16 && b <= 31) return true
-  if (a === 169 && b === 254) return true
-  return false
+async function isBlockedMpvHttp(u) {
+  // v3.3.77（P2-9）：以前只认 IPv4 字面量 —— 域名（哪怕解析到 127.0.0.1）、
+  // IPv6、十进制/十六进制写法都直接放行，等于只挡了最直白的一类。
+  // 现在交给 http-util 统一闸门：协议 + 私网 + DNS 逐地址校验（回环放行）。
+  const chk = await HTTPU.checkUrlAllowed(u, { allowLoopback: true })
+  if (chk.ok) return false
+  logLine('[mpv] 拦截内网或非法地址:', String(u).slice(0, 80), chk.reason)
+  return true
 }
 
 function registerMpvIpc() {
   // —— 独占输出（mpv 后端） ——
   ipcMain.handle('mpv:start', (e, exclusive) => MPVM.ensureMpv(exclusive !== false, { forceMode: true }))
-  ipcMain.handle('mpv:load', (e, filePath, opts) => {
+  ipcMain.handle('mpv:load', async (e, filePath, opts) => {
     // v2.8.7：引擎没跑起来还返回 true，渲染层会以为加载成功，界面假「播放中」
     if (!MPVM.mpvEngine || !MPVM.mpvEngine.running) return false
     // v2.8.8：本地文件只放行曲库/数据目录之内
@@ -1771,8 +1797,7 @@ function registerMpvIpc() {
       return false
     }
     // v2.8.60（A06）：网址不再无条件放行 —— 私有网段/非法地址一律拒，回环照旧
-    if (/^https?:\/\//i.test(filePath) && isBlockedMpvHttp(filePath)) {
-      logLine('[mpv] 拒绝加载内网或非法地址:', filePath)
+    if (/^https?:\/\//i.test(filePath) && await isBlockedMpvHttp(filePath)) {
       return false
     }
     MPVM.mpvEngine.load(filePath, opts || {})
@@ -1812,6 +1837,7 @@ function registerMpvIpc() {
 
   ipcMain.handle('mpv:confirmEnable', async () => {
     if (!win) return false
+    if (TEST_HIDDEN()) return false   // 后台实例不弹确认框，也不开独占
     const { response } = await dialog.showMessageBox(win, {
       type: 'question',
       buttons: ['开启独占输出', '取消'],
@@ -2257,7 +2283,8 @@ if (gotLock) cleanChromiumCache().catch(() => {})
     try { logLine('FATAL 启动失败: ' + ((err && err.stack) || err)) } catch (e) { /* 忽略 */ }
     try {
       const { dialog } = require('electron')
-      dialog.showErrorBox('启动失败', '播放器初始化出错，无法打开窗口。\n\n' + String((err && err.message) || err))
+      // v3.3.77（P3-1）：后台实例用日志代替阻塞式错误框（否则测试链永远等在那里）
+      if (!TEST_HIDDEN()) dialog.showErrorBox('启动失败', '播放器初始化出错，无法打开窗口。\n\n' + String((err && err.message) || err))
     } catch (e) { /* 无 GUI 环境 */ }
     app.exit(1)
   })

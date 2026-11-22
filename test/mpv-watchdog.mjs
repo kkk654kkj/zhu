@@ -236,6 +236,36 @@ function makeEngine(events, over = {}) {
     JSON.stringify(ev2.map((x) => x.type + ':' + (x.reason || ''))))
 }
 
+/* ---------- ⑫ 顺序模式整队播完：曲末 idle 是「播完了」，不是 AO 丢失 ---------- */
+{
+  const events = []
+  const e = makeEngine(events, { _idle: true, _paused: false, _aoLostAt: 0, _loadAt: Date.now() - 9000 })
+  e._wantPlaying = true
+  e._lastFile = 'D:/music/x.flac'
+  e._handleEvent({ event: 'end-file', reason: 'eof' })
+  e._wdTick()
+  e._aoLostAt = Date.now() - 3000
+  e._wdTick()
+  ok('整队播完进 idle 后不再重启引擎重播末曲（ao-lost 不再误报）',
+    !events.some((x) => x.type === 'ao-lost') && e._wantPlaying === false &&
+    events.some((x) => x.reason === 'idle-after-eof'),
+    JSON.stringify(events.map((x) => x.type + ':' + (x.reason || ''))))
+
+  const ev2 = []
+  const e2 = makeEngine(ev2, { _idle: true, _paused: false, _aoLostAt: 0, _loadAt: Date.now() - 500 })
+  e2._wantPlaying = true
+  e2._lastFile = 'D:/music/x.flac'
+  e2._handleEvent({ event: 'end-file', reason: 'eof' })
+  e2._wdTick()
+  ok('新 load 的 2 秒窗口内曲末 idle 仍等 reload，不清播放意图',
+    e2._wantPlaying === true && !ev2.some((x) => x.type === 'ao-lost'),
+    JSON.stringify(ev2.map((x) => x.type + ':' + (x.reason || ''))))
+
+  const e3 = makeEngine([], { _lastEndReason: 'error' })
+  e3.load('D:/music/y.flac')
+  ok('load() 清空上一首的停车原因（新 load = 新尝试）', e3._lastEndReason === '')
+}
+
 if (savedMute === undefined) delete process.env.LX_TEST_MUTE
 else process.env.LX_TEST_MUTE = savedMute
 

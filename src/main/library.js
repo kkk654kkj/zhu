@@ -1098,6 +1098,35 @@ class Library {
       dirNameCache = null
     }
   }
+
+  /**
+   * v3.3.77（P2-3）：设置里移除音乐目录后，把不在任何现存根下的曲目清掉。
+   * scan 的清理阶段只处理「本次扫过、但文件没了」的曲目（inScope），被移除的
+   * 根目录整棵都不会再被扫到，曲目就永久留在库里 —— 能看见、点了却播不了。
+   * 由 settings:patch 在目录变化时调用；roots 为空时直接返回（防清空整库）。
+   */
+  async pruneOutsideRoots(dirs) {
+    const roots = (Array.isArray(dirs) ? dirs : [])
+      .filter((d) => typeof d === 'string' && d.trim())
+      .map((d) => {
+        const r = path.resolve(d).toLowerCase()
+        return r.endsWith(path.sep) ? r : r + path.sep
+      })
+    if (!roots.length) return 0
+    let removed = 0
+    for (const [id, t] of Array.from(this.tracks.entries())) {
+      const lp = String(t.path || '').toLowerCase()
+      if (roots.some((r) => lp.startsWith(r))) continue
+      if (t.lyric && this.lyricDir && path.dirname(t.lyric) === this.lyricDir) {
+        try { fs.unlinkSync(t.lyric) } catch {}
+      }
+      this.tracks.delete(id)
+      this.failures.delete(id)
+      removed++
+    }
+    if (removed > 0) await this.persist()
+    return removed
+  }
 }
 
 module.exports = {

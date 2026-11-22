@@ -583,6 +583,9 @@ class MpvEngine {
     this._loadAt = Date.now() // file-loaded 不来时，看门狗用这个时刻兜底
     this._lastAoLog = ''
     this._lastLog = ''   // 同 AO 记忆一起清：否则坏文件的 toast 会带上上一首的 warn 文案
+    // v3.3.77（P1-1）：新的 load 是新的尝试 —— 上一次的结束原因（尤其 eof）
+    // 不能留到这次，否则独占看门狗会拿旧 eof 当「这次播完了」直接清意图。
+    this._lastEndReason = ''
     if (paused) this._send(['set_property', 'pause', true])
     this._send(['loadfile', filePath, 'replace'])
   }
@@ -911,6 +914,15 @@ class MpvEngine {
       this._wdDiag('idle-while-want-playing')
       // 渲染层刚发的 reload 在途时给 2 秒窗口，避免 reload 与 restart 抢同一首
       if (Date.now() - this._loadAt < 2000) { this._aoLostAt = 0; return }
+      // v3.3.77（P1-1）：idle 超过 reload 窗口、且这次停下来是 eof —— 队列播完了。
+      // 顺序模式下渲染层不会再 load，_wantPlaying 却还是 true，看门狗 2.5 秒后
+      // 会判「声卡丢了」重启引擎并从末曲开头重播，再把结局报成 ao-lost。
+      if (this._lastEndReason === 'eof') {
+        this._wdDiag('idle-after-eof')
+        this._wantPlaying = false
+        this._aoLostAt = 0
+        return
+      }
     }
     // 主动状态判定：AO 参数回来就清零计数（H2 的关键）
     if (this._aoParams) {
