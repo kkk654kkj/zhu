@@ -154,7 +154,9 @@ ok('C6 下载出错只删空残片（非空保留续传）',
   /function dropPartIfEmpty/.test(dlSrc) && !/error[\s\S]{0,200}dlUnlinkRetry\(task\.path \+ '\.part'\)/.test(dlSrc))
 ok('C7 非续传的上游 416 原样透传（不再改成 502）',
   /upstream\.status === 416 && !\(resume && startAt > 0\)/.test(spSrc) && /writeHead\(416/.test(spSrc))
-ok('C8 监视增量扫描过白名单', /library\.scan\(dirs,/.test(mainSrc) && /Array\.isArray\(s\.musicDirs\)/.test(mainSrc))
+// v3.3.78：watch 扫描的入参变量改名为 scanDirs（先收敛 roots 再决定全根/子集），
+// 白名单语义不变，断言跟着改口径
+ok('C8 监视增量扫描过白名单', /library\.scan\(scanDirs,/.test(mainSrc) && /Array\.isArray\(s\.musicDirs\)/.test(mainSrc))
 ok('C9 移除目录后清理幽灵曲', /library\.pruneOutsideRoots\(next\.musicDirs\)/.test(mainSrc))
 ok('C10 退出清理期点托盘不再重建主窗口', /if \(quitting\) return/.test(mainSrc))
 ok('C11 后台实例的关窗询问/原生框不阻塞', /if \(TEST_HIDDEN\(\)\) \{\s*\n\s*if \(win && !win\.isDestroyed\(\)\)/.test(mainSrc))

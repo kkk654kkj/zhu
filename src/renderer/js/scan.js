@@ -134,6 +134,13 @@ async function onScanDone(res) {
   if (state.analyzing) { state.scanDonePending = true; return }
   // 目录不可访问时主进程会跳过清理，这种 scan-done 不能动队列
   if (res && res.skipped) return
+  // v3.3.78：监视扫描现在静默 1.2 秒就可能来一次，绝大多数是「扫了没变」
+  // （事件来自封面/歌词/半截文件，曲库内容本身没动）。以前每次都整份 listTracks +
+  // 重建视图，几千首的库白烧一次 IPC 和渲染。changed===false 就只刷诊断面板。
+  if (res && res.changed === false) {
+    if (typeof Diag !== 'undefined' && Diag.isOpen()) Diag.loadFailures()
+    return
+  }
   try {
     const tracks = await window.api.listTracks()
     setTracks(tracks)

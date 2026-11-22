@@ -1244,8 +1244,11 @@ function main() {
 
       ok('v3.3.67/77：启动扫描与监视扫描都过 isSafeMediaRoot（musicDirs 非数组不炸）',
         /const startDirs = \(Array\.isArray\(store\.get\(\)\.settings\.musicDirs\) \? store\.get\(\)\.settings\.musicDirs : \[\]\)\s*\n\s*\.filter\(\(d\) => typeof d === 'string' && PROTO\.isSafeMediaRoot\(d\)\)/.test(main67) &&
-        /const dirs = \(Array\.isArray\(s\.musicDirs\) \? s\.musicDirs : \[\]\)\s*\n\s*\.filter\(\(d\) => typeof d === 'string' && PROTO\.isSafeMediaRoot\(d\)\)/.test(main67) &&
-        /run = library\.scan\(dirs, \(p\) =>/.test(main67) &&
+        // v3.3.78：监视扫描改成「先收敛 roots，再决定全根还是子集」，变量名随实现改过；
+        // 断言跟着钉语义（roots 过白名单 → scanDirs 只能来自 roots → 交给 scan），不再钉 dirs 这个名字
+        /const roots = \(Array\.isArray\(s\.musicDirs\) \? s\.musicDirs : \[\]\)\s*\n\s*\.filter\(\(d\) => typeof d === 'string' && PROTO\.isSafeMediaRoot\(d\)\)/.test(main67) &&
+        /if \(wholeTree\) scanDirs = roots/.test(main67) &&
+        /run = library\.scan\(scanDirs, \(p\) =>/.test(main67) &&
         /line\.startsWith\('#'\) \? '\.\/' \+ line : line/.test(main67))
 
       ok('v3.3.67：首屏并发读取逐项兜底（单个接口失败不再整页堆栈）',
