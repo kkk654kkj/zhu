@@ -1,6 +1,8 @@
 'use strict'
 /**
- * 第五轮全修统一验证（仓库外临时脚本）
+ * 第五轮全修统一验证
+ *  ⚠ 这是联网版门禁：在本地版树里跑会按"联网版应有实现"报红。本地版请用 verify-master-v5.mjs。
+ *  REPO 默认取本脚本所在的树，可用 LX_REPO 覆盖。
  * 用法: node verify-v5.mjs
  * 1) 全量 node --check / bash -n
  * 2) 关键逻辑单元验证（导入真实模块，不改文件）
@@ -9,8 +11,10 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { fileURLToPath } from 'node:url'
 
-const REPO = 'D:/文档/deepseek-harness/default-workspace/lx-player'
+const REPO = process.env.LX_REPO
+  || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 let pass = 0, fail = 0
 const ok = (name, cond, extra = '') => {
   if (cond) { pass++; console.log('  ✓', name, extra) }

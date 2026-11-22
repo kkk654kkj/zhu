@@ -3,8 +3,12 @@
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 // v2.8.58：允许用 LX_REPO 指向临时快照（git archive 解出来的目录），便于不切分支复跑
-const REPO = process.env.LX_REPO || 'D:/文档/deepseek-harness/default-workspace/lx-player'
+// v2.8.63（P3-18）：默认取本脚本所在的树 —— 以前写死联网版路径，在本地版树里
+// 跑这个脚本会静默审到联网版代码，报一堆与本地版无关的假红。
+const REPO = process.env.LX_REPO
+  || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 let pass = 0, fail = 0
 const ok = (n, c, x = '') => { if (c) { pass++; console.log('  ✓', n, x) } else { fail++; console.log('  ✗', n, x) } }
 const R = (f) => fs.readFileSync(path.join(REPO, f), 'utf8')
