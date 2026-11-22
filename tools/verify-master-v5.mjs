@@ -1,9 +1,14 @@
 'use strict'
-/** master（本地版）第五轮移植验证：检查适用修复都在、联网独有功能没被带进来 */
+/** master（本地版）第五轮移植验证：检查适用修复都在、联网独有功能没被带进来
+ *  ⚠ 这是本地版门禁：在联网版树里跑会按"不该有的联网功能"报红。联网版请用 verify-v5.mjs。
+ *  REPO 默认取本脚本所在的树，可用 LX_REPO 覆盖。
+ */
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-const REPO = 'D:/文档/deepseek-harness/default-workspace/lx-player'
+import { fileURLToPath } from 'node:url'
+const REPO = process.env.LX_REPO
+  || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 let pass = 0, fail = 0
 const ok = (n, c, x = '') => { if (c) { pass++; console.log('  ✓', n, x) } else { fail++; console.log('  ✗', n, x) } }
 const R = (f) => fs.readFileSync(path.join(REPO, f), 'utf8')

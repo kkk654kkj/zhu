@@ -9,8 +9,10 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { fileURLToPath } from 'node:url'
 
-const REPO = 'D:/文档/deepseek-harness/default-workspace/lx-player'
+const REPO = process.env.LX_REPO
+  || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 let pass = 0, fail = 0
 const ok = (name, cond, extra = '') => {
   if (cond) { pass++; console.log('  ✓', name, extra) }
