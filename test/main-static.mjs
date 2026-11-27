@@ -1410,9 +1410,10 @@ function main() {
       ok('v3.3.79：档位链由清单生成（硬编码 QING_LEVELS 已删除）',
         !/const QING_LEVELS = \{/.test(on79) &&
         /const levels = qingLevelChain\(song\.source, prefer\)/.test(on79) &&
-        /QM\.buildLevelChain\(levels, prefer\)/.test(on79) &&
+        /QM\.buildLevelChain\(levels, prefer/.test(on79) &&
         /prefer === 'master'\) return uniq\(\[\.\.\.master, \.\.\.hires, \.\.\.loss, \.\.\.imm\]\)/.test(qm79) &&
-        /prefer === 'lossless'\) return uniq\(\[\.\.\.loss, \.\.\.hires, \.\.\.master, \.\.\.imm\]\)/.test(qm79))
+        /prefer === 'lossless'\) return uniq\(\[\.\.\.loss, \.\.\.hires, \.\.\.master, \.\.\.imm\]\)/.test(qm79) ||
+        /^\s*return uniq\(\[\.\.\.loss, \.\.\.hires, \.\.\.master, \.\.\.imm\]\)$/m.test(qm79))
       ok('v3.3.79：有损档不进无损链 + 坏档熔断（阈值 3 / 只在 broken/partial 记分）',
         /MASTER_LEVELS = new Set\(\['master', 'jymaster', 'clear'\]\)/.test(qm79) &&
         /const LEVEL_BAD_AFTER = 3/.test(on79) &&
@@ -1424,6 +1425,40 @@ function main() {
         /online\.initManifest\(path\.join\(userData, 'qing-manifest\.json'\)\)/.test(mj79) &&
         /refreshManifest\(false\)\.catch\(\(\) => \{\}\)/.test(on79) &&
         /ipcMain\.handle\('online:manifest'/.test(mj79))
+    }
+
+    // ===== v3.3.80 汽水（只解析源，按分享链接播） =====
+    {
+      const on80 = read('src/main/online.js')
+      const qm80 = read('src/main/qing-manifest.js')
+      const mj80 = read('src/main/main.js')
+      const pl80 = read('src/main/preload.js')
+      const ui80 = read('src/renderer/js/online.js')
+
+      ok('v3.3.80：两套客户端身份，汽水走安卓（桌面身份会被判「不支持汽水」）',
+        /const QING_APP = \{\s*desktop: \{ id: 'qingmusic-desktop', ver: '1\.0\.3' \},\s*android: \{ id: 'qingmusic-android', ver: '1\.4\.1' \}/.test(on80) &&
+        /function qingAppFor\(source\) \{\s*return source === 'qs' \? QING_APP\.android : QING_APP\.desktop/.test(on80) &&
+        /const app = qingAppFor\(source\)/.test(on80))
+      ok('v3.3.80：汽水只解析不搜索（ADAPTERS 无 qs、RESOLVE_ONLY 有 qs、不进 activeOrder）',
+        /const RESOLVE_ONLY = \{ qs: 'qs' \}/.test(qm80) &&
+        !/const ADAPTERS = \{[^}]*qs/.test(qm80) &&
+        /const resolveOnly = Array\.from\(byResolve\.values\(\)\)/.test(qm80) &&
+        /for \(const line of resolveOnly\) levelsBySource\[line\.source\] = line\.levels/.test(qm80))
+      ok('v3.3.80：汽水档位 lossless 打头（它的 hires 只有 310kbps，排在无损前面会拿错）',
+        /qs: \['lossless', 'hires', 'atmos', 'exhigh', 'standard'\]/.test(qm80) &&
+        /const fixed = SOURCE_LEVEL_ORDER\[source\]/.test(qm80) &&
+        /QM\.buildLevelChain\(levels, prefer, source\)/.test(on80))
+      ok('v3.3.80：分享链接解析（花括号配对取 _ROUTER_DATA，短链落地页取 track_id）',
+        /function looksLikeQishuiLink\(text\)/.test(on80) &&
+        /function pickRouterData\(html\)/.test(on80) &&
+        /async function resolveQishuiLink\(input, opts = \{\}\)/.test(on80) &&
+        /if \(!id\) \{\s*const m = QS_TRACK_ID_RE\.exec\(finalUrl\)/.test(on80) &&
+        /const ext = song\.source === 'qs' \? 'm4a' : 'flac'/.test(on80))
+      ok('v3.3.80：IPC + preload + 搜索框入口都在',
+        /ipcMain\.handle\('online:resolveLink'/.test(mj80) &&
+        /onlineResolveLink: \(text\) => invoke\('online:resolveLink', text\)/.test(pl80) &&
+        /window\.api\.onlineResolveLink\(kw\)/.test(ui80) &&
+        /this\.list = \[link\.song\]/.test(ui80))
     }
 
   }

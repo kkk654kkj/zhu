@@ -1861,6 +1861,8 @@ function registerOnlineIpc() {
   ipcMain.handle('online:sources', () => online.listSources())
   // v3.3.79：音源清单状态（版本/来源/生效线路/每线档位），诊断面板与设置页可用
   ipcMain.handle('online:manifest', () => online.getManifestInfo())
+  // v3.3.80：汽水分享链接 → 曲目（汽水没有搜索接口，只能按链接/ID 取）
+  ipcMain.handle('online:resolveLink', (e, text) => online.resolveQishuiLink(String(text || '')))
   // v3.3.71（T02-03）：端口绑定失败（安全软件临时拦 / TIME_WAIT）属于可恢复故障。
   // 以前直接把空串交给渲染层，渲染层拿去拼出相对 /stream，<audio> 报
   // ERR_FILE_NOT_FOUND（错误链当 ENOENT），接着换源 → 再失败 → 连跳。

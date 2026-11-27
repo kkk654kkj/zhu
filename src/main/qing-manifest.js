@@ -20,11 +20,21 @@ const MANIFEST_URLS = [
 ]
 
 /**
- * 清单 id → 播放器内部 source key。
+ * 清单 id → 播放器内部 source key（**可搜索 + 可解析**）。
  * 清单管腾讯叫 tx，我们从洛雪那一套沿用 qq；其余三家同名。
- * qs（汽水）/ bili / mg 不在表里 = 没有适配器，一律不显示。
+ * bili / mg 不在表里也不在下面那张表里 = 网关没有这条线路，一律不显示。
  */
 const ADAPTERS = { kw: 'kw', kg: 'kg', wy: 'wy', tx: 'qq', qq: 'qq' }
+
+/**
+ * 只能解析、不能搜索的线路（v3.3.80）。
+ *
+ * 汽水（qs）：网关只对它放行「按 id 换直链」，而青听网关**没有搜索端点**
+ * （试过 music/search、gateway/search、v2/music/search 等 12 条路径，全 404），
+ * 汽水官方 luna 接口又要登录态。所以它进不了搜索源列表 —— 放进去就是
+ * 「筛选里有一条，搜了永远零结果」。它的入口是「粘贴分享链接」。
+ */
+const RESOLVE_ONLY = { qs: 'qs' }
 
 /**
  * 线路优先级。**不照抄清单顺序**（清单是 kw/kg/wy/tx/...）：
@@ -32,12 +42,13 @@ const ADAPTERS = { kw: 'kw', kg: 'kg', wy: 'wy', tx: 'qq', qq: 'qq' }
  */
 const PRIORITY = ['kw', 'qq', 'kg', 'wy']
 
-/** 清单一次都没拉到过时的兜底：等价于本地 v1.0 配置里我们适配过的那 4 条线 */
+/** 清单一次都没拉到过时的兜底：等价于本地 v1.0 配置里我们适配过的那 4 条线 + 汽水 */
 const FALLBACK_LINES = [
   { id: 'kw', name: '小窝源', enabled: true, levels: ['standard', 'exhigh', 'lossless', 'atmos', 'atmos_plus', 'master'] },
   { id: 'kg', name: '小狗源', enabled: true, levels: ['standard', 'exhigh', 'lossless', 'hires', 'atmos', 'clear'] },
   { id: 'wy', name: '小云源', enabled: true, levels: ['standard', 'exhigh', 'lossless', 'hires', 'sky', 'jyeffect', 'jymaster'] },
-  { id: 'tx', name: '小Q源', enabled: true, levels: ['standard', 'exhigh', 'lossless', 'sur', 'jymaster'] }
+  { id: 'tx', name: '小Q源', enabled: true, levels: ['standard', 'exhigh', 'lossless', 'sur', 'jymaster'] },
+  { id: 'qs', name: '汽水源', enabled: true, levels: ['standard', 'exhigh', 'lossless', 'hires', 'atmos'] }
 ]
 
 /** 母带/臻品档：目标最高档，排第一梯队 */
@@ -114,23 +125,43 @@ function uniq(list) {
 }
 
 /**
+ * 个别线路的档位语义和通用分类不一致，按源覆盖顺序（v3.3.80）。
+ *
+ * 汽水：实测同一首 238 秒的歌 —— lossless 45.6MB(≈1530kbps) > hires 9.2MB(≈310kbps)
+ * > standard 1.9MB。它的 hires 不是「高于无损」，只是高码率有损；照通用规则
+ * 「hires 排在 lossless 前面」会先拿 9MB 的有损当无损。所以汽水固定 lossless 打头。
+ */
+const SOURCE_LEVEL_ORDER = {
+  qs: ['lossless', 'hires', 'atmos', 'exhigh', 'standard']
+}
+
+/**
  * 由清单的 levels 生成尝试链。母带优先、沉浸声兜底；有损档（exhigh/standard/…）永不进链
  * —— 这条链路对外一律承诺「无损」，混进 320k 就成了骗界面。
  *
  * prefer='master'  ：master → hires → lossless → 沉浸
  * prefer='lossless'：lossless → hires → master → 沉浸（能拿更好的就拿，但至少无损）
  * 其它 prefer 返回空数组（不走青听）。
+ *
+ * source 传了且命中 SOURCE_LEVEL_ORDER 时，按该源的固定顺序取「无损及以上」的档，
+ * 不再套通用分组（汽水的 hires/lossless 高低是反的）。
  */
-function buildLevelChain(levels, prefer) {
+function buildLevelChain(levels, prefer, source) {
   const list = Array.isArray(levels) ? levels.filter((l) => typeof l === 'string' && l) : []
   if (!list.length) return []
+  if (prefer !== 'master' && prefer !== 'lossless') return []
+  const fixed = SOURCE_LEVEL_ORDER[source]
+  if (fixed) {
+    // 只留「无损及以上」：有损档（exhigh/standard）不出现在这条链路里
+    const keep = new Set([...MASTER_LEVELS, ...HIRES_LEVELS, ...LOSSLESS_LEVELS, ...IMMERSIVE_LEVELS])
+    return fixed.filter((l) => list.includes(l) && keep.has(l))
+  }
   const master = list.filter((l) => MASTER_LEVELS.has(l))
   const hires = list.filter((l) => HIRES_LEVELS.has(l))
   const loss = list.filter((l) => LOSSLESS_LEVELS.has(l))
   const imm = sortImmersive(list.filter((l) => IMMERSIVE_LEVELS.has(l)))
   if (prefer === 'master') return uniq([...master, ...hires, ...loss, ...imm])
-  if (prefer === 'lossless') return uniq([...loss, ...hires, ...master, ...imm])
-  return []
+  return uniq([...loss, ...hires, ...master, ...imm])
 }
 
 /**
@@ -141,28 +172,40 @@ function buildLevelChain(levels, prefer) {
 function planManifest(raw) {
   const hasRaw = !!(raw && Array.isArray(raw.lines) && raw.lines.length)
   const src = hasRaw ? raw.lines : FALLBACK_LINES
-  const bySource = new Map()
+  const bySource = new Map()      // 可搜索源
+  const byResolve = new Map()     // 只解析源（汽水）
   for (const line of src) {
     if (!line || line.enabled === false) continue
+    const entry = { source: '', id: line.id, name: String(line.name || line.id), levels: (line.levels || []).slice() }
     const source = ADAPTERS[line.id]
-    if (!source) continue
-    if (bySource.has(source)) continue
-    bySource.set(source, { source, id: line.id, name: String(line.name || line.id), levels: (line.levels || []).slice() })
+    if (source) {
+      if (bySource.has(source)) continue
+      bySource.set(source, { ...entry, source })
+      continue
+    }
+    const ro = RESOLVE_ONLY[line.id]
+    if (ro && !byResolve.has(ro)) byResolve.set(ro, { ...entry, source: ro })
   }
   let order = PRIORITY.filter((s) => bySource.has(s))
   if (!order.length) {
+    // 上游全关 / 清单结构变了：退回兜底，绝不让播放器变成没音源
     for (const line of FALLBACK_LINES) {
-      if (bySource.has(ADAPTERS[line.id])) continue
-      bySource.set(ADAPTERS[line.id], { source: ADAPTERS[line.id], id: line.id, name: line.name, levels: line.levels.slice() })
+      const source = ADAPTERS[line.id]
+      if (!source || bySource.has(source)) continue
+      bySource.set(source, { source, id: line.id, name: line.name, levels: line.levels.slice() })
     }
     order = PRIORITY.filter((s) => bySource.has(s))
   }
+  const resolveOnly = Array.from(byResolve.values())
   const lines = order.map((s) => bySource.get(s))
   const levelsBySource = {}
   for (const line of lines) levelsBySource[line.source] = line.levels
+  // 只解析源也要有档位链，否则「粘贴链接播放」拿不到无损
+  for (const line of resolveOnly) levelsBySource[line.source] = line.levels
   return {
     order,
     lines,
+    resolveOnly,
     levelsBySource,
     version: hasRaw ? String(raw.version || '') : '',
     fromFallback: !hasRaw
@@ -172,9 +215,11 @@ function planManifest(raw) {
 module.exports = {
   MANIFEST_URLS,
   ADAPTERS,
+  RESOLVE_ONLY,
   PRIORITY,
   FALLBACK_LINES,
   IMMERSIVE_ORDER,
+  SOURCE_LEVEL_ORDER,
   stripHeader,
   parseManifest,
   buildLevelChain,

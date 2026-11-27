@@ -93,12 +93,14 @@ function reset() { F.state.clear() }
   ok('熔断按 source:level 隔离')
 }
 
-// ⑦ 清单里没有的 source 返回空链（不会瞎试）
+// ⑦ 清单里没有的 source 返回空链（不会瞎试）；汽水是只解析源，有链且 lossless 打头
 {
   reset()
-  assert.deepEqual(F.chain('qs', 'master'), [])
   assert.deepEqual(F.chain('bili', 'master'), [])
-  ok('无适配器/不在清单的线路不生成档位链')
+  assert.deepEqual(F.chain('mg', 'master'), [])
+  // v3.3.80：qs 只解析不搜索，但档位链必须有（lossless 优先，见 SOURCE_LEVEL_ORDER）
+  assert.deepEqual(F.chain('qs', 'master'), ['lossless', 'hires', 'atmos'])
+  ok('无适配器线路空链；汽水只有解析链且 lossless 打头')
 }
 
 console.log('\nqing-fuse: ' + passed + ' passed')

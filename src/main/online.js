@@ -84,7 +84,8 @@ const SOURCE_REFERER = {
   wy: 'https://music.163.com/',
   qq: 'https://y.qq.com/',
   kg: 'https://www.kugou.com/',
-  kw: 'https://www.kuwo.cn/'
+  kw: 'https://www.kuwo.cn/',
+  qs: 'https://music.douyin.com/'
 }
 function refererFor(source) {
   return SOURCE_REFERER[source] || SOURCE_REFERER.wy
@@ -781,7 +782,46 @@ function krcToEnhancedLrc(buf) {
 
 /* ---------------- 源注册表 ---------------- */
 
-const SOURCES = { kw, wy, qq, kg }
+/**
+ * 汽水（qs，v3.3.80）—— **只能按 id 解析，不能搜索**。
+ *
+ * 青听网关对汽水只提供 /music/resolve-url（没有搜索端点，12 条候选路径全 404），
+ * 汽水官方 luna 接口要登录态。所以它不进 activeOrder（搜索源列表里不会出现），
+ * 唯一入口是「粘贴分享链接」：见 resolveQishuiLink()。
+ *
+ * 另外服务端按客户端身份放行：桌面身份请求汽水会回 QISHUI_CLIENT_UNSUPPORTED，
+ * 安卓身份（qingmusic-android/1.4.1）才给直链 —— 见 qingAppFor()。
+ */
+const qs = {
+  id: 'qs',
+  name: '汽水音乐',
+  short: '汽水',
+  maxQuality: '仅分享链接',
+
+  // 网关没有汽水搜索；这里返回空数组而不是抛错，防止调用方把「没结果」当成源故障
+  async search() { return [] },
+
+  async getUrl(song, prefer = 'best', opts = {}) {
+    // 非无损偏好只想要个能出声的：standard 就够；lossless/master 走 qingLossless
+    const level = prefer === 'lossless' || prefer === 'master' ? 'lossless' : 'standard'
+    const got = await qingResolveOnce('qs', String(song.id), level, opts)
+    if (!got || !got.url) return null
+    return {
+      url: got.url,
+      // 汽水给的是 mp4 容器（audio/mp4），不是裸 flac；交给 mpv 按容器嗅探
+      ext: 'm4a',
+      bitrate: 0,
+      duration: song.duration || 0,
+      referer: refererFor('qs'),
+      headers: got.headers || null
+    }
+  },
+
+  // 汽水歌词是字节的 krc（带逐字），转 LRC 的收益不抵复杂度，先不接
+  async getLyric() { return null }
+}
+
+const SOURCES = { kw, wy, qq, kg, qs }
 /**
  * 顺序即优先级：搜索时按这个顺序交错合并，跨源兜底也按这个顺序试。
  *
@@ -1047,11 +1087,29 @@ const FLAC_PREFER = 'lossless'
  * 所以拿不到就当没有，直接走后面的降级链路，绝不影响能出声这件事。
  */
 const QING_BASES = ['https://musicserver.haitangw.cc/v1', 'https://qt.haitangw.net/v1']
-const QING_APP_ID = 'qingmusic-desktop'
 const QING_SECRET = 'qm-gw-7c1f4e9a2b8d5360e1a7c4f9b2d8036c'
-const QING_VER = '1.0.3'
+
+/**
+ * 客户端身份（v3.3.80）。**服务端是按 appId 决定「这台客户端支持哪些源」的**：
+ *
+ *   桌面 (`qingmusic-desktop` / 1.0.3) 请求汽水 → QISHUI_CLIENT_UNSUPPORTED「当前客户端版本不支持青听汽水播放」
+ *   安卓 (`qingmusic-android` / 1.4.1) 请求汽水 → code:0，standard/lossless/hires/master/atmos 全通
+ *
+ * 两边的 HMAC 密钥是同一个（从安卓版 APK 的 RN bundle 里捞出来的，与桌面版一致），
+ * 且实测**票据与 appId 不绑定**：安卓领的票配桌面的头照样能取网易，反之亦然。
+ * 所以只在「换汽水直链」这一处换身份，四家老源的请求一个字节都不变，回归面为零。
+ */
+const QING_APP = {
+  desktop: { id: 'qingmusic-desktop', ver: '1.0.3' },
+  android: { id: 'qingmusic-android', ver: '1.4.1' }
+}
 /** 我们的源 id → 它的源 id（它是 tx，我们沿用 tx 之外的叫法 qq） */
-const QING_SRC = { wy: 'wy', qq: 'tx', kg: 'kg', kw: 'kw' }
+const QING_SRC = { wy: 'wy', qq: 'tx', kg: 'kg', kw: 'kw', qs: 'qs' }
+
+/** 取某个源该用哪套客户端身份：只有汽水走安卓，其余保持桌面（老路径零改动） */
+function qingAppFor(source) {
+  return source === 'qs' ? QING_APP.android : QING_APP.desktop
+}
 
 /* ---------------- 音源清单（music.json）驱动 ---------------- */
 
@@ -1168,7 +1226,9 @@ function getManifestInfo() {
     url: manifestMeta.url,
     stale: !!manifestMeta.stale,
     order: activeOrder.slice(),
-    lines: manifestPlan.lines.map((l) => ({ id: l.id, source: l.source, name: l.name, levels: l.levels.slice() }))
+    lines: manifestPlan.lines.map((l) => ({ id: l.id, source: l.source, name: l.name, levels: l.levels.slice() })),
+    // 只解析源（汽水）：不进搜索列表，只能按分享链接取
+    resolveOnly: (manifestPlan.resolveOnly || []).map((l) => ({ id: l.id, source: l.source, name: l.name, levels: l.levels.slice() }))
   }
 }
 
@@ -1217,7 +1277,8 @@ function levelIsBad(source, level) {
  */
 function qingLevelChain(source, prefer) {
   const levels = (manifestPlan.levelsBySource && manifestPlan.levelsBySource[source]) || []
-  const chain = QM.buildLevelChain(levels, prefer)
+  // 第三参 source：汽水的档位高低与通用分类相反（lossless > hires），由清单模块按源覆盖
+  const chain = QM.buildLevelChain(levels, prefer, source)
   if (chain.length < 2) return chain
   const good = chain.filter((l) => !levelIsBad(source, l))
   const bad = chain.filter((l) => levelIsBad(source, l))
@@ -1233,16 +1294,18 @@ const qingDevice = crypto.randomBytes(8).toString('hex')
 
 function setQingEnabled(on) { qingOn = on !== false }
 
-function qingHeaders(method, url, body, ticket) {
+function qingHeaders(method, url, body, ticket, app) {
+  const id = (app && app.id) || QING_APP.desktop.id
+  const ver = (app && app.ver) || QING_APP.desktop.ver
   const ts = String(Date.now())
   const nonce = crypto.randomBytes(16).toString('hex')
   let path = '/'
   try { path = new URL(url).pathname || '/' } catch (err) { /* 保持 / */ }
-  const raw = [QING_APP_ID, ts, nonce, method.toUpperCase(), path,
+  const raw = [id, ts, nonce, method.toUpperCase(), path,
     crypto.createHash('sha256').update(body, 'utf8').digest('hex')].join('\n')
   const h = {
-    'X-Qing-App-Id': QING_APP_ID,
-    'X-Qing-App-Version': QING_VER,
+    'X-Qing-App-Id': id,
+    'X-Qing-App-Version': ver,
     'X-Qing-Device-Id': qingDevice,
     'X-Qing-Ts': ts,
     'X-Qing-Nonce': nonce,
@@ -1270,10 +1333,12 @@ async function qingEnsureTicket(opts = {}) {
         if (ctrl.signal.aborted) return ''
         try {
           const url = base + '/gateway/ticket'
-          const body = JSON.stringify({ deviceId: qingDevice, appVersion: QING_VER, platform: 'win32' })
+          // 票与 appId 不绑定（实测双向都通），统一用桌面身份领，汽水复用这一张
+          const app = QING_APP.desktop
+          const body = JSON.stringify({ deviceId: qingDevice, appVersion: app.ver, platform: 'win32' })
           const r = await req(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...qingHeaders('POST', url, body) },
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...qingHeaders('POST', url, body, '', app) },
             body,
             timeout: 8000,
             signal: ctrl.signal
@@ -1345,6 +1410,8 @@ async function qingResolveOnce(source, rid, level, opts = {}) {
   let ticket = await qingEnsureTicket(opts)
   if (!ticket || (signal && signal.aborted)) return null
   const body = JSON.stringify({ source, rid, level })
+  // 汽水用安卓身份（桌面身份会被服务端判「不支持汽水」），其余四家维持桌面身份
+  const app = qingAppFor(source)
   let ticketRetry = 0
   for (let i = 0; i < QING_BASES.length; i++) {
     if (signal && signal.aborted) return null
@@ -1357,7 +1424,7 @@ async function qingResolveOnce(source, rid, level, opts = {}) {
           'Content-Type': 'application/json',
           Accept: 'application/json',
           'X-Request-Id': 'qmpc-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
-          ...qingHeaders('POST', url, body, ticket)
+          ...qingHeaders('POST', url, body, ticket, app)
         },
         body,
         timeout: 8000,
@@ -1424,17 +1491,147 @@ async function qingLossless(song, prefer, opts = {}) {
     const hasFlacExt = /\.flac(\?|$)/i.test(got.url)
     if (!hasFlacExt && (probed.bitrate || 0) < 700) { noteLevelFail(song.source, level); continue }
     clearLevelFail(song.source, level)
+    // 汽水给的是 mp4 容器（audio/mp4，magic ftypisom），不是裸 flac；
+    // 标成 flac 会让下游按 flac 处理，这里按源给真实容器
+    const ext = song.source === 'qs' ? 'm4a' : 'flac'
     return {
       ...probed,
       duration,
       actual: song,
       lossless: true,
-      ext: 'flac',
+      ext: ext,
       level,
       from: 'qing'
     }
   }
   return null
+}
+
+/* ---------------- 汽水分享链接（v3.3.80） ---------------- */
+
+/**
+ * 汽水没有搜索接口，唯一入口是用户从汽水 App 复制来的分享链接：
+ *
+ *   https://qishui.douyin.com/s/xxxxxx/      → 302 到 music.douyin.com/qishui/share/track?track_id=...
+ *   https://music.douyin.com/qishui/share/track?track_id=7512772704484722704
+ *   7512772704484722704                       （19 位纯数字也认）
+ *
+ * 分享页的 SSR 数据（`_ROUTER_DATA`）里能免登录拿到歌名/歌手/时长/封面，
+ * 所以「显示成一首正常的歌」没问题。**但不要用页面里的 url 播放**：
+ * 未登录时它对会员曲目只给 60 秒片段（`offsetDuration=60` vs `duration=238`），
+ * 真正的完整版走青听网关的 resolve-url（同曲实测 45.6MB / 238 秒 ≈ 1530kbps）。
+ */
+const QS_ID_RE = /^\d{15,20}$/
+const QS_HOST_RE = /^https?:\/\/(?:[a-z0-9-]+\.)*(?:qishui\.douyin\.com|douyin\.com)\//i
+const QS_TRACK_ID_RE = /(?:track_id=|trackId=|\/track\/)(\d{15,20})/i
+
+/** 这串输入看起来是汽水链接/track_id 吗（是则不走关键词搜索） */
+function looksLikeQishuiLink(text) {
+  const s = String(text || '').trim()
+  if (!s) return false
+  if (QS_ID_RE.test(s)) return true
+  return QS_HOST_RE.test(s) && /qishui|\/track\/|track_id=/i.test(s)
+}
+
+/**
+ * 从分享页 HTML 里抠出 `_ROUTER_DATA` 的 JSON。
+ * 不能用「非贪婪到 </script>」的正则：JSON 里有一堆 `}`，截到第一个就把对象切断了。
+ * 这里按字符串感知的花括号配对扫，稳一点。
+ */
+function pickRouterData(html) {
+  const at = String(html || '').indexOf('_ROUTER_DATA')
+  if (at < 0) return null
+  const start = html.indexOf('{', at)
+  if (start < 0) return null
+  let depth = 0
+  let inStr = false
+  let esc = false
+  for (let i = start; i < html.length; i++) {
+    const c = html[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (c === '\\') esc = true
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') inStr = true
+    else if (c === '{') depth++
+    else if (c === '}') {
+      depth--
+      if (depth === 0) {
+        try { return JSON.parse(html.slice(start, i + 1)) } catch (err) { return null }
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * 汽水链接 → 可播放的 song 对象。识别不出/抓不到都返回 null，由调用方退回普通搜索。
+ * 返回 { song, preview, note }：preview 只作提示（会员曲目分享页是片段，播放仍取完整版）。
+ */
+async function resolveQishuiLink(input, opts = {}) {
+  const raw = String(input || '').trim()
+  if (!looksLikeQishuiLink(raw)) return null
+  let id = ''
+  let pageUrl = ''
+  if (QS_ID_RE.test(raw)) {
+    id = raw
+    pageUrl = 'https://music.douyin.com/qishui/share/track?track_id=' + id
+  } else {
+    const m = QS_TRACK_ID_RE.exec(raw)
+    if (m) {
+      id = m[1]
+      pageUrl = 'https://music.douyin.com/qishui/share/track?track_id=' + id
+    } else {
+      pageUrl = raw
+    }
+  }
+  let html = ''
+  let finalUrl = pageUrl
+  try {
+    const res = await req(pageUrl, { timeout: 12000, ...opts })
+    if (!res.ok) {
+      try { res.release && res.release() } catch (e) { /* 已释放 */ }
+      logger('[online] 汽水分享页 HTTP ' + res.status)
+      return null
+    }
+    finalUrl = res.url || pageUrl
+    html = await res.text()
+  } catch (err) {
+    logger('[online] 汽水分享页抓取失败：' + ((err && err.message) || err))
+    return null
+  }
+  // 短链 302 之后的落地页 URL 里才有 track_id
+  if (!id) {
+    const m = QS_TRACK_ID_RE.exec(finalUrl)
+    if (m) id = m[1]
+  }
+  if (!id) return null
+  const data = pickRouterData(html)
+  const page = data && data.loaderData && data.loaderData.track_page
+  const a = (page && page.audioWithLyricsOption) || null
+  if (!a) return null
+  const duration = Number(a.duration) || 0
+  const offset = Number(a.offsetDuration) || 0
+  const preview = offset > 0 && duration > 0 && offset < duration * 0.9
+  return {
+    song: {
+      source: 'qs',
+      id,
+      title: clean(a.trackName) || ('汽水 ' + id),
+      artist: clean(a.artistName) || '未知歌手',
+      album: '',
+      duration: Math.round(duration) || 0,
+      quality: '128k',
+      hasLossless: true,
+      cover: a.coverURL ? httpsify(String(a.coverURL)) : ''
+    },
+    preview,
+    note: preview
+      ? '会员曲目：分享页只给 ' + Math.round(offset) + ' 秒试听，播放会改走青听网关取完整版'
+      : ''
+  }
 }
 
 /**
@@ -2073,6 +2270,11 @@ module.exports = {
   initManifest,
   refreshManifest,
   getManifestInfo,
+  // v3.3.80：汽水分享链接 → 可播放曲目（汽水没有搜索，只能按链接/ID 取）
+  resolveQishuiLink,
+  looksLikeQishuiLink,
+  // 测试接缝：分享页 JSON 抠取（花括号配对），生产代码只经 resolveQishuiLink 调用
+  __linkTest: { pickRouterData },
   // 测试接缝：档位熔断（阈值/沉底/自愈），生产代码不消费
   __levelFuse: {
     noteLevelFail,

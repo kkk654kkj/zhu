@@ -161,4 +161,33 @@ const REAL = `/**
   ok('主/备/官方三份地址齐备')
 }
 
+// ⑭ 汽水（v3.3.80）：只解析、不进搜索列表
+{
+  const plan = QM.planManifest(QM.parseManifest(REAL))
+  assert.ok(!plan.order.includes('qs'), 'qs 不能进搜索源列表（网关没有汽水搜索）')
+  assert.equal(plan.resolveOnly.length, 1)
+  assert.equal(plan.resolveOnly[0].source, 'qs')
+  assert.ok(Array.isArray(plan.levelsBySource.qs) && plan.levelsBySource.qs.length, 'qs 必须有档位链，否则粘贴链接只能拿 128k')
+  ok('qs 进 resolveOnly、不进 order，且带档位')
+}
+
+// ⑮ 汽水档位语义与通用分类相反：lossless 必须排在 hires 前面
+{
+  const plan = QM.planManifest(QM.parseManifest(REAL))
+  // 实测同曲 238 秒：lossless 45.6MB(≈1530kbps) > hires 9.2MB(≈310kbps)
+  assert.deepEqual(QM.buildLevelChain(plan.levelsBySource.qs, 'master', 'qs'), ['lossless', 'hires', 'atmos'])
+  assert.deepEqual(QM.buildLevelChain(plan.levelsBySource.qs, 'lossless', 'qs'), ['lossless', 'hires', 'atmos'])
+  // 有损档（standard/exhigh）仍不得进链
+  assert.ok(!QM.buildLevelChain(plan.levelsBySource.qs, 'master', 'qs').includes('standard'))
+  ok('汽水链 lossless 打头，hires/atmos 兜底，有损档不进链')
+}
+
+// ⑯ 通用源不受汽水覆盖影响
+{
+  const plan = QM.planManifest(QM.parseManifest(REAL))
+  assert.deepEqual(QM.buildLevelChain(plan.levelsBySource.wy, 'master', 'wy'), ['jymaster', 'hires', 'lossless', 'sky', 'jyeffect'])
+  assert.deepEqual(QM.buildLevelChain(plan.levelsBySource.kw, 'master', 'kw'), ['master', 'lossless', 'atmos_plus', 'atmos'])
+  ok('四家老源的档位顺序未被汽水覆盖串改')
+}
+
 console.log('\nqing-manifest: ' + passed + ' passed')

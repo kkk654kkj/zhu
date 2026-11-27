@@ -394,6 +394,29 @@ const Online = {  list: [],            // 当前搜索结果（OnlineSong）
     const input = document.getElementById('opInput')
     const kw = (input.value || '').trim()
     if (!kw) { input.focus(); return }
+    // v3.3.80：粘的是汽水分享链接 / track_id 时，直接解析成一首歌来播，不当关键词去搜。
+    // 汽水没有搜索接口（青听网关只给它「按 id 换直链」），这是它唯一的入口。
+    // 只在「http 开头」或「15~20 位纯数字」时才多发这一趟 IPC，中文关键词零开销。
+    if (/^https?:\/\//i.test(kw) || /^\d{15,20}$/.test(kw)) {
+      const link = await window.api.onlineResolveLink(kw).catch(() => null)
+      if (link && link.song) {
+        this._searchReq++                    // 抢占正在进行的那轮搜索，旧回调作废
+        this._searchRound++
+        this.loading = false
+        const btnGo = document.getElementById('opGo')
+        if (btnGo) btnGo.disabled = false
+        this.keyword = link.song.title
+        this.page = 1
+        this.list = [link.song]
+        this.hasMore = false
+        this.render(0)
+        this.setStatus('已识别汽水链接：' + esc(link.song.artist) + ' · ' + esc(link.song.title), false)
+        if (link.note) toast(link.note, 3500)
+        await this.play(link.song)
+        return
+      }
+      // 不是汽水 / 解析失败：继续按普通关键词搜索（旧行为不变）
+    }
     // v3.3.63：以前是一把 loading 布尔锁 —— 搜索最长要十几秒（四家并发，单源超时 15s），
     // 期间「加载更多」和「换关键词回车」都被静默吞掉，界面上没有任何反馈，看着像卡死。
     // 现在：换关键词（reset）可以抢占旧的，旧结果回来时代次对不上就丢弃；
