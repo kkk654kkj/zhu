@@ -1373,6 +1373,59 @@ function main() {
         /Esc 可中断/.test(eq72))
     }
 
+    // ===== v3.3.79 音源清单（music.json）驱动线路与档位 =====
+    {
+      const on79 = read('src/main/online.js')
+      const qm79 = read('src/main/qing-manifest.js')
+      const mj79 = read('src/main/main.js')
+
+      // 清单模块：三份地址、剥注释、适配器表
+      ok('v3.3.79：清单模块三份地址齐备（space 主 / haitangw 备 / vip 官方）',
+        qm79.includes("'https://13413.kstore.space/QingMusic/music.json'") &&
+        qm79.includes("'https://musicapi.haitangw.net/music.json'") &&
+        qm79.includes("'https://13413.kstore.vip/QingMusic/music.json'"))
+      ok('v3.3.79：清单前置块注释必须剥掉再 JSON.parse',
+        /replace\(\/\^\\uFEFF\//.test(qm79) &&
+        /\/\^\\\/\\\*\[\\s\\S\]\*\?\\\*\\\//.test(qm79))
+      ok('v3.3.79：适配器表只有四家（qs/bili/mg 无适配器，不得显示）',
+        /const ADAPTERS = \{ kw: 'kw', kg: 'kg', wy: 'wy', tx: 'qq', qq: 'qq' \}/.test(qm79) &&
+        !/ADAPTERS[^\n]*['"](qs|bili|mg)['"]/.test(qm79))
+
+      // online.js：线路集合改成 activeOrder，遍历点不许再直接用 SOURCE_ORDER
+      ok('v3.3.79：线路遍历全部走 activeOrder（SOURCE_ORDER 只作优先级常量）',
+        /const QM = require\('\.\/qing-manifest'\)/.test(on79) &&
+        /let activeOrder = SOURCE_ORDER\.slice\(\)/.test(on79) &&
+        /activeOrder = plan\.order\.slice\(\)/.test(on79) &&
+        /return activeOrder\.map\(/.test(on79) &&
+        /sourceIds && sourceIds\.length \? sourceIds : activeOrder/.test(on79) &&
+        (on79.match(/for \(const id of activeOrder\)/g) || []).length >= 2 &&
+        /const others = activeOrder\.filter/.test(on79) &&
+        !/for \(const id of SOURCE_ORDER\)/.test(on79))
+      ok('v3.3.79：清单拉不到时退回内置兜底，绝不出现零音源',
+        /planManifest\(null\)/.test(on79) &&
+        /if \(!plan \|\| !plan\.order \|\| !plan\.order\.length\) return/.test(on79) &&
+        /manifestMeta = \{ \.\.\.manifestMeta, stale: true \}/.test(on79))
+
+      // 档位：硬编码 QING_LEVELS 已移除，改由清单生成，且母带优先 / 沉浸兜底
+      ok('v3.3.79：档位链由清单生成（硬编码 QING_LEVELS 已删除）',
+        !/const QING_LEVELS = \{/.test(on79) &&
+        /const levels = qingLevelChain\(song\.source, prefer\)/.test(on79) &&
+        /QM\.buildLevelChain\(levels, prefer\)/.test(on79) &&
+        /prefer === 'master'\) return uniq\(\[\.\.\.master, \.\.\.hires, \.\.\.loss, \.\.\.imm\]\)/.test(qm79) &&
+        /prefer === 'lossless'\) return uniq\(\[\.\.\.loss, \.\.\.hires, \.\.\.master, \.\.\.imm\]\)/.test(qm79))
+      ok('v3.3.79：有损档不进无损链 + 坏档熔断（阈值 3 / 只在 broken/partial 记分）',
+        /MASTER_LEVELS = new Set\(\['master', 'jymaster', 'clear'\]\)/.test(qm79) &&
+        /const LEVEL_BAD_AFTER = 3/.test(on79) &&
+        /if \(probed\.broken \|\| probed\.partial\) \{ noteLevelFail/.test(on79) &&
+        /if \(probed\.unverified\) continue/.test(on79))
+
+      // 启动挂载：磁盘缓存先恢复、再后台刷新（不阻塞开窗）
+      ok('v3.3.79：启动时挂载清单（缓存优先 + 后台刷新不阻塞开窗）',
+        /online\.initManifest\(path\.join\(userData, 'qing-manifest\.json'\)\)/.test(mj79) &&
+        /refreshManifest\(false\)\.catch\(\(\) => \{\}\)/.test(on79) &&
+        /ipcMain\.handle\('online:manifest'/.test(mj79))
+    }
+
   }
   console.log('\n' + (fail ? `${fail} 项失败 / ${pass} 项通过` : `全部通过（${pass} 项）`))
   process.exit(fail ? 1 : 0)

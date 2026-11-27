@@ -1859,6 +1859,8 @@ function registerLyricIpc() {
 function registerOnlineIpc() {
   // —— 联网版：在线音乐 ——
   ipcMain.handle('online:sources', () => online.listSources())
+  // v3.3.79：音源清单状态（版本/来源/生效线路/每线档位），诊断面板与设置页可用
+  ipcMain.handle('online:manifest', () => online.getManifestInfo())
   // v3.3.71（T02-03）：端口绑定失败（安全软件临时拦 / TIME_WAIT）属于可恢复故障。
   // 以前直接把空串交给渲染层，渲染层拿去拼出相对 /stream，<audio> 报
   // ERR_FILE_NOT_FOUND（错误链当 ENOENT），接着换源 → 再失败 → 连跳。
@@ -3089,6 +3091,8 @@ if (gotLock) cleanChromiumCache().catch(() => {})
     online.setLogger(logLine)
     online.setExtraKey(store.get().settings.onlineChkszKey || '')
     online.setQingEnabled(store.get().settings.onlineQingOn !== false)
+    // v3.3.79：音源清单（music.json）—— 先用磁盘缓存恢复线路，再后台刷新，不阻塞开窗
+    online.initManifest(path.join(userData, 'qing-manifest.json'))
     SP.startStreamServer()
     await library.init()
     registerIpc()

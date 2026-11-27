@@ -791,8 +791,16 @@ const SOURCES = { kw, wy, qq, kg }
  */
 const SOURCE_ORDER = ['kw', 'qq', 'kg', 'wy']
 
+/**
+ * 当前生效的线路顺序（v3.3.79）。
+ * 与 SOURCE_ORDER 的区别：SOURCE_ORDER 是**优先级**（写死的实测结论），
+ * activeOrder 是「优先级 ∩ 上游清单里启用且有适配器的线」——上游把某家关了，这里就没有它。
+ * 清单没拉到时 activeOrder === SOURCE_ORDER，行为与旧版完全一致。
+ */
+let activeOrder = SOURCE_ORDER.slice()
+
 function listSources() {
-  return SOURCE_ORDER.map((id) => ({
+  return activeOrder.map((id) => ({
     id,
     name: SOURCES[id].name,
     short: SOURCES[id].short,
@@ -863,7 +871,7 @@ async function searchOne(id, keyword, page, limit) {
 async function search(keyword, page = 1, limit = 30, sourceIds = null) {
   // 第四轮 §4.5.1 #3：源 id 去重 + 白名单夹取 —— 渲染层理论上传进来的数组完全不可信，
   // 之前重复 id 会并发发两次同样的请求，超长数组会一次性打出十几条连接。
-  const ids = Array.from(new Set((sourceIds && sourceIds.length ? sourceIds : SOURCE_ORDER)
+  const ids = Array.from(new Set((sourceIds && sourceIds.length ? sourceIds : activeOrder)
     .filter((id) => typeof id === 'string' && SOURCES[id]))).slice(0, SOURCE_ORDER.length)
   if (!ids.length) return []
   const results = await Promise.all(ids.map((id) => searchOne(id, keyword, page, limit)))
@@ -1044,10 +1052,176 @@ const QING_SECRET = 'qm-gw-7c1f4e9a2b8d5360e1a7c4f9b2d8036c'
 const QING_VER = '1.0.3'
 /** 我们的源 id → 它的源 id（它是 tx，我们沿用 tx 之外的叫法 qq） */
 const QING_SRC = { wy: 'wy', qq: 'tx', kg: 'kg', kw: 'kw' }
-/** 每档偏好的尝试顺序；拿不到就往下掉一级 */
-const QING_LEVELS = {
-  master: { wy: ['jymaster', 'hires', 'lossless'], qq: ['jymaster', 'hires', 'lossless'], kw: ['master', 'hires', 'lossless'], kg: ['hires', 'lossless'] },
-  lossless: { wy: ['lossless'], qq: ['lossless'], kw: ['lossless'], kg: ['lossless'] }
+
+/* ---------------- 音源清单（music.json）驱动 ---------------- */
+
+/**
+ * v3.3.79：线路集合与音质档位不再写死，改由上游那份 music.json 驱动。
+ *
+ * 上游会不打招呼地加线（v1.0 → v1.1 就多了汽水源 qs）或下线某家，
+ * 以前这些都冻在代码里，只能等发版。现在清单在启动时拉、6 小时刷新一次，
+ * 拉不到就用磁盘缓存，连缓存都没有再用内置兜底 —— 任何一步失败都只是「退回旧行为」，
+ * 不影响出声，也不会让播放器变成零音源。
+ *
+ * 清单只提供「有哪些线、每线支持哪些档」，不含接口地址：
+ * searchApi/detailApi 是青听客户端内部的函数名，不是 HTTP 端点。
+ * 能不能真解析取决于我们的适配器（ADAPTERS 里没有的 qs/bili/mg 直接不显示）。
+ */
+const fs = require('fs')
+const path = require('path')
+const QM = require('./qing-manifest')
+
+const MANIFEST_TTL = 6 * 3600 * 1000
+let manifestPath = ''
+let manifestPlan = QM.planManifest(null)
+let manifestMeta = { at: 0, url: '', version: '', stale: true }
+let manifestPending = null
+
+function applyManifestPlan(plan, meta) {
+  if (!plan || !plan.order || !plan.order.length) return
+  manifestPlan = plan
+  manifestMeta = { ...manifestMeta, ...(meta || {}) }
+  activeOrder = plan.order.slice()
+  logger('[online] 音源清单 ' + (manifestMeta.version ? 'v' + manifestMeta.version : '(无版本号)')
+    + ' 生效线路 ' + activeOrder.join('/') + (manifestMeta.stale ? '（缓存/兜底）' : ''))
+}
+
+function readManifestCache() {
+  if (!manifestPath) return null
+  try {
+    const j = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    if (!j || typeof j.text !== 'string' || !j.text) return null
+    return j
+  } catch (err) { return null }
+}
+
+function writeManifestCache(text, url, at) {
+  if (!manifestPath) return
+  try {
+    fs.mkdirSync(path.dirname(manifestPath), { recursive: true })
+    fs.writeFileSync(manifestPath, JSON.stringify({ text, url, at }), 'utf8')
+  } catch (err) { /* 缓存写不进去不影响播放，下次重新拉 */ }
+}
+
+/** 主 → 备 → 官方三份依次试；先校验再采用，解析不通过的源直接跳过 */
+async function fetchManifestText() {
+  for (const url of QM.MANIFEST_URLS) {
+    const text = await reqText(url, { timeout: 8000 })
+    if (!text) continue
+    try {
+      QM.parseManifest(text)
+      return { text, url }
+    } catch (err) {
+      logger('[online] 音源清单格式异常，换下一个源：' + safeUrlForLog(url) + ' ' + (err && err.message))
+    }
+  }
+  return null
+}
+
+async function refreshManifest(force) {
+  if (manifestPending) return manifestPending
+  if (!force && manifestMeta.at && Date.now() - manifestMeta.at < MANIFEST_TTL) return manifestPlan
+  manifestPending = (async () => {
+    const got = await fetchManifestText()
+    if (!got) {
+      // 拉不到：保留当前生效集合，只标脏，绝不把 activeOrder 清空
+      manifestMeta = { ...manifestMeta, stale: true }
+      logger('[online] 音源清单拉取失败，沿用' + (manifestMeta.at ? '缓存' : '内置兜底'))
+      return manifestPlan
+    }
+    let parsed = null
+    try { parsed = QM.parseManifest(got.text) } catch (err) { return manifestPlan }
+    const plan = QM.planManifest(parsed)
+    writeManifestCache(got.text, got.url, Date.now())
+    applyManifestPlan(plan, { at: Date.now(), url: got.url, version: parsed.version, stale: false })
+    return manifestPlan
+  })().finally(() => { manifestPending = null })
+  return manifestPending
+}
+
+/**
+ * 启动时调一次：先用磁盘缓存把线路恢复出来（同步、极快），再后台刷新。
+ * 绝不 await 网络 —— 清单慢一秒都不能拖慢开窗。
+ */
+function initManifest(cachePath) {
+  manifestPath = cachePath || ''
+  const cached = readManifestCache()
+  if (cached) {
+    try {
+      const parsed = QM.parseManifest(cached.text)
+      applyManifestPlan(QM.planManifest(parsed), {
+        at: Number(cached.at) || 0,
+        url: String(cached.url || ''),
+        version: parsed.version,
+        stale: true
+      })
+    } catch (err) { /* 缓存坏了当没有，用兜底 */ }
+  }
+  refreshManifest(false).catch(() => {})
+}
+
+/** 诊断/设置页用：当前清单来源、生效线路、每线档位 */
+function getManifestInfo() {
+  return {
+    version: manifestMeta.version,
+    at: manifestMeta.at,
+    url: manifestMeta.url,
+    stale: !!manifestMeta.stale,
+    order: activeOrder.slice(),
+    lines: manifestPlan.lines.map((l) => ({ id: l.id, source: l.source, name: l.name, levels: l.levels.slice() }))
+  }
+}
+
+/* ---------------- 档位熔断 ---------------- */
+
+/**
+ * 网关会把「已下线的档」也报成 code:0 并给一个能用的 URL —— 实测 kw 的 master 档
+ * 直链返回 HTTP 400（57 字节 JSON）。这种档位本身坏了，不是票或网络问题，
+ * 反复试只是白等一轮超时。
+ *
+ * 规则：同一 source:level 连续失败 LEVEL_BAD_AFTER 次 → LEVEL_BAD_TTL 内沉到链尾
+ * （不删除：链尾仍会被试到，上游修好也能自愈）。
+ *
+ * 阈值取 3 而不是 2：实测 kw 的 master 档时好时坏（同一首连取三次，两次 4603kbps 成功、
+ * 一次 HTTP 400），2 次就把好档沉底 30 分钟太激进；3 次连续失败才认定档位有问题，
+ * 且只是「顺序靠后」而不是禁用，误判的代价可以接受。
+ */
+const levelFails = new Map()
+const LEVEL_BAD_AFTER = 3
+const LEVEL_BAD_TTL = 10 * 60 * 1000
+
+function levelKey(source, level) { return source + ':' + level }
+
+function noteLevelFail(source, level) {
+  const k = levelKey(source, level)
+  const rec = levelFails.get(k) || { n: 0, at: 0 }
+  rec.n += 1
+  rec.at = Date.now()
+  levelFails.set(k, rec)
+  if (rec.n === LEVEL_BAD_AFTER) logger('[online] 音质档连续失败已沉底：' + k + '（10 分钟后重试）')
+}
+
+function clearLevelFail(source, level) { levelFails.delete(levelKey(source, level)) }
+
+function levelIsBad(source, level) {
+  const k = levelKey(source, level)
+  const rec = levelFails.get(k)
+  if (!rec) return false
+  if (Date.now() - rec.at > LEVEL_BAD_TTL) { levelFails.delete(k); return false }
+  return rec.n >= LEVEL_BAD_AFTER
+}
+
+/**
+ * 取某条线路在当前偏好下的档位尝试链：
+ * 母带优先 → hires → lossless → 沉浸声兜底（清单模块负责排序），再把熔断的档沉到末尾。
+ */
+function qingLevelChain(source, prefer) {
+  const levels = (manifestPlan.levelsBySource && manifestPlan.levelsBySource[source]) || []
+  const chain = QM.buildLevelChain(levels, prefer)
+  if (chain.length < 2) return chain
+  const good = chain.filter((l) => !levelIsBad(source, l))
+  const bad = chain.filter((l) => levelIsBad(source, l))
+  return good.concat(bad)
 }
 
 let qingOn = true
@@ -1222,27 +1396,34 @@ async function qingLossless(song, prefer, opts = {}) {
   const signal = opts.signal
   const source = QING_SRC[song.source]
   if (!source || !song.id) return null
-  const levels = (QING_LEVELS[prefer] || QING_LEVELS.lossless)[song.source] || []
+  // v3.3.79：档位链改由清单 + 偏好生成（母带 → hires → lossless → 沉浸声兜底），
+  // 有损档（exhigh/standard）永远不会出现在链里。连续失败的档已被沉到末尾。
+  const levels = qingLevelChain(song.source, prefer)
   const duration = song.duration || 0
   for (const level of levels) {
     if (signal && signal.aborted) return null
     const got = await qingResolveOnce(source, String(song.id), level, opts)
+    // 拿不到 URL 多半是票过期/网络，不是这一档坏了 —— 不记熔断
     if (!got || !got.url) continue
     // v3.3.17：签名直链常常没有扩展名（/resolve/xxx?sign=...），以前一律 continue，
     // 真无损被当成「不是 flac」丢掉，整条青听链路白跑。现在只排除明确的有损后缀，
     // 其余交给 probeStream 按码率确认（下面 hasFlacExt 的判定）。
-    if (/\.(mp3|m4a|aac|ogg|wav)(\?|$)/i.test(got.url)) continue
+    if (/\.(mp3|m4a|aac|ogg|wav)(\?|$)/i.test(got.url)) { noteLevelFail(song.source, level); continue }
     const probed = await probeStream(
       { url: got.url, ext: 'flac', bitrate: 0, duration, referer: refererFor(song.source), headers: got.headers },
       duration,
       duration,
       opts
     )
-    if (probed.broken || probed.partial || probed.unverified) continue
+    // broken/partial 是这一档真的坏了（如 kw 的 master 档直链 HTTP 400）→ 记熔断
+    // unverified 只是没探到证据，可能网络抖动，不惩罚
+    if (probed.broken || probed.partial) { noteLevelFail(song.source, level); continue }
+    if (probed.unverified) continue
     // 没有 .flac 后缀的地址必须用码率兜底确认：无损一般 >700k，
     // 达不到就说明网关给的是有损档，不能标成 lossless 骗界面
     const hasFlacExt = /\.flac(\?|$)/i.test(got.url)
-    if (!hasFlacExt && (probed.bitrate || 0) < 700) continue
+    if (!hasFlacExt && (probed.bitrate || 0) < 700) { noteLevelFail(song.source, level); continue }
+    clearLevelFail(song.source, level)
     return {
       ...probed,
       duration,
@@ -1567,7 +1748,7 @@ async function maybeUpgrade(res, song, prefer, opts = {}) {
   // 以前只在 for 头部判一次，循环体内 search(15s) + 2×(getUrl 15s + probe 16s)
   // 单源最坏能跑到 77 秒 —— 注释承诺的「上限 6 秒」完全没兑现。
   const left = () => 6000 - (Date.now() - t0)
-  for (const id of SOURCE_ORDER) {
+  for (const id of activeOrder) {
     if (opts.signal && opts.signal.aborted) break
     if (id === res.song.source || !SOURCES[id]) continue
     if (left() <= 0) break
@@ -1692,7 +1873,7 @@ async function resolvePlayable(song, prefer = 'best', { allowFallback = true, si
 
   // ② 跨源兜底：按「歌名 + 歌手」到其他源找同名曲，时长差 5 秒以内优先。
   //    每个源要试多个候选——同一个源里同名歌常有好几条（原版/重制/翻唱）。
-  const others = SOURCE_ORDER.filter((id) => id !== song.source && SOURCES[id])
+  const others = activeOrder.filter((id) => id !== song.source && SOURCES[id])
   for (const id of others) {
     if (expired()) break
     try {
@@ -1823,7 +2004,7 @@ async function getLyric(song, opts = {}) {
   // 歌词 IPC 全程挂着，界面像死了一样
   // v3.3.10：每个 await 都受 deadline 约束（deadline 与 withDeadline 定义在函数开头）
   if (!lrc) {
-    for (const id of SOURCE_ORDER) {
+    for (const id of activeOrder) {
       if (leftMs() <= 0) break
       if (id === song.source || !SOURCES[id]) continue
       try {
@@ -1888,6 +2069,20 @@ module.exports = {
   setQingEnabled,
   qingSelfTest,
   listSources,
+  // v3.3.79：音源清单（music.json）驱动
+  initManifest,
+  refreshManifest,
+  getManifestInfo,
+  // 测试接缝：档位熔断（阈值/沉底/自愈），生产代码不消费
+  __levelFuse: {
+    noteLevelFail,
+    clearLevelFail,
+    levelIsBad,
+    chain: qingLevelChain,
+    state: levelFails,
+    after: LEVEL_BAD_AFTER,
+    ttl: LEVEL_BAD_TTL
+  },
   search,
   getPlayable,
   invalidateUrl,

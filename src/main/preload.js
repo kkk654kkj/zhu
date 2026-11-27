@@ -72,6 +72,8 @@ contextBridge.exposeInMainWorld('api', {
 
   /* ---- 联网版（v3.0）：在线音乐 ---- */
   onlineSources: () => invoke('online:sources'),
+  /** v3.3.79：音源清单状态（版本/来源/生效线路/每线档位） */
+  onlineManifest: () => invoke('online:manifest'),
   /** v3.3.64：在线曲目元数据（收藏/歌单里的在线曲靠它重播） */
   onlineTracksGet: () => invoke('online:tracksGet'),
   onlineTracksRemember: (metas) => invoke('online:tracksRemember', metas),
